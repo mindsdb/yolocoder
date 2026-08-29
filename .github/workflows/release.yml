@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64, asset: Darwin_arm64 }
+          - { goos: darwin, goarch: amd64, asset: Darwin_x86_64 }
+          - { goos: linux, goarch: arm64, asset: Linux_arm64 }
+          - { goos: linux, goarch: amd64, asset: Linux_x86_64 }
+          - { goos: windows, goarch: arm64, asset: Windows_arm64 }
+          - { goos: windows, goarch: amd64, asset: Windows_x86_64 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          binary=yolocoder
+          if [ "$GOOS" = windows ]; then binary=yolocoder.exe; fi
+          version="${{ github.ref_name }}"
+          if [ "${{ github.ref_type }}" != tag ]; then version=main; fi
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/mindsdb/yolocoder/internal/version.Version=$version -X github.com/mindsdb/yolocoder/internal/version.Commit=${{ github.sha }}" \
+            -o "dist/$binary" ./cmd/yolocoder
+      - name: Package
+        run: |
+          cd dist
+          if [ "${{ matrix.goos }}" = windows ]; then
+            zip "yolocoder_${{ matrix.asset }}.zip" yolocoder.exe
+            rm yolocoder.exe
+          else
+            tar -czf "yolocoder_${{ matrix.asset }}.tar.gz" yolocoder
+            rm yolocoder
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yolocoder_${{ matrix.asset }}
+          path: dist/*
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate metadata
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          echo "${{ github.sha }}" > commit.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'Latest (main)' }}
+          body: ${{ github.ref_type == 'tag' && '' || format('Continuous build from main at {0}.', github.sha) }}
+          generate_release_notes: ${{ github.ref_type == 'tag' }}
+          files: dist/*

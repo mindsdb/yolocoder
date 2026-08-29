@@ -19,6 +19,7 @@ Usage:
   yolocoder config show           show the saved provider
   yolocoder config connect        replace the saved provider
   yolocoder config reset          remove the saved provider
+  yolocoder update                immediately check and install an update
   yolocoder version               show the version
 
 Environment provider:

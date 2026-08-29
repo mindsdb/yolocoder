@@ -59,6 +59,19 @@ func TestShortCommit(t *testing.T) {
 	}
 }
 
+func TestCheckNowRejectsDevelopmentBuild(t *testing.T) {
+	if _, _, err := CheckNow("", func(string) {}); err == nil {
+		t.Fatal("expected development build update to fail")
+	}
+}
+
+func TestCheckNowHonorsDisableEnvironment(t *testing.T) {
+	t.Setenv(disableEnv, "1")
+	if _, _, err := CheckNow("current", func(string) {}); err == nil {
+		t.Fatal("expected disabled update to fail")
+	}
+}
+
 func TestApplyVerifiesAndReplacesBinary(t *testing.T) {
 	asset, err := Asset(runtime.GOOS, runtime.GOARCH)
 	if err != nil {

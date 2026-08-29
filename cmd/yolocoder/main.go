@@ -5,12 +5,36 @@ import (
 	"os"
 
 	"github.com/mindsdb/yolocoder/internal/app"
+	"github.com/mindsdb/yolocoder/internal/ui"
 	"github.com/mindsdb/yolocoder/internal/update"
 	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 func main() {
 	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "update" {
+		var latest string
+		var updated bool
+		var err error
+		ui.WithRobot(os.Stdout, "Checking for updates...", func(status ui.RobotStatus) {
+			latest, updated, err = update.CheckNow(version.Commit, status)
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if updated {
+			fmt.Printf("YoloCoder updated to %s. Run it again to use the new version.\n", latest)
+		} else {
+			fmt.Printf("YoloCoder is current at %s.\n", version.Display())
+		}
+		return
+	}
+
+	ui.WithRobot(os.Stdout, "Starting YoloCoder...", func(status ui.RobotStatus) {
+		update.CheckOnLaunch(version.Commit, status)
+	})
+
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "--version", "-v":
@@ -21,8 +45,6 @@ func main() {
 			return
 		}
 	}
-
-	update.CheckOnLaunch(version.Commit)
 
 	if len(args) > 0 {
 		switch args[0] {

@@ -59,5 +59,11 @@ Set `YOLOCODER_NO_AUTOUPDATE=1` to disable this behavior. Normal startup also
 prints the embedded version and short commit, for example `YoloCoder main
 (68542b0)`.
 
+Run `yolocoder update` to force an immediate check and bypass any saved check
+interval from an older installation.
+
+Interactive startup uses a small `[*_*]` robot animation while YoloCoder checks
+for and installs updates. Non-interactive output remains animation-free.
+
 Version tags matching `v*` create permanent GitHub releases. Every push to
 `main` refreshes the rolling `latest` release used by the self-updater.

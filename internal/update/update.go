@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/mindsdb/yolocoder/internal/ui"
 )
 
 const (
@@ -32,50 +34,69 @@ type Checker struct {
 	BaseURL string
 }
 
-func CheckOnLaunch(currentCommit string) {
+func CheckOnLaunch(currentCommit string, status ui.RobotStatus) {
+	_, _, err := check(currentCommit, false, status)
+	if err != nil {
+		debugf("%v", err)
+	}
+}
+
+func CheckNow(currentCommit string, status ui.RobotStatus) (string, bool, error) {
+	if currentCommit == "" {
+		return "", false, fmt.Errorf("self-update is unavailable in a development build")
+	}
+	if os.Getenv(disableEnv) != "" {
+		return "", false, fmt.Errorf("self-update is disabled by %s", disableEnv)
+	}
+	latest, updated, err := check(currentCommit, true, status)
+	return shortCommit(latest), updated, err
+}
+
+func check(currentCommit string, force bool, status ui.RobotStatus) (string, bool, error) {
 	if currentCommit == "" || os.Getenv(disableEnv) != "" {
-		return
+		return "", false, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		debugf("find home directory: %v", err)
-		return
+		return "", false, fmt.Errorf("find home directory: %w", err)
 	}
 	dir := filepath.Join(home, ".config", "yolocoder")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		debugf("create config directory: %v", err)
-		return
+		return "", false, fmt.Errorf("create config directory: %w", err)
 	}
 	checker := &Checker{Dir: dir}
 	now := time.Now()
-	if !checker.Due(now) {
-		return
+	if !force && !checker.Due(now) {
+		return "", false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	status("Checking for updates...")
 	latest, err := checker.LatestCommit(ctx)
 	cancel()
 	_ = checker.MarkChecked(now)
 	if err != nil {
-		debugf("check for update: %v", err)
-		return
+		return "", false, fmt.Errorf("check for update: %w", err)
 	}
 	if latest == currentCommit {
-		return
+		return latest, false, nil
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		debugf("locate executable: %v", err)
-		return
+		return latest, false, fmt.Errorf("locate executable: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "Updating YoloCoder...")
+	status("Updating YoloCoder...")
 	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := checker.Apply(ctx, executable); err != nil {
-		debugf("apply update: %v", err)
-		fmt.Fprintln(os.Stderr, "YoloCoder update failed; continuing with the current version.")
-		return
+		if !force {
+			status("Update failed; starting current version...")
+		}
+		return latest, false, fmt.Errorf("apply update: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "YoloCoder updated to %s. The new version will run next time.\n", shortCommit(latest))
+	if !force {
+		status("Updated; starting YoloCoder...")
+	}
+	return latest, true, nil
 }
 
 func (checker *Checker) Due(now time.Time) bool {

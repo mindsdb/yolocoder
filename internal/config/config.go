@@ -122,7 +122,11 @@ func FromEnvironment(getenv func(string) string) (LLM, error) {
 	if apiKey == "" {
 		return LLM{}, fmt.Errorf("OPENAI_API_KEY is required with --llm-from-env-vars")
 	}
-	return LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: strings.TrimSpace(getenv("OPENAI_MODEL"))}, nil
+	model := strings.TrimSpace(getenv("OPENAI_MODEL"))
+	if model == "" {
+		return LLM{}, fmt.Errorf("OPENAI_MODEL is required with --llm-from-env-vars")
+	}
+	return LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: model}, nil
 }
 
 func ValidateBaseURL(raw string) (string, error) {

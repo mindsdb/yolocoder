@@ -2,8 +2,8 @@
 
 A minimal boilerplate for the YoloCoder CLI.
 
-```text
-Welcome to YoloCode CLI
+```sh
+yolocoder "Add expiration support to user sessions"
 ```
 
 ## Install
@@ -45,12 +45,28 @@ For a one-off environment-based connection that is not persisted:
 ```sh
 OPENAI_BASE_URL=https://api.example.com/v1 \
 OPENAI_API_KEY=sk-example \
-OPENAI_MODEL=optional-model \
-yolocoder --llm-from-env-vars
+OPENAI_MODEL=gpt-5.2-codex \
+yolocoder --llm-from-env-vars "Add expiration support to user sessions"
 ```
 
 Use `yolocoder config show`, `yolocoder config connect`, or
 `yolocoder config reset` to manage the saved provider.
+
+## How it works
+
+YoloCoder keeps the loop deliberately small:
+
+1. Builds a compact, `.gitignore`-aware repository map.
+2. Lets the model read likely files or search only when needed.
+3. Requests a strict JSON implementation plan.
+4. Requests a strict JSON response containing a unified diff.
+5. Checks and applies the diff with `git apply`.
+6. Runs the repository's detected test command.
+7. Retries at most twice using only patch or test failure evidence.
+
+The model never receives a shell tool. Local code exposes only bounded
+`read_files` and `search` tools during context gathering. Patch application
+and testing are deterministic local operations.
 
 Release builds check the rolling `latest` GitHub release whenever the CLI
 starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum

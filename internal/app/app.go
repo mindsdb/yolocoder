@@ -14,8 +14,10 @@ import (
 const Help = `YoloCoder
 
 Usage:
-  yolocoder                       connect an LLM provider, then start
-  yolocoder --llm-from-env-vars   use OPENAI_* environment variables
+  yolocoder <task>                make and test a coding change
+  yolocoder                       prompt for a task
+  yolocoder --llm-from-env-vars <task>
+                                  use OPENAI_* environment variables
   yolocoder config show           show the saved provider
   yolocoder config connect        replace the saved provider
   yolocoder config reset          remove the saved provider
@@ -27,6 +29,10 @@ Environment provider:
   OPENAI_API_KEY                  endpoint API key
   OPENAI_MODEL                    optional model name
 `
+
+func terminalInput() bool {
+	return terminal.IsTTY(os.Stdin)
+}
 
 func EnsureLLM() error {
 	_, configured, err := config.Load()
@@ -150,12 +156,16 @@ func connectOther(output *os.File, reader *terminal.Reader) (config.LLM, error) 
 	if err != nil {
 		return config.LLM{}, err
 	}
-	fmt.Fprint(output, "Default model (optional)\n> ")
+	fmt.Fprint(output, "Model\n> ")
 	model, err := reader.ReadLine()
 	if err != nil {
 		return config.LLM{}, fmt.Errorf("read model: %w", err)
 	}
-	provider := config.LLM{Provider: "openai-compatible", BaseURL: baseURL, APIKey: apiKey, Model: strings.TrimSpace(model)}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return config.LLM{}, fmt.Errorf("model is required")
+	}
+	provider := config.LLM{Provider: "openai-compatible", BaseURL: baseURL, APIKey: apiKey, Model: model}
 	return saveProvider(output, provider)
 }
 

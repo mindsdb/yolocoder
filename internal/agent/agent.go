@@ -1,0 +1,250 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mindsdb/yolocoder/internal/repo"
+)
+
+const maxToolRounds = 8
+
+type Plan struct {
+	Summary       string   `json:"summary"`
+	FilesToModify []string `json:"files_to_modify"`
+	ContextFiles  []string `json:"context_files"`
+	Steps         []string `json:"steps"`
+}
+
+type Patch struct {
+	Summary string `json:"summary"`
+	Diff    string `json:"diff"`
+}
+
+type toolArguments struct {
+	Paths []string `json:"paths"`
+	Query string   `json:"query"`
+}
+
+type Runner struct {
+	client     *Client
+	repository *repo.Repository
+}
+
+func NewRunner(client *Client, repository *repo.Repository) *Runner {
+	return &Runner{client: client, repository: repository}
+}
+
+func (runner *Runner) Run(ctx context.Context, task string, progress func(string)) error {
+	repoMap, err := runner.repository.Map()
+	if err != nil {
+		return err
+	}
+	progress("Finding the right code...")
+	plan, contextText, err := runner.plan(ctx, task, repoMap)
+	if err != nil {
+		return err
+	}
+	plannedContext, err := runner.readPlanFiles(plan)
+	if err != nil {
+		return err
+	}
+	contextText += "\nPLANNED FILES:\n" + plannedContext
+	progress("Making the change...")
+	patch, err := runner.patch(ctx, task, repoMap, plan, contextText, "")
+	if err != nil {
+		return err
+	}
+
+	var evidence string
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			progress("Repairing from new evidence...")
+			contextText, err = runner.readPlanFiles(plan)
+			if err != nil {
+				return err
+			}
+			patch, err = runner.patch(ctx, task, repoMap, plan, contextText, evidence)
+			if err != nil {
+				return err
+			}
+		}
+		progress("Applying the patch...")
+		if err := runner.repository.Apply(patch.Diff); err != nil {
+			evidence = "The patch did not apply:\n" + err.Error()
+			continue
+		}
+		progress("Testing the change...")
+		testResult := RunTests(ctx, runner.repository.Root)
+		if testResult.Passed {
+			progress("Done.")
+			return nil
+		}
+		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
+	}
+	return fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+}
+
+func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, string, error) {
+	request := responseRequest{
+		Instructions: planningInstructions,
+		Input:        fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap),
+		Tools:        repositoryTools(),
+		ToolChoice:   "auto",
+		Text:         strictSchema("implementation_plan", planSchema()),
+	}
+	var collected strings.Builder
+	for round := 0; round < maxToolRounds; round++ {
+		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		response, err := runner.client.create(callCtx, request)
+		cancel()
+		if err != nil {
+			return Plan{}, "", err
+		}
+		calls := response.calls()
+		if len(calls) == 0 {
+			text, err := response.text()
+			if err != nil {
+				return Plan{}, "", err
+			}
+			var plan Plan
+			if err := json.Unmarshal([]byte(text), &plan); err != nil {
+				return Plan{}, "", fmt.Errorf("decode implementation plan: %w", err)
+			}
+			return plan, collected.String(), nil
+		}
+		outputs := make([]toolOutput, 0, len(calls))
+		for _, call := range calls {
+			output := runner.runTool(ctx, call)
+			fmt.Fprintf(&collected, "\nTOOL %s:\n%s\n", call.Name, output)
+			outputs = append(outputs, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
+		}
+		request = responseRequest{
+			Instructions:       planningInstructions,
+			PreviousResponseID: response.ID,
+			Input:              outputs,
+			Tools:              repositoryTools(),
+			ToolChoice:         "auto",
+			Text:               strictSchema("implementation_plan", planSchema()),
+		}
+	}
+	return Plan{}, "", fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
+}
+
+func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan, contextText, evidence string) (Patch, error) {
+	planJSON, _ := json.Marshal(plan)
+	input := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s\n\nPLAN:\n%s\n\nRELEVANT FILE CONTENTS:\n%s", task, repoMap, planJSON, contextText)
+	if evidence != "" {
+		input += "\n\nNEW EVIDENCE FROM REALITY:\n" + evidence
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	response, err := runner.client.create(callCtx, responseRequest{
+		Instructions: patchInstructions,
+		Input:        input,
+		Text:         strictSchema("unified_patch", patchSchema()),
+	})
+	if err != nil {
+		return Patch{}, err
+	}
+	text, err := response.text()
+	if err != nil {
+		return Patch{}, err
+	}
+	var patch Patch
+	if err := json.Unmarshal([]byte(text), &patch); err != nil {
+		return Patch{}, fmt.Errorf("decode patch: %w", err)
+	}
+	if strings.TrimSpace(patch.Diff) == "" {
+		return Patch{}, fmt.Errorf("model returned an empty patch")
+	}
+	return patch, nil
+}
+
+func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
+	var arguments toolArguments
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
+		return "ERROR: invalid tool arguments: " + err.Error()
+	}
+	switch call.Name {
+	case "read_files":
+		output, err := runner.repository.Read(arguments.Paths)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return output
+	case "search":
+		output, err := runner.repository.Search(ctx, arguments.Query)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		return output
+	default:
+		return "ERROR: unknown tool " + call.Name
+	}
+}
+
+func (runner *Runner) readPlanFiles(plan Plan) (string, error) {
+	paths := append([]string{}, plan.FilesToModify...)
+	paths = append(paths, plan.ContextFiles...)
+	seen := map[string]bool{}
+	unique := paths[:0]
+	for _, path := range paths {
+		if path != "" && !seen[path] && runner.repository.Exists(path) {
+			seen[path] = true
+			unique = append(unique, path)
+		}
+	}
+	if len(unique) == 0 {
+		if len(paths) == 0 {
+			return "", fmt.Errorf("plan selected no files")
+		}
+		return "No planned files exist yet; the plan creates new files.", nil
+	}
+	return runner.repository.Read(unique)
+}
+
+func repositoryTools() []functionTool {
+	return []functionTool{
+		{Type: "function", Name: "read_files", Description: "Read one or more repository files after choosing them from the map.", Strict: true, Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 12}}, "required": []string{"paths"}, "additionalProperties": false,
+		}},
+		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
+		}},
+	}
+}
+
+func planSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"summary":         map[string]any{"type": "string"},
+		"files_to_modify": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"context_files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"steps":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+	}, []string{"summary", "files_to_modify", "context_files", "steps"})
+}
+
+func patchSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"summary": map[string]any{"type": "string"},
+		"diff":    map[string]any{"type": "string"},
+	}, []string{"summary", "diff"})
+}
+
+func objectSchema(properties map[string]any, required []string) map[string]any {
+	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+}
+
+const planningInstructions = `You are the context and planning phase of a small coding agent.
+Start from the repository map. Use read_files for likely files. Use search only when needed.
+Get enough context to make the requested change safely, but avoid wandering.
+Return a concrete plan. Distinguish files to modify from files needed only as context.`
+
+const patchInstructions = `You are the patch phase of a small coding agent.
+Use only the supplied task, map, plan, relevant file contents, and any new test/apply evidence.
+Return one git-compatible unified diff in the diff field. Do not use markdown fences.
+Make the smallest complete change. Include tests when the repository already has tests.
+If repairing a test failure, produce an incremental diff against the current repository state.`

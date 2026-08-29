@@ -58,6 +58,13 @@ func TestFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestFromEnvironmentRequiresModel(t *testing.T) {
+	values := map[string]string{"OPENAI_BASE_URL": "https://api.example/v1", "OPENAI_API_KEY": "key"}
+	if _, err := FromEnvironment(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("expected a missing model to fail")
+	}
+}
+
 func TestFromEnvironmentRequiresOpenAIValues(t *testing.T) {
 	if _, err := FromEnvironment(func(string) string { return "" }); err == nil {
 		t.Fatal("expected missing environment variables to fail")

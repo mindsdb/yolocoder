@@ -52,10 +52,12 @@ yolocoder --llm-from-env-vars
 Use `yolocoder config show`, `yolocoder config connect`, or
 `yolocoder config reset` to manage the saved provider.
 
-Release builds check the rolling `latest` GitHub release once per day when
-the CLI starts. If a newer build is available, YoloCoder verifies its SHA-256
-checksum and replaces the current binary. Set `YOLOCODER_NO_AUTOUPDATE=1` to
-disable this behavior.
+Release builds check the rolling `latest` GitHub release whenever the CLI
+starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum
+and replaces the current binary. The new build runs on the next invocation.
+Set `YOLOCODER_NO_AUTOUPDATE=1` to disable this behavior. Normal startup also
+prints the embedded version and short commit, for example `YoloCoder main
+(68542b0)`.
 
 Version tags matching `v*` create permanent GitHub releases. Every push to
 `main` refreshes the rolling `latest` release used by the self-updater.

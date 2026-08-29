@@ -22,6 +22,7 @@ const (
 	disableEnv     = "YOLOCODER_NO_AUTOUPDATE"
 	checkInterval  = 24 * time.Hour
 	defaultBaseURL = "https://github.com/mindsdb/yolocoder/releases/download/latest"
+	throttleChecks = false
 )
 
 type Checker struct {
@@ -35,12 +36,14 @@ func CheckOnLaunch(currentCommit string) {
 	if currentCommit == "" || os.Getenv(disableEnv) != "" {
 		return
 	}
-	dir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
+		debugf("find home directory: %v", err)
 		return
 	}
-	dir = filepath.Join(dir, "yolocoder")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dir := filepath.Join(home, ".config", "yolocoder")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		debugf("create config directory: %v", err)
 		return
 	}
 	checker := &Checker{Dir: dir}
@@ -52,18 +55,27 @@ func CheckOnLaunch(currentCommit string) {
 	latest, err := checker.LatestCommit(ctx)
 	cancel()
 	_ = checker.MarkChecked(now)
-	if err != nil || latest == currentCommit {
+	if err != nil {
+		debugf("check for update: %v", err)
+		return
+	}
+	if latest == currentCommit {
 		return
 	}
 	executable, err := os.Executable()
 	if err != nil {
+		debugf("locate executable: %v", err)
 		return
 	}
+	fmt.Fprintln(os.Stderr, "Updating YoloCoder...")
 	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if checker.Apply(ctx, executable) == nil {
-		fmt.Fprintln(os.Stderr, "YoloCoder updated. The new version will run next time.")
+	if err := checker.Apply(ctx, executable); err != nil {
+		debugf("apply update: %v", err)
+		fmt.Fprintln(os.Stderr, "YoloCoder update failed; continuing with the current version.")
+		return
 	}
+	fmt.Fprintf(os.Stderr, "YoloCoder updated to %s. The new version will run next time.\n", shortCommit(latest))
 }
 
 func (checker *Checker) Due(now time.Time) bool {
@@ -74,12 +86,28 @@ func (checker *Checker) Due(now time.Time) bool {
 	if getenv(disableEnv) != "" {
 		return false
 	}
+	if !throttleChecks {
+		return true
+	}
 	data, err := os.ReadFile(checker.statePath())
 	if err != nil {
 		return true
 	}
 	lastCheck, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
 	return err != nil || now.Sub(lastCheck) >= checkInterval
+}
+
+func shortCommit(commit string) string {
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+	return commit
+}
+
+func debugf(format string, args ...any) {
+	if os.Getenv("YOLOCODER_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "debug: self-update: "+format+"\n", args...)
+	}
 }
 
 func (checker *Checker) MarkChecked(now time.Time) error {

@@ -19,6 +19,13 @@ func main() {
 		case "help", "--help", "-h":
 			fmt.Print(app.Help)
 			return
+		}
+	}
+
+	update.CheckOnLaunch(version.Commit)
+
+	if len(args) > 0 {
+		switch args[0] {
 		case "config":
 			os.Exit(app.RunConfig(args[1:]))
 		case "--llm-from-env-vars":
@@ -39,6 +46,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	update.CheckOnLaunch(version.Commit)
+	fmt.Printf("YoloCoder %s\n", version.Display())
 	fmt.Println("Welcome to YoloCode CLI")
 }

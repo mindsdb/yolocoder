@@ -41,12 +41,21 @@ func TestDue(t *testing.T) {
 	if err := checker.MarkChecked(now); err != nil {
 		t.Fatal(err)
 	}
-	if checker.Due(now.Add(time.Hour)) {
-		t.Fatal("checker should not be due within 24 hours")
+	if !checker.Due(now.Add(time.Hour)) {
+		t.Fatal("rolling builds should check on every launch")
 	}
 	checker.Getenv = func(string) string { return "1" }
 	if checker.Due(now.Add(48 * time.Hour)) {
 		t.Fatal("disabled checker should never be due")
+	}
+}
+
+func TestShortCommit(t *testing.T) {
+	if got := shortCommit("1234567890"); got != "1234567" {
+		t.Fatalf("shortCommit() = %q", got)
+	}
+	if got := shortCommit("abc"); got != "abc" {
+		t.Fatalf("shortCommit() = %q", got)
 	}
 }
 

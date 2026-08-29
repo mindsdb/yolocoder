@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -9,7 +8,7 @@ import (
 
 	"github.com/mindsdb/yolocoder/internal/auth"
 	"github.com/mindsdb/yolocoder/internal/config"
-	"golang.org/x/term"
+	"github.com/mindsdb/yolocoder/internal/terminal"
 )
 
 const Help = `YoloCoder
@@ -36,7 +35,7 @@ func EnsureLLM() error {
 	if configured {
 		return nil
 	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !terminal.IsTTY(os.Stdin) {
 		return fmt.Errorf("no LLM inference provider is configured\n\nRun yolocoder in an interactive terminal, or use --llm-from-env-vars")
 	}
 	_, err = connect(os.Stdin, os.Stdout)
@@ -73,7 +72,7 @@ func RunConfig(args []string) int {
 		fmt.Printf("API key: configured\nConfig: %s\nCredentials: %s\n", configPath, credentialsPath)
 		return 0
 	case "connect":
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
+		if !terminal.IsTTY(os.Stdin) {
 			return fail(fmt.Errorf("yolocoder config connect requires an interactive terminal"))
 		}
 		_, err := connect(os.Stdin, os.Stdout)
@@ -93,28 +92,27 @@ func RunConfig(args []string) int {
 }
 
 func connect(input *os.File, output *os.File) (config.LLM, error) {
-	reader := bufio.NewReader(input)
+	reader := terminal.NewReader(input)
 	fmt.Fprintln(output, "Connect an LLM inference provider")
 	fmt.Fprintln(output)
-	fmt.Fprintln(output, "  1. MindsHub (recommended) — sign in with your browser")
-	fmt.Fprintln(output, "  2. Other — any OpenAI-compatible endpoint")
-	fmt.Fprintln(output)
-	fmt.Fprint(output, "> ")
-	choice, err := reader.ReadString('\n')
+	choice, err := reader.Select(output, []terminal.Choice{
+		{Label: "MindsHub (recommended)", Detail: "sign in with your browser"},
+		{Label: "Other", Detail: "any OpenAI-compatible endpoint"},
+	}, 0)
 	if err != nil {
-		return config.LLM{}, fmt.Errorf("read provider choice: %w", err)
+		return config.LLM{}, err
 	}
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "1", "mindshub", "minds hub":
-		return connectMindsHub(output, reader, input)
-	case "2", "other", "custom":
-		return connectOther(output, reader, input)
+	switch choice {
+	case 0:
+		return connectMindsHub(output, reader)
+	case 1:
+		return connectOther(output, reader)
 	default:
-		return config.LLM{}, fmt.Errorf("choose 1 for MindsHub or 2 for Other")
+		return config.LLM{}, fmt.Errorf("invalid provider selection")
 	}
 }
 
-func connectMindsHub(output *os.File, reader *bufio.Reader, input *os.File) (config.LLM, error) {
+func connectMindsHub(output *os.File, reader *terminal.Reader) (config.LLM, error) {
 	fmt.Fprintln(output, "Opening your browser to sign in to MindsHub...")
 	ctx, cancel := context.WithTimeout(context.Background(), auth.DefaultTimeout)
 	defer cancel()
@@ -128,7 +126,7 @@ func connectMindsHub(output *os.File, reader *bufio.Reader, input *os.File) (con
 	if err != nil {
 		fmt.Fprintf(output, "Browser sign-in could not complete: %v\n", err)
 		fmt.Fprintln(output, "Paste a MindsHub API key instead.")
-		apiKey, err = promptAPIKey(output, reader, input)
+		apiKey, err = promptAPIKey(output, reader)
 		if err != nil {
 			return config.LLM{}, err
 		}
@@ -137,9 +135,9 @@ func connectMindsHub(output *os.File, reader *bufio.Reader, input *os.File) (con
 	return saveProvider(output, provider)
 }
 
-func connectOther(output *os.File, reader *bufio.Reader, input *os.File) (config.LLM, error) {
+func connectOther(output *os.File, reader *terminal.Reader) (config.LLM, error) {
 	fmt.Fprint(output, "OpenAI-compatible base URL\n> ")
-	baseURL, err := reader.ReadString('\n')
+	baseURL, err := reader.ReadLine()
 	if err != nil {
 		return config.LLM{}, fmt.Errorf("read base URL: %w", err)
 	}
@@ -147,12 +145,12 @@ func connectOther(output *os.File, reader *bufio.Reader, input *os.File) (config
 	if err != nil {
 		return config.LLM{}, err
 	}
-	apiKey, err := promptAPIKey(output, reader, input)
+	apiKey, err := promptAPIKey(output, reader)
 	if err != nil {
 		return config.LLM{}, err
 	}
 	fmt.Fprint(output, "Default model (optional)\n> ")
-	model, err := reader.ReadString('\n')
+	model, err := reader.ReadLine()
 	if err != nil {
 		return config.LLM{}, fmt.Errorf("read model: %w", err)
 	}
@@ -160,22 +158,10 @@ func connectOther(output *os.File, reader *bufio.Reader, input *os.File) (config
 	return saveProvider(output, provider)
 }
 
-func promptAPIKey(output *os.File, reader *bufio.Reader, input *os.File) (string, error) {
-	fmt.Fprint(output, "API key\n> ")
-	var value string
-	if term.IsTerminal(int(input.Fd())) {
-		secret, err := term.ReadPassword(int(input.Fd()))
-		fmt.Fprintln(output)
-		if err != nil {
-			return "", err
-		}
-		value = string(secret)
-	} else {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		value = line
+func promptAPIKey(output *os.File, reader *terminal.Reader) (string, error) {
+	value, err := reader.ReadPassword(output)
+	if err != nil {
+		return "", err
 	}
 	value = strings.TrimSpace(value)
 	if value == "" {

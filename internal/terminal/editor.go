@@ -17,6 +17,56 @@ var ErrEditorCancelled = errors.New("task entry cancelled")
 // line is drawn with.
 const editorPrefixWidth = 2
 
+// Command is a slash command the prompt offers. Typing "/" lists them and
+// filters as you keep typing, so they're discoverable rather than
+// something you have to already know.
+type Command struct {
+	Name        string
+	Description string
+}
+
+// commandToken is the leading "/word" of text, or "" when text isn't a
+// single-line slash command.
+func commandToken(text string) string {
+	if !strings.HasPrefix(text, "/") || strings.Contains(text, "\n") {
+		return ""
+	}
+	if space := strings.IndexAny(text, " \t"); space != -1 {
+		return text[:space]
+	}
+	return text
+}
+
+// matchingCommands are the commands whose names start with text's leading
+// slash token. A token that already names a command exactly matches only
+// that one, so the list collapses to a confirmation as you finish typing.
+func matchingCommands(commands []Command, text string) []Command {
+	token := commandToken(text)
+	if token == "" {
+		return nil
+	}
+	var matches []Command
+	for _, command := range commands {
+		if strings.HasPrefix(command.Name, token) {
+			matches = append(matches, command)
+		}
+	}
+	return matches
+}
+
+// renderPromptLine colors a leading slash command so it reads as a
+// command rather than as text that will be sent to the model.
+func renderPromptLine(line string, first bool) string {
+	if !first {
+		return line
+	}
+	token := commandToken(line)
+	if token == "" {
+		return line
+	}
+	return "\x1b[35m" + token + "\x1b[0m" + line[len(token):]
+}
+
 type textBuffer struct {
 	text   []rune
 	cursor int
@@ -107,7 +157,7 @@ func (buffer *textBuffer) end() {
 	buffer.setPosition(row, int(^uint(0)>>1))
 }
 
-func (reader *Reader) EditTask(output io.Writer) (string, error) {
+func (reader *Reader) EditTask(output io.Writer, commands []Command) (string, error) {
 	if !IsTTY(reader.input) {
 		return "", errors.New("multiline task entry requires an interactive terminal")
 	}
@@ -136,7 +186,7 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 		fmt.Fprint(output, "\r")
 	}()
 	for {
-		layout = drawEditor(output, buffer, reader.width(), layout)
+		layout = drawEditor(output, buffer, reader.width(), commands, layout)
 		key, err := reader.buffer.ReadByte()
 		if err != nil {
 			return "", ErrEditorCancelled
@@ -211,7 +261,7 @@ func wrappedRows(runes, width int) int {
 	return rows
 }
 
-func drawEditor(output io.Writer, buffer *textBuffer, width int, previous editorLayout) editorLayout {
+func drawEditor(output io.Writer, buffer *textBuffer, width int, commands []Command, previous editorLayout) editorLayout {
 	if previous.cursorRow > 0 {
 		fmt.Fprintf(output, "\x1b[%dA", previous.cursorRow)
 	}
@@ -227,16 +277,23 @@ func drawEditor(output io.Writer, buffer *textBuffer, width int, previous editor
 		if index == 0 {
 			marker = "\x1b[36m›\x1b[0m "
 		}
-		fmt.Fprintf(output, "%s%s\r\n", marker, line)
-		rows := wrappedRows(len([]rune(line)), width)
+		fmt.Fprintf(output, "%s%s\r\n", marker, renderPromptLine(line, index == 0))
 		if index == row {
 			layout.cursorRow = layout.rows + (column+editorPrefixWidth)/width
 		}
-		layout.rows += rows
+		layout.rows += wrappedRows(len([]rune(line)), width)
 	}
 
-	// The trailing \r\n left the cursor below the prompt; come back up to
-	// the line the text cursor belongs on and sit at the right column.
+	// The command list sits below the input, so it costs rows the next
+	// redraw has to clear but never moves the text cursor.
+	for _, command := range matchingCommands(commands, string(buffer.text)) {
+		line := fmt.Sprintf("  %-10s %s", command.Name, command.Description)
+		fmt.Fprintf(output, "\x1b[35m  %-10s\x1b[0m \x1b[2m%s\x1b[0m\r\n", command.Name, command.Description)
+		layout.rows += wrappedRows(len([]rune(line))-editorPrefixWidth, width)
+	}
+
+	// The trailing \r\n left the cursor below everything drawn; come back
+	// up to the line the text cursor belongs on and sit at the right column.
 	if up := layout.rows - layout.cursorRow; up > 0 {
 		fmt.Fprintf(output, "\x1b[%dA", up)
 	}

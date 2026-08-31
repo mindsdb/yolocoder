@@ -18,17 +18,31 @@ func Provider(fromEnvironment bool) (config.LLM, error) {
 	return resolveProvider(fromEnvironment)
 }
 
+// SessionCommands are the slash commands the interactive prompt offers.
+var SessionCommands = []terminal.Command{
+	{Name: "/model", Description: "choose the model to use"},
+	{Name: "/help", Description: "show these commands"},
+	{Name: "/exit", Description: "end the session"},
+}
+
 // PromptTask reads one task from the interactive editor. It returns
 // terminal.ErrEditorCancelled when the user presses Ctrl+C.
 func PromptTask() (string, error) {
 	if !terminalInput() {
 		return "", fmt.Errorf("a task is required\n\nUsage: yolocoder [--llm-from-env-vars] <task>")
 	}
-	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout)
+	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout, SessionCommands)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(task), nil
+}
+
+// PrintCommands lists the session's slash commands.
+func PrintCommands() {
+	for _, command := range SessionCommands {
+		fmt.Printf("  \x1b[35m%-10s\x1b[0m \x1b[2m%s\x1b[0m\n", command.Name, command.Description)
+	}
 }
 
 // RunTask returns the model's reply. For a plain conversational message,

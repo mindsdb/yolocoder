@@ -96,7 +96,7 @@ func main() {
 		return
 	}
 
-	fmt.Printf("\x1b[2mEnter: send  •  Shift+Enter: new line  •  Ctrl+C or /exit: quit\x1b[0m\n\n")
+	fmt.Printf("\x1b[2mEnter: send  •  Shift+Enter: new line  •  / for commands  •  Ctrl+C to quit\x1b[0m\n\n")
 	for {
 		task, err := app.PromptTask()
 		if err != nil {
@@ -107,18 +107,58 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		switch task {
-		case "":
+		if task == "" {
 			continue
-		case "/exit", "/quit":
-			fmt.Println("[^_^] Bye.")
-			return
+		}
+		// Commands are handled here rather than sent to the model, which
+		// would otherwise cheerfully answer "/model" as a question.
+		if handled, quit := runCommand(task, fromEnvironment, &provider); handled {
+			if quit {
+				return
+			}
+			continue
 		}
 		if err := runTask(task, provider); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		fmt.Println()
 	}
+}
+
+// runCommand handles a session command, reporting whether the input was
+// one and whether the session should end. "exit" is accepted with or
+// without the slash, since both are natural to type.
+func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handled, quit bool) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "/exit", "/quit", "exit", "quit":
+		fmt.Println("[^_^] Bye.")
+		return true, true
+	case "/help", "help":
+		app.PrintCommands()
+		fmt.Println()
+		return true, false
+	case "/model":
+		if fromEnvironment {
+			fmt.Println("[*_*] /model can't change an OPENAI_* environment provider; set OPENAI_MODEL instead.")
+			fmt.Println()
+			return true, false
+		}
+		if code := app.RunModel(nil); code == 0 {
+			// The saved model changed, so reload it for the next task.
+			if updated, err := app.Provider(false); err == nil {
+				*provider = updated
+			}
+		}
+		fmt.Println()
+		return true, false
+	}
+	if strings.HasPrefix(input, "/") {
+		fmt.Printf("[*_*] Unknown command %q. Available:\n", strings.Fields(input)[0])
+		app.PrintCommands()
+		fmt.Println()
+		return true, false
+	}
+	return false, false
 }
 
 // runTask runs one task, reporting progress as it goes and printing the

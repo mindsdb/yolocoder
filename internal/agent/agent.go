@@ -24,6 +24,11 @@ type Patch struct {
 	Diff    string `json:"diff"`
 }
 
+type routeDecision struct {
+	CodingTask bool   `json:"coding_task"`
+	Reply      string `json:"reply"`
+}
+
 type toolArguments struct {
 	Paths []string `json:"paths"`
 	Query string   `json:"query"`
@@ -38,25 +43,37 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 	return &Runner{client: client, repository: repository}
 }
 
-func (runner *Runner) Run(ctx context.Context, task string, progress func(string)) error {
+// Run routes the message first: a plain conversational message gets the
+// model's direct reply with the repository never touched, and only an
+// actual coding task goes through the map/plan/patch/test loop.
+func (runner *Runner) Run(ctx context.Context, task string, progress func(string)) (string, error) {
+	progress("Reading your message...")
+	decision, err := runner.route(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	if !decision.CodingTask {
+		return decision.Reply, nil
+	}
+
 	repoMap, err := runner.repository.Map()
 	if err != nil {
-		return err
+		return "", err
 	}
 	progress("Finding the right code...")
 	plan, contextText, err := runner.plan(ctx, task, repoMap)
 	if err != nil {
-		return err
+		return "", err
 	}
 	plannedContext, err := runner.readPlanFiles(plan)
 	if err != nil {
-		return err
+		return "", err
 	}
 	contextText += "\nPLANNED FILES:\n" + plannedContext
 	progress("Making the change...")
 	patch, err := runner.patch(ctx, task, repoMap, plan, contextText, "")
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var evidence string
@@ -65,11 +82,11 @@ func (runner *Runner) Run(ctx context.Context, task string, progress func(string
 			progress("Repairing from new evidence...")
 			contextText, err = runner.readPlanFiles(plan)
 			if err != nil {
-				return err
+				return "", err
 			}
 			patch, err = runner.patch(ctx, task, repoMap, plan, contextText, evidence)
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 		progress("Applying the patch...")
@@ -81,11 +98,33 @@ func (runner *Runner) Run(ctx context.Context, task string, progress func(string
 		testResult := RunTests(ctx, runner.repository.Root)
 		if testResult.Passed {
 			progress("Done.")
-			return nil
+			return patch.Summary, nil
 		}
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
 	}
-	return fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+	return "", fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+}
+
+func (runner *Runner) route(ctx context.Context, task string) (routeDecision, error) {
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	response, err := runner.client.create(callCtx, responseRequest{
+		Instructions: routingInstructions,
+		Input:        task,
+		Text:         strictSchema("message_route", routeSchema()),
+	})
+	if err != nil {
+		return routeDecision{}, err
+	}
+	text, err := response.text()
+	if err != nil {
+		return routeDecision{}, err
+	}
+	var decision routeDecision
+	if err := json.Unmarshal([]byte(text), &decision); err != nil {
+		return routeDecision{}, fmt.Errorf("decode message route: %w", err)
+	}
+	return decision, nil
 }
 
 func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, string, error) {
@@ -234,6 +273,13 @@ func patchSchema() map[string]any {
 	}, []string{"summary", "diff"})
 }
 
+func routeSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"coding_task": map[string]any{"type": "boolean"},
+		"reply":       map[string]any{"type": "string"},
+	}, []string{"coding_task", "reply"})
+}
+
 func objectSchema(properties map[string]any, required []string) map[string]any {
 	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 }
@@ -248,3 +294,7 @@ Use only the supplied task, map, plan, relevant file contents, and any new test/
 Return one git-compatible unified diff in the diff field. Do not use markdown fences.
 Make the smallest complete change. Include tests when the repository already has tests.
 If repairing a test failure, produce an incremental diff against the current repository state.`
+
+const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.
+Set coding_task to true only when the user wants code written, fixed, explained from the files, or otherwise wants the project inspected or changed.
+When coding_task is false, put your complete, direct reply to the user in reply. When coding_task is true, leave reply empty.`

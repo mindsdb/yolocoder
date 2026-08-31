@@ -26,14 +26,17 @@ func PrepareTask(task string, fromEnvironment bool) (string, config.LLM, error) 
 	return task, provider, nil
 }
 
-func RunTask(ctx context.Context, task string, provider config.LLM, progress func(string)) error {
+// RunTask returns the model's reply. For a plain conversational message,
+// that's its direct answer; for a completed coding task, it's a short
+// summary of the change (may be empty).
+func RunTask(ctx context.Context, task string, provider config.LLM, progress func(string)) (string, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
-		return err
+		return "", err
 	}
 	client, err := agent.NewClient(provider)
 	if err != nil {
-		return err
+		return "", err
 	}
 	return agent.NewRunner(client, repository).Run(ctx, task, progress)
 }

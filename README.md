@@ -6,8 +6,10 @@ A minimal boilerplate for the YoloCoder CLI.
 yolocoder "Add expiration support to user sessions"
 ```
 
-At startup, YoloCoder prints the current folder it will work in before mapping
-the repository.
+At startup, YoloCoder prints the current folder it will work in. No Git
+repository is required: YoloCoder maps and patches the folder directly. If
+the folder already has its own `.git` (not an ancestor directory's), it's
+used opportunistically for a `.gitignore`-aware map and faster patch checks.
 
 Running `yolocoder` without a task opens a multiline terminal editor showing
 the current folder. Paste multiline instructions normally, use arrow keys to
@@ -65,13 +67,15 @@ Use `yolocoder config show`, `yolocoder config connect`, or
 
 YoloCoder keeps the loop deliberately small:
 
-1. Uses the current Git repository, or runs `git init` when the current folder
-   is not already part of one.
-2. Builds a compact, `.gitignore`-aware repository map.
+1. Routes the message: a plain conversational message gets the model's
+   direct reply and stops there; only a coding task continues below.
+2. Builds a compact map of the current folder (`.gitignore`-aware when it
+   already has its own Git repository, a plain walk otherwise).
 3. Lets the model read likely files or search only when needed.
 4. Requests a strict JSON implementation plan.
 5. Requests a strict JSON response containing a unified diff.
-6. Checks and applies the diff with `git apply`.
+6. Checks and applies the diff with `git apply`, which works directly
+   against the folder without requiring a Git repository.
 7. Runs the repository's detected test command.
 8. Retries at most twice using only patch or test failure evidence.
 

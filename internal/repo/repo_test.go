@@ -22,7 +22,7 @@ func TestMapRespectsGitignore(t *testing.T) {
 	}
 }
 
-func TestOpenExistingRepository(t *testing.T) {
+func TestOpenDoesNotAdoptAncestorRepository(t *testing.T) {
 	repository := testRepository(t)
 	nested := filepath.Join(repository.Root, "nested", "folder")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
@@ -32,12 +32,12 @@ func TestOpenExistingRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameDirectory(t, opened.Root, repository.Root) {
-		t.Fatalf("Open() root = %q, want %q", opened.Root, repository.Root)
+	if !sameDirectory(t, opened.Root, nested) {
+		t.Fatalf("Open() root = %q, want %q (must not walk up to the ancestor repository)", opened.Root, nested)
 	}
 }
 
-func TestOpenInitializesPlainFolder(t *testing.T) {
+func TestOpenPlainFolderRequiresNoGit(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "existing.txt", "keep me")
 	opened, err := Open(root)
@@ -47,19 +47,43 @@ func TestOpenInitializesPlainFolder(t *testing.T) {
 	if !sameDirectory(t, opened.Root, root) {
 		t.Fatalf("Open() root = %q, want %q", opened.Root, root)
 	}
-	if info, err := os.Stat(filepath.Join(root, ".git")); err != nil || !info.IsDir() {
-		t.Fatalf("expected .git directory, info=%v err=%v", info, err)
-	}
-	content, err := os.ReadFile(filepath.Join(root, "existing.txt"))
-	if err != nil || string(content) != "keep me" {
-		t.Fatalf("existing file changed: %q, %v", content, err)
+	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+		t.Fatal("Open() must not create a .git directory")
 	}
 	mapText, err := opened.Map()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(mapText, "existing.txt") {
-		t.Fatalf("initialized repository map missing file:\n%s", mapText)
+		t.Fatalf("plain folder map missing file:\n%s", mapText)
+	}
+}
+
+func TestMapWalksPlainFolderIgnoringBuildDirectories(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "kept.txt", "hello")
+	writeFile(t, root, "node_modules/some-package/index.js", "module.exports = {}")
+	repository := &Repository{Root: root}
+	mapText, err := repository.Map()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mapText, "kept.txt") || strings.Contains(mapText, "node_modules") {
+		t.Fatalf("unexpected map:\n%s", mapText)
+	}
+}
+
+func TestApplyWithoutGitRepository(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "file.txt", "old\n")
+	repository := &Repository{Root: root}
+	patch := "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+	if err := repository.Apply(patch); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "file.txt"))
+	if err != nil || string(content) != "new\n" {
+		t.Fatalf("content = %q, %v", content, err)
 	}
 }
 

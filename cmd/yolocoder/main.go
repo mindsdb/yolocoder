@@ -70,13 +70,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	var reply string
 	var runErr error
-	ui.WithRobot(os.Stdout, "Mapping the repository...", func(status ui.RobotStatus) {
-		runErr = app.RunTask(context.Background(), task, provider, status)
+	ui.WithRobot(os.Stdout, "Thinking...", func(status ui.RobotStatus) {
+		reply, runErr = app.RunTask(context.Background(), task, provider, status)
 	})
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, runErr)
 		os.Exit(1)
 	}
-	fmt.Println("[*_*] Done.")
+	if reply != "" {
+		fmt.Printf("[*_*] %s\n", reply)
+	} else {
+		fmt.Println("[*_*] Done.")
+	}
 }

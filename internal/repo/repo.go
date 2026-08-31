@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,16 @@ const (
 	maxSearchOut = 64 << 10
 )
 
+// ignoredDirectories filters the plain-folder map fallback used when a
+// folder has no Git repository of its own to ask for a .gitignore-aware
+// listing.
+var ignoredDirectories = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, "dist": true, "build": true,
+	".next": true, ".nuxt": true, "target": true, "__pycache__": true, ".venv": true,
+	"venv": true, ".idea": true, ".vscode": true, ".cache": true, ".pytest_cache": true,
+	".mypy_cache": true, ".tox": true,
+}
+
 type Repository struct {
 	Root string
 }
@@ -31,10 +42,13 @@ func (repository *Repository) Exists(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// Open uses path directly as the repository root. No Git repository is
+// required: YoloCoder can map and patch a plain folder. If path already has
+// its own .git, it's used opportunistically for a .gitignore-aware map and
+// faster patch checks. Unlike `git rev-parse --show-toplevel`, this never
+// searches parent directories, so it can't silently adopt an unrelated
+// ancestor repository (for example the user's home directory).
 func Open(path string) (*Repository, error) {
-	if _, err := exec.LookPath("git"); err != nil {
-		return nil, fmt.Errorf("git is required but was not found on PATH")
-	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve working directory: %w", err)
@@ -46,42 +60,65 @@ func Open(path string) (*Repository, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("working path is not a directory: %s", absolutePath)
 	}
-
-	root, err := repositoryRoot(absolutePath)
-	if err == nil {
-		return &Repository{Root: root}, nil
-	}
-
-	command := exec.Command("git", "init", "-q")
-	command.Dir = absolutePath
-	if output, initErr := command.CombinedOutput(); initErr != nil {
-		return nil, fmt.Errorf("initialize Git repository: %w: %s", initErr, strings.TrimSpace(string(output)))
-	}
-	root, err = repositoryRoot(absolutePath)
-	if err != nil {
-		return nil, err
-	}
-	return &Repository{Root: root}, nil
+	return &Repository{Root: absolutePath}, nil
 }
 
-func repositoryRoot(path string) (string, error) {
-	command := exec.Command("git", "rev-parse", "--show-toplevel")
-	command.Dir = path
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("find Git repository: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)), nil
+func (repository *Repository) hasGit() bool {
+	_, err := os.Stat(filepath.Join(repository.Root, ".git"))
+	return err == nil
 }
 
 func (repository *Repository) Map() (string, error) {
+	if repository.hasGit() {
+		if mapText, err := repository.gitMap(); err == nil {
+			return mapText, nil
+		}
+	}
+	return repository.walkMap()
+}
+
+func (repository *Repository) gitMap() (string, error) {
 	command := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	command.Dir = repository.Root
 	output, err := command.Output()
 	if err != nil {
 		return "", fmt.Errorf("map repository: %w", err)
 	}
-	paths := strings.Split(string(output), "\x00")
+	return repository.formatMap(strings.Split(string(output), "\x00"))
+}
+
+func (repository *Repository) walkMap() (string, error) {
+	var paths []string
+	err := filepath.WalkDir(repository.Root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == repository.Root {
+			return nil
+		}
+		if entry.IsDir() {
+			if ignoredDirectories[entry.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() == ".DS_Store" {
+			return nil
+		}
+		relative, err := filepath.Rel(repository.Root, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("map repository: %w", err)
+	}
+	return repository.formatMap(paths)
+}
+
+func (repository *Repository) formatMap(paths []string) (string, error) {
 	sort.Strings(paths)
 	var mapText strings.Builder
 	for _, path := range paths {
@@ -141,11 +178,15 @@ func (repository *Repository) Search(ctx context.Context, query string) (string,
 	return string(bytes.TrimSpace(output)), nil
 }
 
+// Apply patches files with `git apply`, which works against a plain folder
+// without requiring an initialized repository. core.autocrlf is pinned off
+// so the result doesn't depend on ambient Git config (system-wide, or from
+// an unrelated ancestor repository).
 func (repository *Repository) Apply(patch string) error {
 	if strings.TrimSpace(patch) == "" {
 		return fmt.Errorf("patch is empty")
 	}
-	for _, args := range [][]string{{"apply", "--check", "-"}, {"apply", "-"}} {
+	for _, args := range [][]string{{"-c", "core.autocrlf=false", "apply", "--check", "-"}, {"-c", "core.autocrlf=false", "apply", "-"}} {
 		command := exec.Command("git", args...)
 		command.Dir = repository.Root
 		command.Stdin = strings.NewReader(patch)

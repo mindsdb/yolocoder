@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/auth"
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/terminal"
@@ -21,6 +23,8 @@ Usage:
   yolocoder config show           show the saved provider
   yolocoder config connect        replace the saved provider
   yolocoder config reset          remove the saved provider
+  yolocoder model                 pick a model from the endpoint's list
+  yolocoder model <name>          set the model directly
   yolocoder update                immediately check and install an update
   yolocoder version               show the version
 
@@ -29,6 +33,9 @@ Environment provider:
   OPENAI_API_KEY                  endpoint API key
   OPENAI_MODEL                    optional model name
 `
+
+const listModelsTimeout = 10 * time.Second
+const defaultMindsHubModel = "mindshub_air"
 
 func terminalInput() bool {
 	return terminal.IsTTY(os.Stdin)
@@ -98,6 +105,80 @@ func RunConfig(args []string) int {
 	}
 }
 
+// RunModel changes the model of the already-saved provider. With an
+// argument, it sets the model directly. Without one, it lists the models
+// the endpoint's OpenAI-compatible /v1/models offers (this is what makes
+// `yolocoder model` useful with MindsHub, which exposes several) and lets
+// the user pick one; if listing isn't supported, it falls back to typing a
+// name.
+func RunModel(args []string) int {
+	provider, configured, err := config.Load()
+	if err != nil {
+		return fail(err)
+	}
+	if !configured {
+		return fail(fmt.Errorf("no LLM inference provider configured; run `yolocoder config connect` first"))
+	}
+	var model string
+	if len(args) > 0 {
+		model = strings.TrimSpace(strings.Join(args, " "))
+		if model == "" {
+			return fail(fmt.Errorf("model name is required"))
+		}
+	} else {
+		if !terminal.IsTTY(os.Stdin) {
+			return fail(fmt.Errorf("yolocoder model requires an interactive terminal, or pass a model name: yolocoder model <name>"))
+		}
+		reader := terminal.NewReader(os.Stdin)
+		model, err = pickModel(os.Stdout, reader, provider)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	provider.Model = model
+	if err := config.Save(provider); err != nil {
+		return fail(err)
+	}
+	fmt.Printf("Model set to %s.\n", model)
+	return 0
+}
+
+// pickModel lists provider's available models and lets the user select
+// one, falling back to a free-text prompt if the endpoint doesn't support
+// listing them.
+func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listModelsTimeout)
+	defer cancel()
+	models, err := agent.ListModels(ctx, provider.BaseURL, provider.APIKey)
+	if err != nil || len(models) == 0 {
+		fmt.Fprint(output, "Model\n> ")
+		typed, readErr := reader.ReadLine()
+		if readErr != nil {
+			return "", fmt.Errorf("read model: %w", readErr)
+		}
+		typed = strings.TrimSpace(typed)
+		if typed == "" {
+			return "", fmt.Errorf("model is required")
+		}
+		return typed, nil
+	}
+	choices := make([]terminal.Choice, len(models))
+	initial := 0
+	for index, model := range models {
+		choices[index] = terminal.Choice{Label: model}
+		if model == provider.Model {
+			initial = index
+		}
+	}
+	fmt.Fprintln(output, "Choose a model")
+	fmt.Fprintln(output)
+	selected, err := reader.Select(output, choices, initial)
+	if err != nil {
+		return "", err
+	}
+	return models[selected], nil
+}
+
 func connect(input *os.File, output *os.File) (config.LLM, error) {
 	reader := terminal.NewReader(input)
 	fmt.Fprintln(output, "Connect an LLM inference provider")
@@ -138,7 +219,13 @@ func connectMindsHub(output *os.File, reader *terminal.Reader) (config.LLM, erro
 			return config.LLM{}, err
 		}
 	}
-	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey, Model: "mindshub_air"}
+	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey}
+	model, err := pickModel(output, reader, provider)
+	if err != nil {
+		fmt.Fprintf(output, "Could not choose a model (%v); using the default.\n", err)
+		model = defaultMindsHubModel
+	}
+	provider.Model = model
 	return saveProvider(output, provider)
 }
 

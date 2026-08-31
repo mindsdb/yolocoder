@@ -63,6 +63,10 @@ yolocoder --llm-from-env-vars "Add expiration support to user sessions"
 Use `yolocoder config show`, `yolocoder config connect`, or
 `yolocoder config reset` to manage the saved provider.
 
+Run `yolocoder model` to switch models on the saved provider: it lists what
+the endpoint's `/v1/models` offers (MindsHub exposes several) and lets you
+pick one, or pass a name directly with `yolocoder model <name>`.
+
 ## How it works
 
 YoloCoder keeps the loop deliberately small:

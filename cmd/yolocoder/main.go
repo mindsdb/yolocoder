@@ -63,6 +63,10 @@ func main() {
 		os.Exit(app.RunConfig(args[1:]))
 	}
 
+	if len(args) > 0 && args[0] == "model" {
+		os.Exit(app.RunModel(args[1:]))
+	}
+
 	fmt.Printf("YoloCoder %s\n", version.Display())
 	workingDirectory, err := os.Getwd()
 	if err != nil {

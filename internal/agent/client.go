@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
@@ -154,6 +155,53 @@ func responsesEndpoint(baseURL string) string {
 		return baseURL + "/responses"
 	}
 	return baseURL + "/v1/responses"
+}
+
+func modelsEndpoint(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/models"
+	}
+	return baseURL + "/v1/models"
+}
+
+// ListModels queries an endpoint's OpenAI-compatible GET /v1/models listing
+// and returns the sorted model IDs it offers.
+func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsEndpoint(baseURL), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Accept", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("list models: %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var envelope struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("decode models list: %w", err)
+	}
+	models := make([]string, 0, len(envelope.Data))
+	for _, item := range envelope.Data {
+		if item.ID != "" {
+			models = append(models, item.ID)
+		}
+	}
+	sort.Strings(models)
+	return models, nil
 }
 
 func strictSchema(name string, schema map[string]any) *textConfig {

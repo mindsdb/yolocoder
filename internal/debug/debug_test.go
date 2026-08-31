@@ -41,8 +41,13 @@ func TestLogIsInertWhenNotConfigured(t *testing.T) {
 }
 
 func TestLogWritesToTheConfiguredFile(t *testing.T) {
+	// TempDir must be claimed before reset registers its cleanup:
+	// cleanups run last-registered-first, so this ordering closes the log
+	// file before the directory is removed. Windows refuses to delete a
+	// file that is still open.
+	directory := t.TempDir()
 	reset(t)
-	target := filepath.Join(t.TempDir(), "trace.log")
+	target := filepath.Join(directory, "trace.log")
 	t.Setenv(PathEnv, target)
 
 	Log("RESPONSE unified_patch", `{"diff":"..."}`)

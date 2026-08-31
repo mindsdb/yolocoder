@@ -78,13 +78,27 @@ func (repository *Repository) Map() (string, error) {
 }
 
 func (repository *Repository) gitMap() (string, error) {
-	command := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
-	command.Dir = repository.Root
+	command := repository.gitCommand("ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	output, err := command.Output()
 	if err != nil {
 		return "", fmt.Errorf("map repository: %w", err)
 	}
 	return repository.formatMap(strings.Split(string(output), "\x00"))
+}
+
+// gitCommand builds a `git` invocation scoped strictly to repository.Root.
+// GIT_CEILING_DIRECTORIES stops Git's own upward search for a repository at
+// Root's parent: without it, a plain folder nested under an unrelated
+// ancestor repository (the parent directory it was created in, say) lets
+// Git silently adopt that ancestor's toplevel instead. `git apply` in
+// particular then treats the patch's paths as relative to that unrelated
+// toplevel, decides they fall outside the current directory, and silently
+// skips every hunk (exit 0, no output, nothing written) instead of erroring.
+func (repository *Repository) gitCommand(args ...string) *exec.Cmd {
+	command := exec.Command("git", args...)
+	command.Dir = repository.Root
+	command.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+filepath.Dir(repository.Root))
+	return command
 }
 
 func (repository *Repository) walkMap() (string, error) {
@@ -187,8 +201,7 @@ func (repository *Repository) Apply(patch string) error {
 		return fmt.Errorf("patch is empty")
 	}
 	for _, args := range [][]string{{"-c", "core.autocrlf=false", "apply", "--check", "-"}, {"-c", "core.autocrlf=false", "apply", "-"}} {
-		command := exec.Command("git", args...)
-		command.Dir = repository.Root
+		command := repository.gitCommand(args...)
 		command.Stdin = strings.NewReader(patch)
 		output, err := command.CombinedOutput()
 		if err != nil {

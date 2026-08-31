@@ -73,6 +73,38 @@ func TestMapWalksPlainFolderIgnoringBuildDirectories(t *testing.T) {
 	}
 }
 
+func TestApplyInPlainFolderNestedUnderAnAncestorRepository(t *testing.T) {
+	// Reproduces a real failure: `git apply` auto-discovers a Git
+	// repository by walking up from cwd, independent of our own Open()
+	// logic. If an ancestor directory happens to have a .git (a stray
+	// repo the folder was created inside, for example), git apply
+	// resolves the patch's paths against that ancestor's toplevel,
+	// decides they fall outside the current directory, and silently
+	// skips every hunk: exit 0, no output, no file written.
+	ancestor := t.TempDir()
+	command := exec.Command("git", "init", "-q")
+	command.Dir = ancestor
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	root := filepath.Join(ancestor, "plain-subfolder")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+	patch := "diff --git a/hello.txt b/hello.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hello.txt\n@@ -0,0 +1 @@\n+hello\n"
+	if err := repository.Apply(patch); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "hello.txt"))
+	if err != nil {
+		t.Fatalf("hello.txt was not created: %v", err)
+	}
+	if string(content) != "hello\n" {
+		t.Fatalf("content = %q", content)
+	}
+}
+
 func TestApplyWithoutGitRepository(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "file.txt", "old\n")

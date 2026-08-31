@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,10 +15,48 @@ import (
 const maxToolRounds = 8
 
 type Plan struct {
-	Summary       string   `json:"summary"`
-	FilesToModify []string `json:"files_to_modify"`
-	ContextFiles  []string `json:"context_files"`
-	Steps         []string `json:"steps"`
+	Summary       string     `json:"summary"`
+	FilesToModify stringList `json:"files_to_modify"`
+	ContextFiles  stringList `json:"context_files"`
+	Steps         stringList `json:"steps"`
+}
+
+// stringList is a list of strings that also accepts the shapes models
+// reach for when a provider doesn't enforce the schema: a list of objects
+// ([{"path":"index.html","changes":[...]}]) or a bare string. Refusing
+// those outright cost us the whole plan over a wrapper the content was
+// perfectly good inside of.
+type stringList []string
+
+func (list *stringList) UnmarshalJSON(data []byte) error {
+	var plain []string
+	if err := json.Unmarshal(data, &plain); err == nil {
+		*list = plain
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*list = stringList{single}
+		return nil
+	}
+	var objects []struct {
+		Path        string `json:"path"`
+		File        string `json:"file"`
+		Name        string `json:"name"`
+		Step        string `json:"step"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(data, &objects); err != nil {
+		return err
+	}
+	values := make(stringList, 0, len(objects))
+	for _, object := range objects {
+		if value := firstNonEmpty(object.Path, object.File, object.Name, object.Step, object.Description); value != "" {
+			values = append(values, value)
+		}
+	}
+	*list = values
+	return nil
 }
 
 type Patch struct {
@@ -65,15 +104,34 @@ type inputMessage struct {
 // enforces the requested JSON schema strictly; some let the model preface
 // the JSON with prose or wrap it in a markdown fence.
 func decodeJSON(text string, target any) error {
-	if err := json.Unmarshal([]byte(text), target); err == nil {
+	directErr := json.Unmarshal([]byte(text), target)
+	if directErr == nil {
 		return nil
 	}
 	if span := jsonSpan(text); span != "" {
-		if err := json.Unmarshal([]byte(span), target); err == nil {
+		spanErr := json.Unmarshal([]byte(span), target)
+		if spanErr == nil {
 			return nil
 		}
+		// Well-formed JSON in a shape we didn't ask for is a different
+		// problem from a reply that isn't JSON at all, and saying "no
+		// valid JSON" about a perfectly good object sends the reader
+		// looking in the wrong place.
+		if isShapeError(spanErr) {
+			return fmt.Errorf("JSON did not match the expected shape (%w): %s", spanErr, strings.TrimSpace(text))
+		}
+	}
+	if isShapeError(directErr) {
+		return fmt.Errorf("JSON did not match the expected shape (%w): %s", directErr, strings.TrimSpace(text))
 	}
 	return fmt.Errorf("no valid JSON found in response: %s", strings.TrimSpace(text))
+}
+
+// isShapeError reports whether the reply parsed as JSON but its types
+// didn't line up with the target.
+func isShapeError(err error) bool {
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
 }
 
 func jsonSpan(text string) string {

@@ -67,6 +67,69 @@ func TestReadPlanFiles(t *testing.T) {
 	}
 }
 
+func TestPlanAcceptsFilesAsObjects(t *testing.T) {
+	// Verbatim from a real reply. This is valid JSON in a perfectly
+	// sensible shape; only files_to_modify holding objects rather than
+	// strings made the strict decode fail, and rejecting it threw away
+	// an otherwise complete plan.
+	reply := `{
+  "summary": "Rename the page title and visible heading to \"TecTacTris\".",
+  "files_to_modify": [
+    {
+      "path": "index.html",
+      "changes": [
+        "Change the <title> value from \"TeIC-TAC-TRoIS\" to \"TecTacTris\"."
+      ]
+    }
+  ],
+  "files_for_context": [],
+  "verification": ["Confirm the browser tab title displays \"TecTacTris\"."]
+}`
+	var plan Plan
+	if err := decodeJSON(reply, &plan); err != nil {
+		t.Fatalf("decodeJSON() = %v", err)
+	}
+	if len(plan.FilesToModify) != 1 || plan.FilesToModify[0] != "index.html" {
+		t.Fatalf("FilesToModify = %v, want index.html", plan.FilesToModify)
+	}
+	if !strings.Contains(plan.Summary, "TecTacTris") {
+		t.Fatalf("Summary = %q", plan.Summary)
+	}
+}
+
+func TestPlanAcceptsPlainAndSingularFileLists(t *testing.T) {
+	// The schema-conforming shape must keep working, as must a lone
+	// string where a list was asked for.
+	var plain Plan
+	if err := decodeJSON(`{"summary":"s","files_to_modify":["a.go","b.go"],"context_files":[],"steps":["one"]}`, &plain); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(plain.FilesToModify, ",") != "a.go,b.go" {
+		t.Fatalf("FilesToModify = %v", plain.FilesToModify)
+	}
+	var single Plan
+	if err := decodeJSON(`{"summary":"s","files_to_modify":"only.go","context_files":[],"steps":[]}`, &single); err != nil {
+		t.Fatal(err)
+	}
+	if len(single.FilesToModify) != 1 || single.FilesToModify[0] != "only.go" {
+		t.Fatalf("FilesToModify = %v, want only.go", single.FilesToModify)
+	}
+}
+
+func TestDecodeJSONDistinguishesShapeFromInvalidJSON(t *testing.T) {
+	// Calling a well-formed object "no valid JSON" sends the reader
+	// looking in entirely the wrong place.
+	var plan Plan
+	err := decodeJSON(`{"summary":{"nested":"object"},"files_to_modify":[],"context_files":[],"steps":[]}`, &plan)
+	if err == nil || !strings.Contains(err.Error(), "did not match the expected shape") {
+		t.Fatalf("err = %v, want a shape mismatch", err)
+	}
+	err = decodeJSON("I can't help with that.", &plan)
+	if err == nil || !strings.Contains(err.Error(), "no valid JSON") {
+		t.Fatalf("err = %v, want a not-JSON error", err)
+	}
+}
+
 func TestSalvagePlanRecoversAFilesListFromAnOffScheduleShape(t *testing.T) {
 	// Verbatim from a real reply: the provider let the model answer in
 	// its own shape, so files_to_modify decoded empty and the patch phase

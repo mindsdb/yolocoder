@@ -42,15 +42,56 @@ func TestDecodeJSONRejectsNonJSON(t *testing.T) {
 	}
 }
 
-func TestReadPlanFilesAllowsAnEmptyPlanForNewFiles(t *testing.T) {
+func TestReadPlanFiles(t *testing.T) {
 	repository := &repo.Repository{Root: t.TempDir()}
 	runner := &Runner{repository: repository}
+
+	// A plan that named nothing says nothing: claiming files don't exist
+	// would contradict whatever the planning tools already gathered.
 	text, err := runner.readPlanFiles(Plan{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text == "" {
-		t.Fatal("expected an explanatory message, got an empty string")
+	if text != "" {
+		t.Fatalf("readPlanFiles(empty plan) = %q, want nothing", text)
+	}
+
+	// A plan that named files which aren't there yet explains itself, so
+	// the patch phase knows it is creating them.
+	text, err = runner.readPlanFiles(Plan{FilesToModify: []string{"new.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "creates them") {
+		t.Fatalf("readPlanFiles(missing files) = %q", text)
+	}
+}
+
+func TestSalvagePlanRecoversAFilesListFromAnOffScheduleShape(t *testing.T) {
+	// Verbatim from a real reply: the provider let the model answer in
+	// its own shape, so files_to_modify decoded empty and the patch phase
+	// lost both its context and the fallback's target.
+	reply := `{"plan":[{"file":"index.html","changes":["Change the title"]}],"context_files":[],"notes":"No other files need modification."}`
+	var plan Plan
+	if err := decodeJSON(reply, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.FilesToModify) != 0 {
+		t.Fatalf("precondition: expected the schema decode to come up empty, got %v", plan.FilesToModify)
+	}
+	salvagePlan(&plan, reply)
+	if len(plan.FilesToModify) != 1 || plan.FilesToModify[0] != "index.html" {
+		t.Fatalf("FilesToModify = %v, want index.html", plan.FilesToModify)
+	}
+	if plan.Summary != "No other files need modification." {
+		t.Fatalf("Summary = %q", plan.Summary)
+	}
+
+	// A plan that did follow the schema is left alone.
+	good := Plan{FilesToModify: []string{"a.go"}, Summary: "keep"}
+	salvagePlan(&good, reply)
+	if len(good.FilesToModify) != 1 || good.FilesToModify[0] != "a.go" || good.Summary != "keep" {
+		t.Fatalf("a valid plan was altered: %+v", good)
 	}
 }
 

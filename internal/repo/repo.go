@@ -210,6 +210,26 @@ func (repository *Repository) Apply(patch string) error {
 		return fmt.Errorf("patch is empty")
 	}
 	debug.Log("PATCH", patch)
+	gitErr := repository.applyWithGit(patch)
+	if gitErr == nil {
+		debug.Log("PATCH APPLIED", "by git apply")
+		return nil
+	}
+	debug.Logf("PATCH FAILED", "%v", gitErr)
+
+	// git apply insists the patch's own bookkeeping be right: correct hunk
+	// counts, and trailing context proving the hunk isn't at end of file.
+	// A model gets the content right and that arithmetic wrong. None of it
+	// needs the model, so place the hunks by their content instead.
+	if contentErr := repository.applyByContent(patch); contentErr != nil {
+		debug.Logf("PATCH FAILED", "by content: %v", contentErr)
+		return fmt.Errorf("%w\n\nPlacing the hunks by content also failed: %v", gitErr, contentErr)
+	}
+	debug.Log("PATCH APPLIED", "by content, after git apply rejected its line numbers")
+	return nil
+}
+
+func (repository *Repository) applyWithGit(patch string) error {
 	applyArgs := []string{"-c", "core.autocrlf=false", "apply", "--recount", "--whitespace=fix", "--verbose"}
 	for _, args := range [][]string{
 		append(append([]string{}, applyArgs...), "--check", "-"),
@@ -219,11 +239,9 @@ func (repository *Repository) Apply(patch string) error {
 		command.Stdin = strings.NewReader(patch)
 		output, err := command.CombinedOutput()
 		if err != nil {
-			debug.Logf("PATCH FAILED", "git %s\n%s", strings.Join(args, " "), strings.TrimSpace(string(output)))
 			return fmt.Errorf("git %s failed: %s", strings.Join(args, " "), strings.TrimSpace(string(output)))
 		}
 	}
-	debug.Log("PATCH APPLIED", "")
 	return nil
 }
 

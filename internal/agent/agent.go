@@ -135,19 +135,22 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	for _, path := range plan.FilesToModify {
 		progress.Log("  will edit " + path)
 	}
-	contextText := planned.Context
-	plannedContext, err := runner.readPlanFiles(plan)
+	contextText, err := runner.gatherContext(planned)
 	if err != nil {
 		return "", err
 	}
-	contextText += "\nPLANNED FILES:\n" + plannedContext
 
 	var evidence string
 	var patch Patch
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			progress.Status("Repairing from new evidence...")
-			contextText, err = runner.readPlanFiles(plan)
+			// Rebuild from the planning context as well as the files:
+			// refreshing only the planned files used to throw away the
+			// tool output holding the file the model had read, leaving
+			// it to repair a diff against contents it could no longer
+			// see.
+			contextText, err = runner.gatherContext(planned)
 			if err != nil {
 				return "", err
 			}
@@ -299,6 +302,7 @@ func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress P
 			if err := decodeJSON(text, &plan); err != nil {
 				return planResult{}, fmt.Errorf("decode implementation plan: %w", err)
 			}
+			salvagePlan(&plan, text)
 			return planResult{Plan: plan, Context: collected.String(), ReadPaths: readPaths}, nil
 		}
 		if transcript == nil {
@@ -449,6 +453,54 @@ func logSummary(progress Progress, label, summary string) {
 	}
 }
 
+// alternatePlan matches a shape providers return when they ignore the
+// requested schema, for example
+// {"plan":[{"file":"index.html","changes":[...]}],"notes":"..."}.
+type alternatePlan struct {
+	Plan []struct {
+		File string `json:"file"`
+		Path string `json:"path"`
+	} `json:"plan"`
+	Files []string `json:"files"`
+	Notes string   `json:"notes"`
+}
+
+// salvagePlan fills in a plan whose fields came back empty because the
+// provider let the model answer in its own shape rather than the schema
+// that was asked for. Losing the file list this way is expensive: it costs
+// the patch phase its context and the fallback its target.
+func salvagePlan(plan *Plan, text string) {
+	if len(plan.FilesToModify) > 0 {
+		return
+	}
+	var alternate alternatePlan
+	if err := decodeJSON(text, &alternate); err != nil {
+		return
+	}
+	for _, entry := range alternate.Plan {
+		if path := firstNonEmpty(entry.File, entry.Path); path != "" {
+			plan.FilesToModify = append(plan.FilesToModify, path)
+		}
+	}
+	for _, path := range alternate.Files {
+		if path != "" {
+			plan.FilesToModify = append(plan.FilesToModify, path)
+		}
+	}
+	if plan.Summary == "" {
+		plan.Summary = alternate.Notes
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // mappedPaths are the file paths listed in a repository map.
 func mappedPaths(repoMap string) []string {
 	var paths []string
@@ -483,6 +535,20 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 	}
 }
 
+// gatherContext is everything the patch phase should see: what the
+// planning tools turned up, plus the current contents of the planned
+// files, re-read so a repair works against the file as it is now.
+func (runner *Runner) gatherContext(planned planResult) (string, error) {
+	files, err := runner.readPlanFiles(planned.Plan)
+	if err != nil {
+		return "", err
+	}
+	if files == "" {
+		return planned.Context, nil
+	}
+	return planned.Context + "\nPLANNED FILES:\n" + files, nil
+}
+
 func (runner *Runner) readPlanFiles(plan Plan) (string, error) {
 	paths := append([]string{}, plan.FilesToModify...)
 	paths = append(paths, plan.ContextFiles...)
@@ -495,10 +561,14 @@ func (runner *Runner) readPlanFiles(plan Plan) (string, error) {
 		}
 	}
 	if len(unique) == 0 {
-		// The plan named no files, or named files that don't exist yet
-		// (a common, valid case for an empty or new project) — either
-		// way there's nothing to read, and the patch phase creates them.
-		return "No files exist yet; the plan creates new files.", nil
+		if len(paths) == 0 {
+			// The plan named nothing at all. Say nothing rather than
+			// claiming the files don't exist, which would contradict
+			// the contents the planning tools already gathered.
+			return "", nil
+		}
+		// Named files that aren't there yet: the patch creates them.
+		return "None of the planned files exist yet; the change creates them.", nil
 	}
 	return runner.repository.Read(unique)
 }

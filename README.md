@@ -25,6 +25,21 @@ reads, the searches it runs, the plan, the patch, and the test result — so
 the finished session leaves a readable trail rather than a single status
 line that overwrites itself.
 
+## Debugging
+
+When a provider returns something unexpected, `/debug` in a session shows
+every request and reply as they happen. For a full untruncated trace on
+disk, including each patch and what Git said about it:
+
+```sh
+YOLOCODER_DEBUG_LOG=1 yolocoder          # ~/.config/yolocoder/debug.log
+YOLOCODER_DEBUG_LOG=/tmp/trace.log yolocoder
+```
+
+The trace holds the contents of the files being worked on, so it is written
+with user-only permissions. It never contains the API key, which travels in
+a header rather than the request body.
+
 ## Install
 
 macOS and Linux:

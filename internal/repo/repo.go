@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/mindsdb/yolocoder/internal/debug"
 )
 
 const (
@@ -207,6 +209,7 @@ func (repository *Repository) Apply(patch string) error {
 	if strings.TrimSpace(patch) == "" {
 		return fmt.Errorf("patch is empty")
 	}
+	debug.Log("PATCH", patch)
 	applyArgs := []string{"-c", "core.autocrlf=false", "apply", "--recount", "--whitespace=fix", "--verbose"}
 	for _, args := range [][]string{
 		append(append([]string{}, applyArgs...), "--check", "-"),
@@ -216,9 +219,11 @@ func (repository *Repository) Apply(patch string) error {
 		command.Stdin = strings.NewReader(patch)
 		output, err := command.CombinedOutput()
 		if err != nil {
+			debug.Logf("PATCH FAILED", "git %s\n%s", strings.Join(args, " "), strings.TrimSpace(string(output)))
 			return fmt.Errorf("git %s failed: %s", strings.Join(args, " "), strings.TrimSpace(string(output)))
 		}
 	}
+	debug.Log("PATCH APPLIED", "")
 	return nil
 }
 

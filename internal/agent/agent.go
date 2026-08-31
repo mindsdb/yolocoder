@@ -122,7 +122,8 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	if err != nil {
 		return "", err
 	}
-	progress.Log(fmt.Sprintf("  mapped %d files", countMapped(repoMap)))
+	mapped := mappedPaths(repoMap)
+	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
 
 	progress.Status("Finding the right code...")
 	planned, err := runner.plan(ctx, task, repoMap, progress)
@@ -194,7 +195,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	// removed lines match the file exactly, which a model-written one
 	// often gets subtly wrong, so fall back to writing whole files.
 	if strings.HasPrefix(evidence, "The patch did not apply") {
-		targets := rewriteTargets(plan, planned.ReadPaths)
+		targets := rewriteTargets(plan, planned.ReadPaths, mapped)
 		if len(targets) == 0 {
 			return "", fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
 		}
@@ -373,13 +374,18 @@ func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence
 	return result, nil
 }
 
-// rewriteTargets are the files to rewrite: the ones the plan named, or
-// failing that the ones the model actually opened. A model that returns
-// an empty files_to_modify has still usually read the file it meant.
-func rewriteTargets(plan Plan, readPaths []string) []string {
+// rewriteTargets are the files to rewrite, in descending order of
+// confidence: the ones the plan named, else the ones the model actually
+// opened, else the only file in the folder. A weak model often returns an
+// empty files_to_modify, and the file it read (or the single file there
+// is) is then the best evidence of what it meant to change.
+func rewriteTargets(plan Plan, readPaths, mapped []string) []string {
+	if len(mapped) != 1 {
+		mapped = nil
+	}
 	seen := map[string]bool{}
 	var targets []string
-	for _, group := range [][]string{plan.FilesToModify, readPaths} {
+	for _, group := range [][]string{plan.FilesToModify, readPaths, mapped} {
 		for _, path := range group {
 			if path = strings.TrimSpace(path); path != "" && !seen[path] {
 				seen[path] = true
@@ -443,15 +449,15 @@ func logSummary(progress Progress, label, summary string) {
 	}
 }
 
-// countMapped counts the files listed in a repository map.
-func countMapped(repoMap string) int {
-	count := 0
+// mappedPaths are the file paths listed in a repository map.
+func mappedPaths(repoMap string) []string {
+	var paths []string
 	for _, line := range strings.Split(repoMap, "\n") {
-		if strings.TrimSpace(line) != "" {
-			count++
+		if fields := strings.Fields(line); len(fields) > 0 {
+			paths = append(paths, fields[0])
 		}
 	}
-	return count
+	return paths
 }
 
 func (runner *Runner) runTool(ctx context.Context, call responseItem) string {

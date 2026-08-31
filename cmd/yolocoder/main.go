@@ -9,6 +9,7 @@ import (
 
 	"github.com/mindsdb/yolocoder/internal/app"
 	"github.com/mindsdb/yolocoder/internal/config"
+	"github.com/mindsdb/yolocoder/internal/debug"
 	"github.com/mindsdb/yolocoder/internal/terminal"
 	"github.com/mindsdb/yolocoder/internal/ui"
 	"github.com/mindsdb/yolocoder/internal/update"
@@ -137,6 +138,10 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		app.PrintCommands()
 		fmt.Println()
 		return true, false
+	case "/debug":
+		toggleDebug()
+		fmt.Println()
+		return true, false
 	case "/model":
 		if fromEnvironment {
 			fmt.Println("[*_*] /model can't change an OPENAI_* environment provider; set OPENAI_MODEL instead.")
@@ -161,12 +166,63 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 	return false, false
 }
 
+// activeSession is the session currently reporting progress, so trace
+// entries can be written above its spinner rather than through it.
+var activeSession *ui.Session
+
+// toggleDebug turns the live trace of the model exchange on or off.
+func toggleDebug() {
+	if debug.SinkEnabled() {
+		debug.SetSink(nil)
+		fmt.Println("[*_*] Debug output off.")
+		return
+	}
+	debug.SetSink(func(title, body string) {
+		text := "  \x1b[2m[debug] " + title + "\x1b[0m"
+		if body = strings.TrimSpace(body); body != "" {
+			text += "\n" + indent(clip(body, debugClip))
+		}
+		if activeSession != nil {
+			activeSession.Log(text)
+			return
+		}
+		fmt.Println(text)
+	})
+	fmt.Println("[*_*] Debug output on: every request and reply will be shown.")
+	if path := debug.Path(); path != "" {
+		fmt.Printf("[*_*] Full trace is also being written to %s\n", path)
+	} else {
+		fmt.Printf("[*_*] For a full untruncated trace, restart with %s=1\n", debug.PathEnv)
+	}
+}
+
+// debugClip keeps a traced body readable in the terminal; the file log
+// gets it untruncated.
+const debugClip = 2000
+
+func clip(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return text[:limit] + fmt.Sprintf("\n... %d more bytes (see the debug log file)", len(text)-limit)
+}
+
+func indent(text string) string {
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		lines[index] = "  \x1b[2m" + line + "\x1b[0m"
+	}
+	return strings.Join(lines, "\n")
+}
+
 // runTask runs one task, reporting progress as it goes and printing the
 // model's reply at the end.
 func runTask(task string, provider config.LLM) error {
 	session := ui.NewSession(os.Stdout)
 	session.Start("Thinking...")
+	activeSession = session
 	reply, err := app.RunTask(context.Background(), task, provider, session)
+	activeSession = nil
 	session.Stop()
 	if err != nil {
 		return err

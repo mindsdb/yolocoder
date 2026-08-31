@@ -199,15 +199,23 @@ func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
 func TestRewriteTargetsFallsBackToTheFilesRead(t *testing.T) {
 	// A weak model often returns a plan with an empty files_to_modify.
 	// The files it opened are then the best evidence of what it meant.
-	named := rewriteTargets(Plan{FilesToModify: []string{"a.go", "a.go", ""}}, []string{"b.go"})
+	named := rewriteTargets(Plan{FilesToModify: []string{"a.go", "a.go", ""}}, []string{"b.go"}, []string{"c.go"})
 	if len(named) != 1 || named[0] != "a.go" {
 		t.Fatalf("targets = %v, want just a.go deduplicated", named)
 	}
-	fallback := rewriteTargets(Plan{}, []string{"index.html", "index.html"})
+	fallback := rewriteTargets(Plan{}, []string{"index.html", "index.html"}, []string{"other.html"})
 	if len(fallback) != 1 || fallback[0] != "index.html" {
 		t.Fatalf("targets = %v, want the file that was read", fallback)
 	}
-	if targets := rewriteTargets(Plan{}, nil); len(targets) != 0 {
+	// With nothing named or read, a single-file folder is unambiguous.
+	if only := rewriteTargets(Plan{}, nil, []string{"index.html"}); len(only) != 1 || only[0] != "index.html" {
+		t.Fatalf("targets = %v, want the only file in the folder", only)
+	}
+	// Several files with no other signal stays ambiguous, so no guess.
+	if targets := rewriteTargets(Plan{}, nil, []string{"a.go", "b.go"}); len(targets) != 0 {
+		t.Fatalf("targets = %v, want none", targets)
+	}
+	if targets := rewriteTargets(Plan{}, nil, nil); len(targets) != 0 {
 		t.Fatalf("targets = %v, want none", targets)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
+	"github.com/mindsdb/yolocoder/internal/debug"
 )
 
 type Client struct {
@@ -95,6 +96,10 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	if err != nil {
 		return responseEnvelope{}, err
 	}
+	// The request body carries no credentials (the key travels in the
+	// Authorization header), so it is safe to trace.
+	label := requestLabel(request)
+	debug.Log("REQUEST "+label, string(payload))
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return responseEnvelope{}, err
@@ -111,6 +116,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	if err != nil {
 		return responseEnvelope{}, err
 	}
+	debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(body))
 	var envelope responseEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w", err)
@@ -155,6 +161,15 @@ func responsesEndpoint(baseURL string) string {
 		return baseURL + "/responses"
 	}
 	return baseURL + "/v1/responses"
+}
+
+// requestLabel names a request by the schema it asks for, which is what
+// distinguishes the route, plan, patch and rewrite calls in a trace.
+func requestLabel(request responseRequest) string {
+	if request.Text != nil && request.Text.Format.Name != "" {
+		return request.Text.Format.Name
+	}
+	return "response"
 }
 
 func modelsEndpoint(baseURL string) string {

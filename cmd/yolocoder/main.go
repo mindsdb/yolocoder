@@ -53,6 +53,12 @@ func main() {
 	}
 
 	fmt.Printf("YoloCoder %s\n", version.Display())
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "find current folder: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Folder: %s\n", workingDirectory)
 	fromEnvironment := false
 	if len(args) > 0 && args[0] == "--llm-from-env-vars" {
 		fromEnvironment = true

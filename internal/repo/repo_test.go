@@ -22,6 +22,60 @@ func TestMapRespectsGitignore(t *testing.T) {
 	}
 }
 
+func TestOpenExistingRepository(t *testing.T) {
+	repository := testRepository(t)
+	nested := filepath.Join(repository.Root, "nested", "folder")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := Open(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDirectory(t, opened.Root, repository.Root) {
+		t.Fatalf("Open() root = %q, want %q", opened.Root, repository.Root)
+	}
+}
+
+func TestOpenInitializesPlainFolder(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "existing.txt", "keep me")
+	opened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameDirectory(t, opened.Root, root) {
+		t.Fatalf("Open() root = %q, want %q", opened.Root, root)
+	}
+	if info, err := os.Stat(filepath.Join(root, ".git")); err != nil || !info.IsDir() {
+		t.Fatalf("expected .git directory, info=%v err=%v", info, err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "existing.txt"))
+	if err != nil || string(content) != "keep me" {
+		t.Fatalf("existing file changed: %q, %v", content, err)
+	}
+	mapText, err := opened.Map()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mapText, "existing.txt") {
+		t.Fatalf("initialized repository map missing file:\n%s", mapText)
+	}
+}
+
+func sameDirectory(t *testing.T, first, second string) bool {
+	t.Helper()
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(firstInfo, secondInfo)
+}
+
 func TestReadRejectsParentPath(t *testing.T) {
 	repository := testRepository(t)
 	if _, err := repository.Read([]string{"../outside"}); err == nil {

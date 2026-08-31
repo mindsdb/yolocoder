@@ -32,13 +32,46 @@ func (repository *Repository) Exists(path string) bool {
 }
 
 func Open(path string) (*Repository, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, fmt.Errorf("git is required but was not found on PATH")
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve working directory: %w", err)
+	}
+	info, err := os.Stat(absolutePath)
+	if err != nil {
+		return nil, fmt.Errorf("open working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("working path is not a directory: %s", absolutePath)
+	}
+
+	root, err := repositoryRoot(absolutePath)
+	if err == nil {
+		return &Repository{Root: root}, nil
+	}
+
+	command := exec.Command("git", "init", "-q")
+	command.Dir = absolutePath
+	if output, initErr := command.CombinedOutput(); initErr != nil {
+		return nil, fmt.Errorf("initialize Git repository: %w: %s", initErr, strings.TrimSpace(string(output)))
+	}
+	root, err = repositoryRoot(absolutePath)
+	if err != nil {
+		return nil, err
+	}
+	return &Repository{Root: root}, nil
+}
+
+func repositoryRoot(path string) (string, error) {
 	command := exec.Command("git", "rev-parse", "--show-toplevel")
 	command.Dir = path
-	output, err := command.Output()
+	output, err := command.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("yolocoder requires a Git repository")
+		return "", fmt.Errorf("find Git repository: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return &Repository{Root: strings.TrimSpace(string(output))}, nil
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (repository *Repository) Map() (string, error) {

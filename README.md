@@ -6,6 +6,13 @@ A minimal boilerplate for the YoloCoder CLI.
 yolocoder "Add expiration support to user sessions"
 ```
 
+At startup, YoloCoder prints the current folder it will work in before mapping
+the repository.
+
+Running `yolocoder` without a task opens a multiline terminal editor. Paste
+multiline instructions normally, use arrow keys or the mouse to reposition the
+cursor, press Enter for a new line, and press Ctrl+D to submit.
+
 ## Install
 
 macOS and Linux:
@@ -56,13 +63,15 @@ Use `yolocoder config show`, `yolocoder config connect`, or
 
 YoloCoder keeps the loop deliberately small:
 
-1. Builds a compact, `.gitignore`-aware repository map.
-2. Lets the model read likely files or search only when needed.
-3. Requests a strict JSON implementation plan.
-4. Requests a strict JSON response containing a unified diff.
-5. Checks and applies the diff with `git apply`.
-6. Runs the repository's detected test command.
-7. Retries at most twice using only patch or test failure evidence.
+1. Uses the current Git repository, or runs `git init` when the current folder
+   is not already part of one.
+2. Builds a compact, `.gitignore`-aware repository map.
+3. Lets the model read likely files or search only when needed.
+4. Requests a strict JSON implementation plan.
+5. Requests a strict JSON response containing a unified diff.
+6. Checks and applies the diff with `git apply`.
+7. Runs the repository's detected test command.
+8. Retries at most twice using only patch or test failure evidence.
 
 The model never receives a shell tool. Local code exposes only bounded
 `read_files` and `search` tools during context gathering. Patch application

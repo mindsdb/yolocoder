@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/repo"
+	"github.com/mindsdb/yolocoder/internal/terminal"
 )
 
 func PrepareTask(task string, fromEnvironment bool) (string, config.LLM, error) {
@@ -65,8 +65,7 @@ func promptTask() (string, error) {
 	if !terminalInput() {
 		return "", fmt.Errorf("a task is required\n\nUsage: yolocoder [--llm-from-env-vars] <task>")
 	}
-	fmt.Print("What should I change?\n> ")
-	task, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout)
 	if err != nil {
 		return "", fmt.Errorf("read task: %w", err)
 	}

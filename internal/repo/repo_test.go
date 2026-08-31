@@ -105,6 +105,26 @@ func TestApplyInPlainFolderNestedUnderAnAncestorRepository(t *testing.T) {
 	}
 }
 
+func TestApplyToleratesAMiscountedHunkHeader(t *testing.T) {
+	// Reproduces a real failure: "git apply --check - failed: ...
+	// error: corrupt patch at line N". Models sometimes get a hunk's
+	// @@ -a,b +c,d @@ line counts wrong, especially on longer hunks;
+	// --recount asks git to infer them from the hunk body instead.
+	root := t.TempDir()
+	writeFile(t, root, "file.txt", "a\nb\nc\n")
+	repository := &Repository{Root: root}
+	// Header claims 3 lines both sides (-1,3 +1,3), but the body below
+	// actually spans 4 lines (a, b, +new line, c).
+	patch := "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n a\n b\n+new line\n c\n"
+	if err := repository.Apply(patch); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "file.txt"))
+	if err != nil || string(content) != "a\nb\nnew line\nc\n" {
+		t.Fatalf("content = %q, %v", content, err)
+	}
+}
+
 func TestApplyWithoutGitRepository(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "file.txt", "old\n")

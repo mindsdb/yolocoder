@@ -195,12 +195,20 @@ func (repository *Repository) Search(ctx context.Context, query string) (string,
 // Apply patches files with `git apply`, which works against a plain folder
 // without requiring an initialized repository. core.autocrlf is pinned off
 // so the result doesn't depend on ambient Git config (system-wide, or from
-// an unrelated ancestor repository).
+// an unrelated ancestor repository). --recount tells git to infer each
+// hunk's line counts from its body instead of trusting the @@ header, since
+// a model-generated diff miscounting them (a common mistake, especially on
+// longer hunks) otherwise fails with "corrupt patch at line N". --whitespace=fix
+// silently normalizes trailing whitespace rather than erroring on it.
 func (repository *Repository) Apply(patch string) error {
 	if strings.TrimSpace(patch) == "" {
 		return fmt.Errorf("patch is empty")
 	}
-	for _, args := range [][]string{{"-c", "core.autocrlf=false", "apply", "--check", "-"}, {"-c", "core.autocrlf=false", "apply", "-"}} {
+	applyArgs := []string{"-c", "core.autocrlf=false", "apply", "--recount", "--whitespace=fix"}
+	for _, args := range [][]string{
+		append(append([]string{}, applyArgs...), "--check", "-"),
+		append(append([]string{}, applyArgs...), "-"),
+	} {
 		command := repository.gitCommand(args...)
 		command.Stdin = strings.NewReader(patch)
 		output, err := command.CombinedOutput()

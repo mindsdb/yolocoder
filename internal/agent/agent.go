@@ -30,14 +30,23 @@ type routeDecision struct {
 	Reply      string `json:"reply"`
 }
 
-// Rewrite carries whole files rather than a diff, for when patching fails.
-type Rewrite struct {
-	Summary string        `json:"summary"`
-	Files   []RewriteFile `json:"files"`
+// planResult is what the planning phase learned: the plan itself, the
+// tool output gathered along the way, and the files the model actually
+// read. The read paths matter because a weak model often returns a plan
+// with an empty files_to_modify, and the files it opened are then the
+// best evidence of what it meant to change.
+type planResult struct {
+	Plan      Plan
+	Context   string
+	ReadPaths []string
 }
 
-type RewriteFile struct {
-	Path    string `json:"path"`
+// Rewrite carries one file's complete new contents, for when no diff will
+// apply. It is deliberately one file per request with a flat schema:
+// asking for an array of path/content objects made weak providers return
+// an empty array, and a single long file is likelier to fit in one reply.
+type Rewrite struct {
+	Summary string `json:"summary"`
 	Content string `json:"content"`
 }
 
@@ -116,14 +125,16 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	progress.Log(fmt.Sprintf("  mapped %d files", countMapped(repoMap)))
 
 	progress.Status("Finding the right code...")
-	plan, contextText, err := runner.plan(ctx, task, repoMap, progress)
+	planned, err := runner.plan(ctx, task, repoMap, progress)
 	if err != nil {
 		return "", err
 	}
+	plan := planned.Plan
 	logSummary(progress, "plan", plan.Summary)
 	for _, path := range plan.FilesToModify {
 		progress.Log("  will edit " + path)
 	}
+	contextText := planned.Context
 	plannedContext, err := runner.readPlanFiles(plan)
 	if err != nil {
 		return "", err
@@ -183,20 +194,30 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	// removed lines match the file exactly, which a model-written one
 	// often gets subtly wrong, so fall back to writing whole files.
 	if strings.HasPrefix(evidence, "The patch did not apply") {
-		progress.Status("Rewriting the files instead...")
-		contextText, err = runner.readPlanFiles(plan)
-		if err != nil {
-			return "", err
+		targets := rewriteTargets(plan, planned.ReadPaths)
+		if len(targets) == 0 {
+			return "", fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
 		}
-		rewrite, err := runner.rewrite(ctx, task, plan, contextText, evidence)
-		if err != nil {
-			return "", err
-		}
-		for _, file := range rewrite.Files {
-			if err := runner.repository.Write(file.Path, file.Content); err != nil {
+		progress.Status("Rewriting the file instead...")
+		summary := ""
+		for _, path := range targets {
+			current, _ := runner.repository.ReadFile(path)
+			rewrite, err := runner.rewrite(ctx, task, path, current, evidence)
+			if err != nil {
 				return "", err
 			}
-			progress.Log("  wrote " + file.Path)
+			// An empty rewrite of a file that has content is the model
+			// failing, not an instruction to truncate the user's file.
+			if strings.TrimSpace(rewrite.Content) == "" && strings.TrimSpace(current) != "" {
+				return "", fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
+			}
+			if err := runner.repository.Write(path, rewrite.Content); err != nil {
+				return "", err
+			}
+			progress.Log("  wrote " + path)
+			if summary == "" {
+				summary = rewrite.Summary
+			}
 		}
 		progress.Status("Testing the change...")
 		testResult := RunTests(ctx, runner.repository.Root)
@@ -206,9 +227,12 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 			} else {
 				progress.Log("  tests passed")
 			}
-			return rewrite.Summary, nil
+			if summary == "" {
+				summary = "Rewrote " + strings.Join(targets, ", ")
+			}
+			return summary, nil
 		}
-		return "", fmt.Errorf("rewrote the files, but tests failed:\n%s", testResult.Output)
+		return "", fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
 	return "", fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
 }
@@ -241,10 +265,11 @@ func (runner *Runner) route(ctx context.Context, task string) (routeDecision, er
 // response state, and one that doesn't will reject a function_call_output
 // referencing a call_id it never stored, so the transcript is tracked here
 // instead.
-func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress Progress) (Plan, string, error) {
+func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress Progress) (planResult, error) {
 	taskText := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
 	var transcript []any
 	var collected strings.Builder
+	var readPaths []string
 	for round := 0; round < maxToolRounds; round++ {
 		var input any = taskText
 		if transcript != nil {
@@ -261,32 +286,33 @@ func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress P
 		response, err := runner.client.create(callCtx, request)
 		cancel()
 		if err != nil {
-			return Plan{}, "", err
+			return planResult{}, err
 		}
 		calls := response.calls()
 		if len(calls) == 0 {
 			text, err := response.text()
 			if err != nil {
-				return Plan{}, "", err
+				return planResult{}, err
 			}
 			var plan Plan
 			if err := decodeJSON(text, &plan); err != nil {
-				return Plan{}, "", fmt.Errorf("decode implementation plan: %w", err)
+				return planResult{}, fmt.Errorf("decode implementation plan: %w", err)
 			}
-			return plan, collected.String(), nil
+			return planResult{Plan: plan, Context: collected.String(), ReadPaths: readPaths}, nil
 		}
 		if transcript == nil {
 			transcript = []any{inputMessage{Role: "user", Content: taskText}}
 		}
 		for _, call := range calls {
 			progress.Log("  " + describeCall(call))
+			readPaths = append(readPaths, readFilePaths(call)...)
 			output := runner.runTool(ctx, call)
 			fmt.Fprintf(&collected, "\nTOOL %s:\n%s\n", call.Name, output)
 			transcript = append(transcript, call)
 			transcript = append(transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}
 	}
-	return Plan{}, "", fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
+	return planResult{}, fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
 }
 
 func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan, contextText, evidence string) (Patch, error) {
@@ -319,11 +345,10 @@ func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan
 	return patch, nil
 }
 
-// rewrite asks for the complete new contents of the files the plan
-// touches, used when no diff would apply.
-func (runner *Runner) rewrite(ctx context.Context, task string, plan Plan, contextText, evidence string) (Rewrite, error) {
-	planJSON, _ := json.Marshal(plan)
-	input := fmt.Sprintf("TASK:\n%s\n\nPLAN:\n%s\n\nCURRENT FILE CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, planJSON, contextText, evidence)
+// rewrite asks for one file's complete new contents, used when no diff
+// would apply.
+func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence string) (Rewrite, error) {
+	input := fmt.Sprintf("TASK:\n%s\n\nFILE TO REWRITE:\n%s\n\nITS CURRENT CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, path, current, evidence)
 	callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	response, err := runner.client.create(callCtx, responseRequest{
@@ -340,17 +365,57 @@ func (runner *Runner) rewrite(ctx context.Context, task string, plan Plan, conte
 	}
 	var result Rewrite
 	if err := decodeJSON(text, &result); err != nil {
-		return Rewrite{}, fmt.Errorf("decode file rewrite: %w", err)
+		return Rewrite{}, fmt.Errorf("decode rewrite of %s: %w", path, err)
 	}
-	if len(result.Files) == 0 {
-		return Rewrite{}, fmt.Errorf("model returned no files to write")
-	}
-	for _, file := range result.Files {
-		if strings.TrimSpace(file.Path) == "" {
-			return Rewrite{}, fmt.Errorf("model returned a file with no path")
-		}
+	if result.Content == "" {
+		return Rewrite{}, fmt.Errorf("the model returned no content for %s; it replied: %s", path, snippet(text))
 	}
 	return result, nil
+}
+
+// rewriteTargets are the files to rewrite: the ones the plan named, or
+// failing that the ones the model actually opened. A model that returns
+// an empty files_to_modify has still usually read the file it meant.
+func rewriteTargets(plan Plan, readPaths []string) []string {
+	seen := map[string]bool{}
+	var targets []string
+	for _, group := range [][]string{plan.FilesToModify, readPaths} {
+		for _, path := range group {
+			if path = strings.TrimSpace(path); path != "" && !seen[path] {
+				seen[path] = true
+				targets = append(targets, path)
+			}
+		}
+		if len(targets) > 0 {
+			return targets
+		}
+	}
+	return targets
+}
+
+// readFilePaths are the paths a read_files call asked for.
+func readFilePaths(call responseItem) []string {
+	if call.Name != "read_files" {
+		return nil
+	}
+	var arguments toolArguments
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
+		return nil
+	}
+	return arguments.Paths
+}
+
+// snippet trims a model reply down to something short enough to put in an
+// error while still showing what came back.
+func snippet(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) > 300 {
+		return text[:300] + "..."
+	}
+	if text == "" {
+		return "(nothing)"
+	}
+	return text
 }
 
 // describeCall renders a tool call as a short line for the progress log,
@@ -462,11 +527,8 @@ func patchSchema() map[string]any {
 func rewriteSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"summary": map[string]any{"type": "string"},
-		"files": map[string]any{"type": "array", "items": objectSchema(map[string]any{
-			"path":    map[string]any{"type": "string"},
-			"content": map[string]any{"type": "string"},
-		}, []string{"path", "content"})},
-	}, []string{"summary", "files"})
+		"content": map[string]any{"type": "string"},
+	}, []string{"summary", "content"})
 }
 
 func routeSchema() map[string]any {
@@ -494,11 +556,12 @@ If repairing a test failure, produce an incremental diff against the current rep
 Respond with only the JSON object, no other text before or after it.`
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.
-Your unified diff could not be applied, so supply whole files instead.
-For every file the change touches, return its complete new contents, copied
-from the supplied current contents with only the required edits made.
-Never abbreviate, summarize, or elide any part of a file with comments like
-"unchanged" or "...": the content you return replaces the file exactly.
+Your unified diff could not be applied, so supply the whole file instead.
+Return the named file's complete new contents in the content field, copied
+from the supplied current contents with only the required edit made.
+Never abbreviate, summarize, or elide any part of the file with comments
+like "unchanged" or "...": what you return replaces the file exactly, so
+anything you leave out is deleted.
 Respond with only the JSON object, no other text before or after it.`
 
 const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.

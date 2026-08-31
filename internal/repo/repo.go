@@ -222,6 +222,24 @@ func (repository *Repository) Apply(patch string) error {
 	return nil
 }
 
+// ReadFile returns one file's raw contents, without the framing Read adds
+// for the model. It reports an empty string for a file that doesn't exist
+// yet, since the caller may be about to create it.
+func (repository *Repository) ReadFile(path string) (string, error) {
+	fullPath, err := repository.safePath(path)
+	if err != nil {
+		return "", err
+	}
+	content, err := os.ReadFile(fullPath)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return string(content), nil
+}
+
 // Write replaces path's entire contents, creating it and any parent
 // directories when needed and preserving an existing file's mode. It is
 // the fallback for edits a unified diff can't express reliably: a diff

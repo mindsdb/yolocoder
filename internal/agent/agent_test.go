@@ -196,6 +196,145 @@ func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
 	}
 }
 
+func TestRewriteTargetsFallsBackToTheFilesRead(t *testing.T) {
+	// A weak model often returns a plan with an empty files_to_modify.
+	// The files it opened are then the best evidence of what it meant.
+	named := rewriteTargets(Plan{FilesToModify: []string{"a.go", "a.go", ""}}, []string{"b.go"})
+	if len(named) != 1 || named[0] != "a.go" {
+		t.Fatalf("targets = %v, want just a.go deduplicated", named)
+	}
+	fallback := rewriteTargets(Plan{}, []string{"index.html", "index.html"})
+	if len(fallback) != 1 || fallback[0] != "index.html" {
+		t.Fatalf("targets = %v, want the file that was read", fallback)
+	}
+	if targets := rewriteTargets(Plan{}, nil); len(targets) != 0 {
+		t.Fatalf("targets = %v, want none", targets)
+	}
+}
+
+func TestRunnerRewritesTheFileItReadWhenThePlanNamesNone(t *testing.T) {
+	// Reproduces a real failure: the plan came back with no summary and
+	// no files_to_modify, every diff was rejected, and the rewrite then
+	// had nothing to write ("model returned no files to write"). It must
+	// fall back to the file the model actually opened.
+	root := t.TempDir()
+	original := "<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+	rewritten := "<html>\n<title>Tec-TAC-Tris</title>\n</html>\n"
+
+	planRounds, rewrites := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		name := ""
+		if text, ok := body["text"].(map[string]any); ok {
+			if format, ok := text["format"].(map[string]any); ok {
+				name, _ = format["name"].(string)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch name {
+		case "message_route":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+		case "implementation_plan":
+			planRounds++
+			if planRounds == 1 {
+				fmt.Fprint(writer, `{"id":"resp_1","output":[{"type":"function_call","name":"read_files","call_id":"c1","arguments":"{\"paths\":[\"index.html\"]}"}]}`)
+				return
+			}
+			// An empty plan, exactly as the real provider returned.
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"\",\"files_to_modify\":[],\"context_files\":[],\"steps\":[]}"}]}]}`)
+		case "unified_patch":
+			badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>Tec-TAC-Tris</title>\n </html>\n"
+			payload, _ := json.Marshal(Patch{Diff: badDiff})
+			writeOutputText(writer, string(payload))
+		case "file_rewrite":
+			rewrites++
+			if input, _ := body["input"].(string); !strings.Contains(input, "index.html") {
+				t.Fatalf("rewrite request does not name the file:\n%s", input)
+			}
+			payload, _ := json.Marshal(Rewrite{Summary: "Retitled", Content: rewritten})
+			writeOutputText(writer, string(payload))
+		default:
+			t.Fatalf("unexpected schema %q", name)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	progress := &recordingProgress{}
+	reply, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Retitled" {
+		t.Fatalf("reply = %q", reply)
+	}
+	if rewrites != 1 {
+		t.Fatalf("rewrite requests = %d, want 1", rewrites)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil || string(content) != rewritten {
+		t.Fatalf("index.html = %q, %v", content, err)
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "wrote index.html") {
+		t.Fatalf("progress log missing the rewrite:\n%s", trail)
+	}
+}
+
+func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
+	// An empty rewrite of a file that has content is the model failing,
+	// not an instruction to truncate the user's file.
+	root := t.TempDir()
+	original := "<html>keep me</html>\n"
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		name := ""
+		if text, ok := body["text"].(map[string]any); ok {
+			if format, ok := text["format"].(map[string]any); ok {
+				name, _ = format["name"].(string)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch name {
+		case "message_route":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+		case "implementation_plan":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"x\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[]}"}]}]}`)
+		case "unified_patch":
+			payload, _ := json.Marshal(Patch{Diff: "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1 +1 @@\n-nope\n+new\n"})
+			writeOutputText(writer, string(payload))
+		case "file_rewrite":
+			payload, _ := json.Marshal(Rewrite{Summary: "oops", Content: "   "})
+			writeOutputText(writer, string(payload))
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	_, err := NewRunner(client, repository).Run(context.Background(), "retitle it", &recordingProgress{})
+	if err == nil || !strings.Contains(err.Error(), "refusing to empty") {
+		t.Fatalf("err = %v, want a refusal to empty the file", err)
+	}
+	content, readErr := os.ReadFile(filepath.Join(root, "index.html"))
+	if readErr != nil || string(content) != original {
+		t.Fatalf("index.html = %q, %v; the file must be left alone", content, readErr)
+	}
+}
+
 func TestRunnerRewritesFilesWhenNoDiffApplies(t *testing.T) {
 	// Reproduces a real failure: the file contains the HTML entity
 	// "&amp;" but the model's diff writes "&" in the line it removes, so
@@ -234,7 +373,7 @@ func TestRunnerRewritesFilesWhenNoDiffApplies(t *testing.T) {
 			writeOutputText(writer, string(payload))
 		case "file_rewrite":
 			rewrites++
-			payload, _ := json.Marshal(Rewrite{Summary: "Retitled to TICTACTRIS", Files: []RewriteFile{{Path: "index.html", Content: rewritten}}})
+			payload, _ := json.Marshal(Rewrite{Summary: "Retitled to TICTACTRIS", Content: rewritten})
 			writeOutputText(writer, string(payload))
 		default:
 			t.Fatalf("unexpected schema %q", name)

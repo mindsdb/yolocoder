@@ -56,7 +56,7 @@ irm https://raw.githubusercontent.com/mindsdb/yolocoder/main/install.ps1 | iex
 
 ## Develop
 
-Requires Go 1.22 or newer.
+Requires Go 1.24 or newer.
 
 ```sh
 go run ./cmd/yolocoder
@@ -117,8 +117,9 @@ The model never receives a shell tool. Local code exposes only bounded
 and testing are deterministic local operations.
 
 Release builds check the rolling `latest` GitHub release whenever the CLI
-starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum
-and replaces the current binary. The new build runs on the next invocation.
+starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum,
+replaces the current binary, says so, and restarts into it, so the run you
+just started continues on the new build rather than the one it launched with.
 Set `YOLOCODER_NO_AUTOUPDATE=1` to disable this behavior. Normal startup also
 prints the embedded version and short commit, for example `YoloCoder main
 (68542b0)`.

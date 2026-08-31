@@ -20,13 +20,12 @@ type Client struct {
 }
 
 type responseRequest struct {
-	Model              string         `json:"model"`
-	Instructions       string         `json:"instructions,omitempty"`
-	Input              any            `json:"input"`
-	PreviousResponseID string         `json:"previous_response_id,omitempty"`
-	Tools              []functionTool `json:"tools,omitempty"`
-	ToolChoice         string         `json:"tool_choice,omitempty"`
-	Text               *textConfig    `json:"text,omitempty"`
+	Model        string         `json:"model"`
+	Instructions string         `json:"instructions,omitempty"`
+	Input        any            `json:"input"`
+	Tools        []functionTool `json:"tools,omitempty"`
+	ToolChoice   string         `json:"tool_choice,omitempty"`
+	Text         *textConfig    `json:"text,omitempty"`
 }
 
 type functionTool struct {

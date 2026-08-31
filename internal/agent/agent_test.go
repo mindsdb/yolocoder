@@ -30,8 +30,25 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 		case 2:
 			fmt.Fprint(writer, `{"id":"resp_1","output":[{"type":"function_call","name":"read_files","call_id":"call_1","arguments":"{\"paths\":[\"hello.txt\"]}"}]}`)
 		case 3:
-			if body["previous_response_id"] != "resp_1" {
-				t.Fatalf("previous_response_id = %v", body["previous_response_id"])
+			// The continuation must resend the full transcript itself
+			// rather than lean on previous_response_id: not every
+			// OpenAI-compatible provider persists server-side response
+			// state, and one that doesn't rejects an orphaned
+			// function_call_output.
+			if _, present := body["previous_response_id"]; present {
+				t.Fatalf("previous_response_id must not be sent: %v", body["previous_response_id"])
+			}
+			input, ok := body["input"].([]any)
+			if !ok || len(input) != 3 {
+				t.Fatalf("input = %#v, want a 3-item transcript", body["input"])
+			}
+			call, ok := input[1].(map[string]any)
+			if !ok || call["type"] != "function_call" || call["call_id"] != "call_1" {
+				t.Fatalf("input[1] = %#v, want the echoed function_call", input[1])
+			}
+			output, ok := input[2].(map[string]any)
+			if !ok || output["type"] != "function_call_output" || output["call_id"] != "call_1" {
+				t.Fatalf("input[2] = %#v, want the matching function_call_output", input[2])
 			}
 			fmt.Fprint(writer, `{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Update greeting\",\"files_to_modify\":[\"hello.txt\"],\"context_files\":[],\"steps\":[\"Replace greeting\"]}"}]}]}`)
 		case 4:

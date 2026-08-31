@@ -34,6 +34,11 @@ type toolArguments struct {
 	Query string   `json:"query"`
 }
 
+type inputMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type Runner struct {
 	client     *Client
 	repository *repo.Repository
@@ -127,16 +132,28 @@ func (runner *Runner) route(ctx context.Context, task string) (routeDecision, er
 	return decision, nil
 }
 
+// plan drives the tool-calling loop by resending the full conversation
+// transcript on every round rather than relying on previous_response_id.
+// Not every OpenAI-compatible provider actually persists server-side
+// response state, and one that doesn't will reject a function_call_output
+// referencing a call_id it never stored, so the transcript is tracked here
+// instead.
 func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, string, error) {
-	request := responseRequest{
-		Instructions: planningInstructions,
-		Input:        fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap),
-		Tools:        repositoryTools(),
-		ToolChoice:   "auto",
-		Text:         strictSchema("implementation_plan", planSchema()),
-	}
+	taskText := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
+	var transcript []any
 	var collected strings.Builder
 	for round := 0; round < maxToolRounds; round++ {
+		var input any = taskText
+		if transcript != nil {
+			input = transcript
+		}
+		request := responseRequest{
+			Instructions: planningInstructions,
+			Input:        input,
+			Tools:        repositoryTools(),
+			ToolChoice:   "auto",
+			Text:         strictSchema("implementation_plan", planSchema()),
+		}
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		response, err := runner.client.create(callCtx, request)
 		cancel()
@@ -155,19 +172,14 @@ func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, str
 			}
 			return plan, collected.String(), nil
 		}
-		outputs := make([]toolOutput, 0, len(calls))
+		if transcript == nil {
+			transcript = []any{inputMessage{Role: "user", Content: taskText}}
+		}
 		for _, call := range calls {
 			output := runner.runTool(ctx, call)
 			fmt.Fprintf(&collected, "\nTOOL %s:\n%s\n", call.Name, output)
-			outputs = append(outputs, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
-		}
-		request = responseRequest{
-			Instructions:       planningInstructions,
-			PreviousResponseID: response.ID,
-			Input:              outputs,
-			Tools:              repositoryTools(),
-			ToolChoice:         "auto",
-			Text:               strictSchema("implementation_plan", planSchema()),
+			transcript = append(transcript, call)
+			transcript = append(transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}
 	}
 	return Plan{}, "", fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)

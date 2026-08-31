@@ -41,6 +41,18 @@ func TestDecodeJSONRejectsNonJSON(t *testing.T) {
 	}
 }
 
+func TestReadPlanFilesAllowsAnEmptyPlanForNewFiles(t *testing.T) {
+	repository := &repo.Repository{Root: t.TempDir()}
+	runner := &Runner{repository: repository}
+	text, err := runner.readPlanFiles(Plan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text == "" {
+		t.Fatal("expected an explanatory message, got an empty string")
+	}
+}
+
 func TestRunnerToolPlanPatchApply(t *testing.T) {
 	repository := integrationRepository(t)
 	requests := 0

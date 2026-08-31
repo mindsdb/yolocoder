@@ -277,10 +277,10 @@ func (runner *Runner) readPlanFiles(plan Plan) (string, error) {
 		}
 	}
 	if len(unique) == 0 {
-		if len(paths) == 0 {
-			return "", fmt.Errorf("plan selected no files")
-		}
-		return "No planned files exist yet; the plan creates new files.", nil
+		// The plan named no files, or named files that don't exist yet
+		// (a common, valid case for an empty or new project) — either
+		// way there's nothing to read, and the patch phase creates them.
+		return "No files exist yet; the plan creates new files.", nil
 	}
 	return runner.repository.Read(unique)
 }

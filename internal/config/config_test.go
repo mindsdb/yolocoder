@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -26,7 +27,9 @@ func TestSaveAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows has no POSIX permission bits: os.Stat always reports 0666 for
+	// a writable file there regardless of the mode passed to os.Chmod.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials permissions = %o", info.Mode().Perm())
 	}
 	if filepath.Dir(credentialsPath) != filepath.Join(os.Getenv("HOME"), ".config", "yolocoder") {

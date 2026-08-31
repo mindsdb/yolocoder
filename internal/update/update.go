@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,11 +35,45 @@ type Checker struct {
 	BaseURL string
 }
 
-func CheckOnLaunch(currentCommit string, status ui.RobotStatus) {
-	_, _, err := check(currentCommit, false, status)
+// CheckOnLaunch checks for an update and applies it if one is available,
+// reporting whether a new build was installed. The caller should follow a
+// true result with Relaunch so this invocation continues on the new build
+// instead of finishing out on the one it started with.
+func CheckOnLaunch(currentCommit string, status ui.RobotStatus) bool {
+	_, updated, err := check(currentCommit, false, status)
 	if err != nil {
 		debugf("%v", err)
 	}
+	return updated
+}
+
+// Relaunch re-executes the just-updated binary at its own path with the
+// same arguments and inherited stdio, then exits this process with its
+// result. Self-updating replaces the file on disk, but this process keeps
+// running the code it already loaded, so without this the update would
+// only take effect on the next separate invocation. It only returns if it
+// couldn't even start the new process, in which case the caller should
+// carry on running the code it already has rather than abort.
+func Relaunch() error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	command := exec.Command(executable, os.Args[1:]...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Start(); err != nil {
+		return err
+	}
+	code := 0
+	if err := command.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		}
+	}
+	os.Exit(code)
+	return nil
 }
 
 func CheckNow(currentCommit string, status ui.RobotStatus) (string, bool, error) {

@@ -33,9 +33,20 @@ func main() {
 		return
 	}
 
+	var updated bool
 	ui.WithRobot(os.Stdout, "Starting YoloCoder...", func(status ui.RobotStatus) {
-		update.CheckOnLaunch(version.Commit, status)
+		updated = update.CheckOnLaunch(version.Commit, status)
 	})
+	if updated {
+		// Relaunch replaces the file on disk; without re-executing it,
+		// this process would keep running the old code it already
+		// loaded until the next separate invocation. If it can't even
+		// start the new binary, fall through and keep running on the
+		// old one rather than aborting.
+		if err := update.Relaunch(); err != nil {
+			fmt.Fprintln(os.Stderr, "restart after update:", err)
+		}
+	}
 
 	if len(args) > 0 {
 		switch args[0] {

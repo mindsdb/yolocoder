@@ -15,6 +15,45 @@ import (
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
+// schemaName is the structured-output schema a request asked for, which
+// is what distinguishes the routing, change and rewrite calls.
+func schemaName(body map[string]any) string {
+	text, ok := body["text"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := format["name"].(string)
+	return name
+}
+
+func writeOutputText(writer http.ResponseWriter, text string) {
+	response := responseEnvelope{Output: []responseItem{{Type: "message", Content: []contentItem{{Type: "output_text", Text: text}}}}}
+	_ = json.NewEncoder(writer).Encode(response)
+}
+
+func routeAsCodingTask(writer http.ResponseWriter) {
+	fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+}
+
+// recordingProgress captures progress output so tests can assert on the
+// trail the user would see.
+type recordingProgress struct {
+	statuses []string
+	logs     []string
+}
+
+func (progress *recordingProgress) Status(message string) {
+	progress.statuses = append(progress.statuses, message)
+}
+
+func (progress *recordingProgress) Log(message string) {
+	progress.logs = append(progress.logs, message)
+}
+
 func TestDecodeJSONHandlesProseAndFences(t *testing.T) {
 	type payload struct {
 		Value string `json:"value"`
@@ -42,73 +81,40 @@ func TestDecodeJSONRejectsNonJSON(t *testing.T) {
 	}
 }
 
-func TestReadPlanFiles(t *testing.T) {
-	repository := &repo.Repository{Root: t.TempDir()}
-	runner := &Runner{repository: repository}
-
-	// A plan that named nothing says nothing: claiming files don't exist
-	// would contradict whatever the planning tools already gathered.
-	text, err := runner.readPlanFiles(Plan{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if text != "" {
-		t.Fatalf("readPlanFiles(empty plan) = %q, want nothing", text)
-	}
-
-	// A plan that named files which aren't there yet explains itself, so
-	// the patch phase knows it is creating them.
-	text, err = runner.readPlanFiles(Plan{FilesToModify: []string{"new.go"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(text, "creates them") {
-		t.Fatalf("readPlanFiles(missing files) = %q", text)
-	}
-}
-
-func TestPlanAcceptsFilesAsObjects(t *testing.T) {
+func TestChangeAcceptsFilesAsObjects(t *testing.T) {
 	// Verbatim from a real reply. This is valid JSON in a perfectly
 	// sensible shape; only files_to_modify holding objects rather than
 	// strings made the strict decode fail, and rejecting it threw away
-	// an otherwise complete plan.
+	// an otherwise complete answer.
 	reply := `{
   "summary": "Rename the page title and visible heading to \"TecTacTris\".",
   "files_to_modify": [
-    {
-      "path": "index.html",
-      "changes": [
-        "Change the <title> value from \"TeIC-TAC-TRoIS\" to \"TecTacTris\"."
-      ]
-    }
+    {"path": "index.html", "changes": ["Change the <title> value."]}
   ],
-  "files_for_context": [],
-  "verification": ["Confirm the browser tab title displays \"TecTacTris\"."]
+  "diff": "--- a/index.html\n+++ b/index.html\n"
 }`
-	var plan Plan
-	if err := decodeJSON(reply, &plan); err != nil {
+	var change Change
+	if err := decodeJSON(reply, &change); err != nil {
 		t.Fatalf("decodeJSON() = %v", err)
 	}
-	if len(plan.FilesToModify) != 1 || plan.FilesToModify[0] != "index.html" {
-		t.Fatalf("FilesToModify = %v, want index.html", plan.FilesToModify)
+	if len(change.FilesToModify) != 1 || change.FilesToModify[0] != "index.html" {
+		t.Fatalf("FilesToModify = %v, want index.html", change.FilesToModify)
 	}
-	if !strings.Contains(plan.Summary, "TecTacTris") {
-		t.Fatalf("Summary = %q", plan.Summary)
+	if !strings.Contains(change.Summary, "TecTacTris") {
+		t.Fatalf("Summary = %q", change.Summary)
 	}
 }
 
-func TestPlanAcceptsPlainAndSingularFileLists(t *testing.T) {
-	// The schema-conforming shape must keep working, as must a lone
-	// string where a list was asked for.
-	var plain Plan
-	if err := decodeJSON(`{"summary":"s","files_to_modify":["a.go","b.go"],"context_files":[],"steps":["one"]}`, &plain); err != nil {
+func TestChangeAcceptsPlainAndSingularFileLists(t *testing.T) {
+	var plain Change
+	if err := decodeJSON(`{"summary":"s","files_to_modify":["a.go","b.go"],"diff":"d"}`, &plain); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(plain.FilesToModify, ",") != "a.go,b.go" {
 		t.Fatalf("FilesToModify = %v", plain.FilesToModify)
 	}
-	var single Plan
-	if err := decodeJSON(`{"summary":"s","files_to_modify":"only.go","context_files":[],"steps":[]}`, &single); err != nil {
+	var single Change
+	if err := decodeJSON(`{"summary":"s","files_to_modify":"only.go","diff":"d"}`, &single); err != nil {
 		t.Fatal(err)
 	}
 	if len(single.FilesToModify) != 1 || single.FilesToModify[0] != "only.go" {
@@ -119,46 +125,67 @@ func TestPlanAcceptsPlainAndSingularFileLists(t *testing.T) {
 func TestDecodeJSONDistinguishesShapeFromInvalidJSON(t *testing.T) {
 	// Calling a well-formed object "no valid JSON" sends the reader
 	// looking in entirely the wrong place.
-	var plan Plan
-	err := decodeJSON(`{"summary":{"nested":"object"},"files_to_modify":[],"context_files":[],"steps":[]}`, &plan)
+	var change Change
+	err := decodeJSON(`{"summary":{"nested":"object"},"files_to_modify":[],"diff":""}`, &change)
 	if err == nil || !strings.Contains(err.Error(), "did not match the expected shape") {
 		t.Fatalf("err = %v, want a shape mismatch", err)
 	}
-	err = decodeJSON("I can't help with that.", &plan)
+	err = decodeJSON("I can't help with that.", &change)
 	if err == nil || !strings.Contains(err.Error(), "no valid JSON") {
 		t.Fatalf("err = %v, want a not-JSON error", err)
 	}
 }
 
-func TestSalvagePlanRecoversAFilesListFromAnOffScheduleShape(t *testing.T) {
-	// Verbatim from a real reply: the provider let the model answer in
-	// its own shape, so files_to_modify decoded empty and the patch phase
-	// lost both its context and the fallback's target.
-	reply := `{"plan":[{"file":"index.html","changes":["Change the title"]}],"context_files":[],"notes":"No other files need modification."}`
-	var plan Plan
-	if err := decodeJSON(reply, &plan); err != nil {
+func TestSalvageChangeRecoversAFilesListFromAnOffScheduleShape(t *testing.T) {
+	reply := `{"plan":[{"file":"index.html","changes":["Change the title"]}],"notes":"No other files need modification."}`
+	var change Change
+	if err := decodeJSON(reply, &change); err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.FilesToModify) != 0 {
-		t.Fatalf("precondition: expected the schema decode to come up empty, got %v", plan.FilesToModify)
+	if len(change.FilesToModify) != 0 {
+		t.Fatalf("precondition: expected the schema decode to come up empty, got %v", change.FilesToModify)
 	}
-	salvagePlan(&plan, reply)
-	if len(plan.FilesToModify) != 1 || plan.FilesToModify[0] != "index.html" {
-		t.Fatalf("FilesToModify = %v, want index.html", plan.FilesToModify)
+	salvageChange(&change, reply)
+	if len(change.FilesToModify) != 1 || change.FilesToModify[0] != "index.html" {
+		t.Fatalf("FilesToModify = %v, want index.html", change.FilesToModify)
 	}
-	if plan.Summary != "No other files need modification." {
-		t.Fatalf("Summary = %q", plan.Summary)
+	if change.Summary != "No other files need modification." {
+		t.Fatalf("Summary = %q", change.Summary)
 	}
 
-	// A plan that did follow the schema is left alone.
-	good := Plan{FilesToModify: []string{"a.go"}, Summary: "keep"}
-	salvagePlan(&good, reply)
+	// One that did follow the schema is left alone.
+	good := Change{FilesToModify: []string{"a.go"}, Summary: "keep"}
+	salvageChange(&good, reply)
 	if len(good.FilesToModify) != 1 || good.FilesToModify[0] != "a.go" || good.Summary != "keep" {
-		t.Fatalf("a valid plan was altered: %+v", good)
+		t.Fatalf("a valid change was altered: %+v", good)
 	}
 }
 
-func TestRunnerToolPlanPatchApply(t *testing.T) {
+func TestRewriteTargetsFallsBackToTheFilesRead(t *testing.T) {
+	named := rewriteTargets([]string{"a.go", "a.go", ""}, []string{"b.go"}, []string{"c.go"})
+	if len(named) != 1 || named[0] != "a.go" {
+		t.Fatalf("targets = %v, want just a.go deduplicated", named)
+	}
+	// A weak model often names no files; the ones it opened are then the
+	// best evidence of what it meant.
+	fallback := rewriteTargets(nil, []string{"index.html", "index.html"}, []string{"other.html"})
+	if len(fallback) != 1 || fallback[0] != "index.html" {
+		t.Fatalf("targets = %v, want the file that was read", fallback)
+	}
+	// With nothing named or read, a single-file folder is unambiguous.
+	if only := rewriteTargets(nil, nil, []string{"index.html"}); len(only) != 1 || only[0] != "index.html" {
+		t.Fatalf("targets = %v, want the only file in the folder", only)
+	}
+	// Several files with no other signal stays ambiguous, so no guess.
+	if targets := rewriteTargets(nil, nil, []string{"a.go", "b.go"}); len(targets) != 0 {
+		t.Fatalf("targets = %v, want none", targets)
+	}
+	if targets := rewriteTargets(nil, nil, nil); len(targets) != 0 {
+		t.Fatalf("targets = %v, want none", targets)
+	}
+}
+
+func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 	repository := integrationRepository(t)
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -170,15 +197,14 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch requests {
 		case 1:
-			fmt.Fprint(writer, `{"id":"resp_route","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+			routeAsCodingTask(writer)
 		case 2:
 			fmt.Fprint(writer, `{"id":"resp_1","output":[{"type":"function_call","name":"read_files","call_id":"call_1","arguments":"{\"paths\":[\"hello.txt\"]}"}]}`)
 		case 3:
-			// The continuation must resend the full transcript itself
-			// rather than lean on previous_response_id: not every
-			// OpenAI-compatible provider persists server-side response
-			// state, and one that doesn't rejects an orphaned
-			// function_call_output.
+			// The continuation resends the transcript itself rather than
+			// leaning on previous_response_id: not every OpenAI-compatible
+			// provider persists server-side response state, and one that
+			// doesn't rejects an orphaned function_call_output.
 			if _, present := body["previous_response_id"]; present {
 				t.Fatalf("previous_response_id must not be sent: %v", body["previous_response_id"])
 			}
@@ -194,12 +220,9 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 			if !ok || output["type"] != "function_call_output" || output["call_id"] != "call_1" {
 				t.Fatalf("input[2] = %#v, want the matching function_call_output", input[2])
 			}
-			fmt.Fprint(writer, `{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Update greeting\",\"files_to_modify\":[\"hello.txt\"],\"context_files\":[],\"steps\":[\"Replace greeting\"]}"}]}]}`)
-		case 4:
 			diff := "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n"
-			payload, _ := json.Marshal(Patch{Summary: "Update greeting", Diff: diff})
-			response := responseEnvelope{ID: "resp_3", Output: []responseItem{{Type: "message", Content: []contentItem{{Type: "output_text", Text: string(payload)}}}}}
-			_ = json.NewEncoder(writer).Encode(response)
+			payload, _ := json.Marshal(Change{Summary: "Update greeting", FilesToModify: []string{"hello.txt"}, Diff: diff})
+			writeOutputText(writer, string(payload))
 		default:
 			t.Fatalf("unexpected request %d", requests)
 		}
@@ -207,16 +230,14 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	runner := NewRunner(client, repository)
 	progress := &recordingProgress{}
-	reply, err := runner.Run(context.Background(), "Change old to new", progress)
+	reply, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", progress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reply != "Update greeting" {
 		t.Fatalf("reply = %q", reply)
 	}
-	// The permanent log is what tells the user what actually happened.
 	trail := strings.Join(progress.logs, "\n")
 	for _, want := range []string{"read hello.txt", "plan: Update greeting", "will edit hello.txt", "applied the patch"} {
 		if !strings.Contains(trail, want) {
@@ -230,59 +251,60 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 	if string(content) != "new\n" {
 		t.Fatalf("hello.txt = %q", content)
 	}
-	if requests != 4 {
-		t.Fatalf("requests = %d, want 4", requests)
+	// Route, one tool round, one answer. Planning and patching used to be
+	// separate calls that shipped every file twice.
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
 	}
 }
 
-func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
-	// A retry is only useful if the model can see what it got wrong, so
-	// the next attempt must receive both git's complaint (including the
-	// text it searched for) and the diff that failed.
+func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
+	// A retry is only useful if the model can see what it got wrong, and
+	// it should cost only the evidence: the file contents are already in
+	// the conversation from the tool call.
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	repository := &repo.Repository{Root: root}
 
-	badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
+	badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>NOT WHAT IS THERE</title>\n+<title>TICTACTRIS</title>\n </html>\n"
 	goodDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK &amp; BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
 
-	patches := 0
+	changes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		name := ""
-		if text, ok := body["text"].(map[string]any); ok {
-			if format, ok := text["format"].(map[string]any); ok {
-				name, _ = format["name"].(string)
-			}
-		}
 		writer.Header().Set("Content-Type", "application/json")
-		switch name {
+		switch schemaName(body) {
 		case "message_route":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
-		case "implementation_plan":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Retitle\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[\"Rename\"]}"}]}]}`)
-		case "unified_patch":
-			patches++
-			if patches == 2 {
-				input, _ := body["input"].(string)
-				for _, want := range []string{"THE DIFF THAT FAILED", badDiff, "while searching for"} {
-					if !strings.Contains(input, want) {
-						t.Fatalf("retry input missing %q:\n%s", want, input)
+			routeAsCodingTask(writer)
+		case "code_change":
+			changes++
+			if changes == 2 {
+				// The failed diff and git's own "while searching for"
+				// text must reach the model, appended to the existing
+				// conversation rather than rebuilt around it.
+				input, ok := body["input"].([]any)
+				if !ok {
+					t.Fatalf("input = %#v, want the running transcript", body["input"])
+				}
+				last, _ := json.Marshal(input[len(input)-1])
+				for _, want := range []string{"THE DIFF THAT FAILED", "while searching for"} {
+					if !strings.Contains(string(last), want) {
+						t.Fatalf("evidence missing %q:\n%s", want, last)
 					}
 				}
-				payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: goodDiff})
+				payload, _ := json.Marshal(Change{Summary: "Retitle", FilesToModify: []string{"index.html"}, Diff: goodDiff})
 				writeOutputText(writer, string(payload))
 				return
 			}
-			payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: badDiff})
+			payload, _ := json.Marshal(Change{Summary: "Retitle", FilesToModify: []string{"index.html"}, Diff: badDiff})
 			writeOutputText(writer, string(payload))
 		default:
-			t.Fatalf("unexpected schema %q", name)
+			t.Fatalf("unexpected schema %q", schemaName(body))
 		}
 	}))
 	defer server.Close()
@@ -291,8 +313,8 @@ func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
 	if _, err := NewRunner(client, repository).Run(context.Background(), "retitle it", &recordingProgress{}); err != nil {
 		t.Fatal(err)
 	}
-	if patches != 2 {
-		t.Fatalf("patch requests = %d, want 2 (the corrected retry should land)", patches)
+	if changes != 2 {
+		t.Fatalf("change requests = %d, want 2 (the corrected retry should land)", changes)
 	}
 	content, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil || !strings.Contains(string(content), "TICTACTRIS") {
@@ -300,35 +322,10 @@ func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
 	}
 }
 
-func TestRewriteTargetsFallsBackToTheFilesRead(t *testing.T) {
-	// A weak model often returns a plan with an empty files_to_modify.
-	// The files it opened are then the best evidence of what it meant.
-	named := rewriteTargets(Plan{FilesToModify: []string{"a.go", "a.go", ""}}, []string{"b.go"}, []string{"c.go"})
-	if len(named) != 1 || named[0] != "a.go" {
-		t.Fatalf("targets = %v, want just a.go deduplicated", named)
-	}
-	fallback := rewriteTargets(Plan{}, []string{"index.html", "index.html"}, []string{"other.html"})
-	if len(fallback) != 1 || fallback[0] != "index.html" {
-		t.Fatalf("targets = %v, want the file that was read", fallback)
-	}
-	// With nothing named or read, a single-file folder is unambiguous.
-	if only := rewriteTargets(Plan{}, nil, []string{"index.html"}); len(only) != 1 || only[0] != "index.html" {
-		t.Fatalf("targets = %v, want the only file in the folder", only)
-	}
-	// Several files with no other signal stays ambiguous, so no guess.
-	if targets := rewriteTargets(Plan{}, nil, []string{"a.go", "b.go"}); len(targets) != 0 {
-		t.Fatalf("targets = %v, want none", targets)
-	}
-	if targets := rewriteTargets(Plan{}, nil, nil); len(targets) != 0 {
-		t.Fatalf("targets = %v, want none", targets)
-	}
-}
-
-func TestRunnerRewritesTheFileItReadWhenThePlanNamesNone(t *testing.T) {
-	// Reproduces a real failure: the plan came back with no summary and
-	// no files_to_modify, every diff was rejected, and the rewrite then
-	// had nothing to write ("model returned no files to write"). It must
-	// fall back to the file the model actually opened.
+func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
+	// Reproduces a real failure: no files named, every diff rejected, and
+	// the rewrite had nothing to write. It must fall back to the file the
+	// model actually opened.
 	root := t.TempDir()
 	original := "<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(original), 0o644); err != nil {
@@ -337,33 +334,24 @@ func TestRunnerRewritesTheFileItReadWhenThePlanNamesNone(t *testing.T) {
 	repository := &repo.Repository{Root: root}
 	rewritten := "<html>\n<title>Tec-TAC-Tris</title>\n</html>\n"
 
-	planRounds, rewrites := 0, 0
+	changes, rewrites := 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		name := ""
-		if text, ok := body["text"].(map[string]any); ok {
-			if format, ok := text["format"].(map[string]any); ok {
-				name, _ = format["name"].(string)
-			}
-		}
 		writer.Header().Set("Content-Type", "application/json")
-		switch name {
+		switch schemaName(body) {
 		case "message_route":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
-		case "implementation_plan":
-			planRounds++
-			if planRounds == 1 {
+			routeAsCodingTask(writer)
+		case "code_change":
+			changes++
+			if changes == 1 {
 				fmt.Fprint(writer, `{"id":"resp_1","output":[{"type":"function_call","name":"read_files","call_id":"c1","arguments":"{\"paths\":[\"index.html\"]}"}]}`)
 				return
 			}
-			// An empty plan, exactly as the real provider returned.
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"\",\"files_to_modify\":[],\"context_files\":[],\"steps\":[]}"}]}]}`)
-		case "unified_patch":
-			badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>Tec-TAC-Tris</title>\n </html>\n"
-			payload, _ := json.Marshal(Patch{Diff: badDiff})
+			// A diff that can never apply, and no files named.
+			payload, _ := json.Marshal(Change{Diff: "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>SOMETHING ELSE</title>\n+<title>Tec-TAC-Tris</title>\n </html>\n"})
 			writeOutputText(writer, string(payload))
 		case "file_rewrite":
 			rewrites++
@@ -373,7 +361,7 @@ func TestRunnerRewritesTheFileItReadWhenThePlanNamesNone(t *testing.T) {
 			payload, _ := json.Marshal(Rewrite{Summary: "Retitled", Content: rewritten})
 			writeOutputText(writer, string(payload))
 		default:
-			t.Fatalf("unexpected schema %q", name)
+			t.Fatalf("unexpected schema %q", schemaName(body))
 		}
 	}))
 	defer server.Close()
@@ -414,20 +402,12 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		name := ""
-		if text, ok := body["text"].(map[string]any); ok {
-			if format, ok := text["format"].(map[string]any); ok {
-				name, _ = format["name"].(string)
-			}
-		}
 		writer.Header().Set("Content-Type", "application/json")
-		switch name {
+		switch schemaName(body) {
 		case "message_route":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
-		case "implementation_plan":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"x\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[]}"}]}]}`)
-		case "unified_patch":
-			payload, _ := json.Marshal(Patch{Diff: "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1 +1 @@\n-nope\n+new\n"})
+			routeAsCodingTask(writer)
+		case "code_change":
+			payload, _ := json.Marshal(Change{FilesToModify: []string{"index.html"}, Diff: "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1 +1 @@\n-nope\n+new\n"})
 			writeOutputText(writer, string(payload))
 		case "file_rewrite":
 			payload, _ := json.Marshal(Rewrite{Summary: "oops", Content: "   "})
@@ -447,78 +427,6 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 	}
 }
 
-func TestRunnerRewritesFilesWhenNoDiffApplies(t *testing.T) {
-	// Reproduces a real failure: the file contains the HTML entity
-	// "&amp;" but the model's diff writes "&" in the line it removes, so
-	// the hunk can never anchor and no git apply flag can rescue it.
-	// After the diff attempts fail, the whole-file rewrite must land.
-	root := t.TempDir()
-	original := "<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"
-	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(original), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	repository := &repo.Repository{Root: root}
-
-	badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
-	rewritten := "<html>\n<title>TICTACTRIS</title>\n</html>\n"
-
-	rewrites := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var body map[string]any
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		name := ""
-		if text, ok := body["text"].(map[string]any); ok {
-			if format, ok := text["format"].(map[string]any); ok {
-				name, _ = format["name"].(string)
-			}
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		switch name {
-		case "message_route":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
-		case "implementation_plan":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Retitle\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[\"Rename\"]}"}]}]}`)
-		case "unified_patch":
-			payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: badDiff})
-			writeOutputText(writer, string(payload))
-		case "file_rewrite":
-			rewrites++
-			payload, _ := json.Marshal(Rewrite{Summary: "Retitled to TICTACTRIS", Content: rewritten})
-			writeOutputText(writer, string(payload))
-		default:
-			t.Fatalf("unexpected schema %q", name)
-		}
-	}))
-	defer server.Close()
-
-	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	progress := &recordingProgress{}
-	reply, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply != "Retitled to TICTACTRIS" {
-		t.Fatalf("reply = %q", reply)
-	}
-	if rewrites != 1 {
-		t.Fatalf("rewrite requests = %d, want 1", rewrites)
-	}
-	content, err := os.ReadFile(filepath.Join(root, "index.html"))
-	if err != nil || string(content) != rewritten {
-		t.Fatalf("index.html = %q, %v", content, err)
-	}
-	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "wrote index.html") {
-		t.Fatalf("progress log missing the rewrite:\n%s", trail)
-	}
-}
-
-func writeOutputText(writer http.ResponseWriter, text string) {
-	response := responseEnvelope{Output: []responseItem{{Type: "message", Content: []contentItem{{Type: "output_text", Text: text}}}}}
-	_ = json.NewEncoder(writer).Encode(response)
-}
-
 func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -530,8 +438,7 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
-	runner := NewRunner(client, repository)
-	reply, err := runner.Run(context.Background(), "hi", &recordingProgress{})
+	reply, err := NewRunner(client, repository).Run(context.Background(), "hi", &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,19 +467,4 @@ func integrationRepository(t *testing.T) *repo.Repository {
 		t.Fatalf("git add: %v: %s", err, output)
 	}
 	return &repo.Repository{Root: root}
-}
-
-// recordingProgress captures progress output so tests can assert on the
-// trail the user would see.
-type recordingProgress struct {
-	statuses []string
-	logs     []string
-}
-
-func (progress *recordingProgress) Status(message string) {
-	progress.statuses = append(progress.statuses, message)
-}
-
-func (progress *recordingProgress) Log(message string) {
-	progress.logs = append(progress.logs, message)
 }

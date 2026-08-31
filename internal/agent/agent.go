@@ -14,11 +14,18 @@ import (
 
 const maxToolRounds = 8
 
-type Plan struct {
+// Change is one attempt at the whole job: what the model means to do,
+// which files it touches, and the diff that does it.
+//
+// Planning and patching are deliberately one request. Splitting them cost
+// a round trip and, worse, resent every file: the contents are already in
+// the conversation from the tool calls, so a separate patch call shipped
+// them a second time to learn nothing new. Summary and files come before
+// the diff in the schema so the model still states its intent first.
+type Change struct {
 	Summary       string     `json:"summary"`
 	FilesToModify stringList `json:"files_to_modify"`
-	ContextFiles  stringList `json:"context_files"`
-	Steps         stringList `json:"steps"`
+	Diff          string     `json:"diff"`
 }
 
 // stringList is a list of strings that also accepts the shapes models
@@ -59,25 +66,9 @@ func (list *stringList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type Patch struct {
-	Summary string `json:"summary"`
-	Diff    string `json:"diff"`
-}
-
 type routeDecision struct {
 	CodingTask bool   `json:"coding_task"`
 	Reply      string `json:"reply"`
-}
-
-// planResult is what the planning phase learned: the plan itself, the
-// tool output gathered along the way, and the files the model actually
-// read. The read paths matter because a weak model often returns a plan
-// with an empty files_to_modify, and the files it opened are then the
-// best evidence of what it meant to change.
-type planResult struct {
-	Plan      Plan
-	Context   string
-	ReadPaths []string
 }
 
 // Rewrite carries one file's complete new contents, for when no diff will
@@ -183,46 +174,28 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	mapped := mappedPaths(repoMap)
 	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
 
-	progress.Status("Finding the right code...")
-	planned, err := runner.plan(ctx, task, repoMap, progress)
-	if err != nil {
-		return "", err
-	}
-	plan := planned.Plan
-	logSummary(progress, "plan", plan.Summary)
-	for _, path := range plan.FilesToModify {
-		progress.Log("  will edit " + path)
-	}
-	contextText, err := runner.gatherContext(planned)
-	if err != nil {
-		return "", err
-	}
+	progress.Status("Working out the change...")
+	session := runner.newChangeSession(task, repoMap)
 
 	var evidence string
-	var patch Patch
+	var change Change
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			progress.Status("Repairing from new evidence...")
-			// Rebuild from the planning context as well as the files:
-			// refreshing only the planned files used to throw away the
-			// tool output holding the file the model had read, leaving
-			// it to repair a diff against contents it could no longer
-			// see.
-			contextText, err = runner.gatherContext(planned)
-			if err != nil {
-				return "", err
-			}
-		} else {
-			progress.Status("Writing the change...")
 		}
-		patch, err = runner.patch(ctx, task, repoMap, plan, contextText, evidence)
+		change, err = session.produce(ctx, progress)
 		if err != nil {
 			return "", err
 		}
-		logSummary(progress, "patch", patch.Summary)
+		if attempt == 0 {
+			logSummary(progress, "plan", change.Summary)
+			for _, path := range change.FilesToModify {
+				progress.Log("  will edit " + path)
+			}
+		}
 
 		progress.Status("Applying the patch...")
-		if err := runner.repository.Apply(patch.Diff); err != nil {
+		if err := runner.repository.Apply(change.Diff); err != nil {
 			progress.Log("  patch did not apply, retrying")
 			// Feed back the diff that failed alongside git's complaint.
 			// Without seeing its own output the model has no way to tell
@@ -231,9 +204,10 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 				"The patch did not apply. Git looks for the context and removed lines exactly as written, "+
 					"so any difference from the real file (an HTML entity spelled out, a changed attribute, "+
 					"reflowed whitespace) makes the whole hunk fail. Compare git's \"while searching for\" text "+
-					"below against the real contents above and copy those lines character for character.\n\n"+
+					"below against the file contents you already read and copy those lines character for character.\n\n"+
 					"GIT REPORTED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
-				err.Error(), patch.Diff)
+				err.Error(), change.Diff)
+			session.report(evidence)
 			continue
 		}
 		progress.Log("  applied the patch")
@@ -246,17 +220,18 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 			} else {
 				progress.Log("  tests passed")
 			}
-			return patch.Summary, nil
+			return change.Summary, nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
+		session.report(evidence)
 	}
 
 	// Every diff was rejected. A diff only applies when its context and
 	// removed lines match the file exactly, which a model-written one
 	// often gets subtly wrong, so fall back to writing whole files.
 	if strings.HasPrefix(evidence, "The patch did not apply") {
-		targets := rewriteTargets(plan, planned.ReadPaths, mapped)
+		targets := rewriteTargets(change.FilesToModify, session.readPaths, mapped)
 		if len(targets) == 0 {
 			return "", fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
 		}
@@ -321,91 +296,75 @@ func (runner *Runner) route(ctx context.Context, task string) (routeDecision, er
 	return decision, nil
 }
 
-// plan drives the tool-calling loop by resending the full conversation
-// transcript on every round rather than relying on previous_response_id.
-// Not every OpenAI-compatible provider actually persists server-side
-// response state, and one that doesn't will reject a function_call_output
-// referencing a call_id it never stored, so the transcript is tracked here
-// instead.
-func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress Progress) (planResult, error) {
-	taskText := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
-	var transcript []any
-	var collected strings.Builder
-	var readPaths []string
+// changeSession is one continuous conversation that reads what it needs
+// and produces a diff. Keeping the transcript here rather than asking the
+// provider to remember it is deliberate: not every OpenAI-compatible
+// provider persists server-side response state, and one that doesn't
+// rejects a function_call_output referencing a call_id it never stored.
+//
+// Repairs continue this same conversation. The file contents are already
+// in it from the tool calls, so a failed attempt costs only the evidence
+// appended to the end, not another copy of everything.
+type changeSession struct {
+	runner     *Runner
+	transcript []any
+	readPaths  []string
+}
+
+func (runner *Runner) newChangeSession(task, repoMap string) *changeSession {
+	opening := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
+	return &changeSession{
+		runner:     runner,
+		transcript: []any{inputMessage{Role: "user", Content: opening}},
+	}
+}
+
+// report adds what reality said about the last attempt, so the next one
+// answers it rather than repeating itself.
+func (session *changeSession) report(evidence string) {
+	session.transcript = append(session.transcript, inputMessage{Role: "user", Content: evidence})
+}
+
+// produce runs tool rounds until the model returns a change.
+func (session *changeSession) produce(ctx context.Context, progress Progress) (Change, error) {
 	for round := 0; round < maxToolRounds; round++ {
-		var input any = taskText
-		if transcript != nil {
-			input = transcript
-		}
-		request := responseRequest{
-			Instructions: planningInstructions,
-			Input:        input,
+		callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		response, err := session.runner.client.create(callCtx, responseRequest{
+			Instructions: changeInstructions,
+			Input:        session.transcript,
 			Tools:        repositoryTools(),
 			ToolChoice:   "auto",
-			Text:         strictSchema("implementation_plan", planSchema()),
-		}
-		callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		response, err := runner.client.create(callCtx, request)
+			Text:         strictSchema("code_change", changeSchema()),
+		})
 		cancel()
 		if err != nil {
-			return planResult{}, err
+			return Change{}, err
 		}
 		calls := response.calls()
 		if len(calls) == 0 {
 			text, err := response.text()
 			if err != nil {
-				return planResult{}, err
+				return Change{}, err
 			}
-			var plan Plan
-			if err := decodeJSON(text, &plan); err != nil {
-				return planResult{}, fmt.Errorf("decode implementation plan: %w", err)
+			var change Change
+			if err := decodeJSON(text, &change); err != nil {
+				return Change{}, fmt.Errorf("decode the change: %w", err)
 			}
-			salvagePlan(&plan, text)
-			return planResult{Plan: plan, Context: collected.String(), ReadPaths: readPaths}, nil
-		}
-		if transcript == nil {
-			transcript = []any{inputMessage{Role: "user", Content: taskText}}
+			salvageChange(&change, text)
+			if strings.TrimSpace(change.Diff) == "" {
+				return change, fmt.Errorf("the model returned no diff; it replied: %s", snippet(text))
+			}
+			return change, nil
 		}
 		for _, call := range calls {
 			progress.Log("  " + describeCall(call))
-			readPaths = append(readPaths, readFilePaths(call)...)
-			output := runner.runTool(ctx, call)
-			fmt.Fprintf(&collected, "\nTOOL %s:\n%s\n", call.Name, output)
-			transcript = append(transcript, call)
-			transcript = append(transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
+			session.readPaths = append(session.readPaths, readFilePaths(call)...)
+			output := session.runner.runTool(ctx, call)
+			session.transcript = append(session.transcript, call)
+			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}
 	}
-	return planResult{}, fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
-}
-
-func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan, contextText, evidence string) (Patch, error) {
-	planJSON, _ := json.Marshal(plan)
-	input := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s\n\nPLAN:\n%s\n\nRELEVANT FILE CONTENTS:\n%s", task, repoMap, planJSON, contextText)
-	if evidence != "" {
-		input += "\n\nNEW EVIDENCE FROM REALITY:\n" + evidence
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-	response, err := runner.client.create(callCtx, responseRequest{
-		Instructions: patchInstructions,
-		Input:        input,
-		Text:         strictSchema("unified_patch", patchSchema()),
-	})
-	if err != nil {
-		return Patch{}, err
-	}
-	text, err := response.text()
-	if err != nil {
-		return Patch{}, err
-	}
-	var patch Patch
-	if err := decodeJSON(text, &patch); err != nil {
-		return Patch{}, fmt.Errorf("decode patch: %w", err)
-	}
-	if strings.TrimSpace(patch.Diff) == "" {
-		return Patch{}, fmt.Errorf("model returned an empty patch")
-	}
-	return patch, nil
+	return Change{}, fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
 }
 
 // rewrite asks for one file's complete new contents, used when no diff
@@ -441,13 +400,13 @@ func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence
 // opened, else the only file in the folder. A weak model often returns an
 // empty files_to_modify, and the file it read (or the single file there
 // is) is then the best evidence of what it meant to change.
-func rewriteTargets(plan Plan, readPaths, mapped []string) []string {
+func rewriteTargets(named, readPaths, mapped []string) []string {
 	if len(mapped) != 1 {
 		mapped = nil
 	}
 	seen := map[string]bool{}
 	var targets []string
-	for _, group := range [][]string{plan.FilesToModify, readPaths, mapped} {
+	for _, group := range [][]string{named, readPaths, mapped} {
 		for _, path := range group {
 			if path = strings.TrimSpace(path); path != "" && !seen[path] {
 				seen[path] = true
@@ -523,12 +482,12 @@ type alternatePlan struct {
 	Notes string   `json:"notes"`
 }
 
-// salvagePlan fills in a plan whose fields came back empty because the
-// provider let the model answer in its own shape rather than the schema
-// that was asked for. Losing the file list this way is expensive: it costs
-// the patch phase its context and the fallback its target.
-func salvagePlan(plan *Plan, text string) {
-	if len(plan.FilesToModify) > 0 {
+// salvageChange fills in a change whose file list came back empty because
+// the provider let the model answer in its own shape rather than the
+// schema that was asked for. Losing the file list is expensive: it costs
+// the whole-file fallback its target.
+func salvageChange(change *Change, text string) {
+	if len(change.FilesToModify) > 0 {
 		return
 	}
 	var alternate alternatePlan
@@ -537,16 +496,16 @@ func salvagePlan(plan *Plan, text string) {
 	}
 	for _, entry := range alternate.Plan {
 		if path := firstNonEmpty(entry.File, entry.Path); path != "" {
-			plan.FilesToModify = append(plan.FilesToModify, path)
+			change.FilesToModify = append(change.FilesToModify, path)
 		}
 	}
 	for _, path := range alternate.Files {
 		if path != "" {
-			plan.FilesToModify = append(plan.FilesToModify, path)
+			change.FilesToModify = append(change.FilesToModify, path)
 		}
 	}
-	if plan.Summary == "" {
-		plan.Summary = alternate.Notes
+	if change.Summary == "" {
+		change.Summary = alternate.Notes
 	}
 }
 
@@ -593,44 +552,6 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 	}
 }
 
-// gatherContext is everything the patch phase should see: what the
-// planning tools turned up, plus the current contents of the planned
-// files, re-read so a repair works against the file as it is now.
-func (runner *Runner) gatherContext(planned planResult) (string, error) {
-	files, err := runner.readPlanFiles(planned.Plan)
-	if err != nil {
-		return "", err
-	}
-	if files == "" {
-		return planned.Context, nil
-	}
-	return planned.Context + "\nPLANNED FILES:\n" + files, nil
-}
-
-func (runner *Runner) readPlanFiles(plan Plan) (string, error) {
-	paths := append([]string{}, plan.FilesToModify...)
-	paths = append(paths, plan.ContextFiles...)
-	seen := map[string]bool{}
-	unique := paths[:0]
-	for _, path := range paths {
-		if path != "" && !seen[path] && runner.repository.Exists(path) {
-			seen[path] = true
-			unique = append(unique, path)
-		}
-	}
-	if len(unique) == 0 {
-		if len(paths) == 0 {
-			// The plan named nothing at all. Say nothing rather than
-			// claiming the files don't exist, which would contradict
-			// the contents the planning tools already gathered.
-			return "", nil
-		}
-		// Named files that aren't there yet: the patch creates them.
-		return "None of the planned files exist yet; the change creates them.", nil
-	}
-	return runner.repository.Read(unique)
-}
-
 func repositoryTools() []functionTool {
 	return []functionTool{
 		{Type: "function", Name: "read_files", Description: "Read one or more repository files after choosing them from the map.", Strict: true, Parameters: map[string]any{
@@ -642,20 +563,12 @@ func repositoryTools() []functionTool {
 	}
 }
 
-func planSchema() map[string]any {
+func changeSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"summary":         map[string]any{"type": "string"},
 		"files_to_modify": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"context_files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"steps":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-	}, []string{"summary", "files_to_modify", "context_files", "steps"})
-}
-
-func patchSchema() map[string]any {
-	return objectSchema(map[string]any{
-		"summary": map[string]any{"type": "string"},
-		"diff":    map[string]any{"type": "string"},
-	}, []string{"summary", "diff"})
+		"diff":            map[string]any{"type": "string"},
+	}, []string{"summary", "files_to_modify", "diff"})
 }
 
 func rewriteSchema() map[string]any {
@@ -676,17 +589,17 @@ func objectSchema(properties map[string]any, required []string) map[string]any {
 	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 }
 
-const planningInstructions = `You are the context and planning phase of a small coding agent.
-Start from the repository map. Use read_files for likely files. Use search only when needed.
-Get enough context to make the requested change safely, but avoid wandering.
-Return a concrete plan. Distinguish files to modify from files needed only as context.
-Once you are done with tool calls, respond with only the JSON object, no other text before or after it.`
-
-const patchInstructions = `You are the patch phase of a small coding agent.
-Use only the supplied task, map, plan, relevant file contents, and any new test/apply evidence.
-Return one git-compatible unified diff in the diff field. Do not use markdown fences.
-Make the smallest complete change. Include tests when the repository already has tests.
-If repairing a test failure, produce an incremental diff against the current repository state.
+const changeInstructions = `You are a small coding agent making one change.
+Start from the repository map. Use read_files for the files you need and search only when the
+map is not enough. Read a file before changing it; never write a diff against contents you have
+not seen. Avoid wandering beyond what the task needs.
+When you have enough, answer with the change: a one-line summary, the files it modifies, and one
+git-compatible unified diff. Make the smallest complete change, and include tests when the
+repository already has them.
+In the diff, include a few unchanged context lines both before and after every change; a hunk
+that stops at its last changed line is rejected. Copy context and removed lines from the file
+character for character.
+If told a previous attempt failed, answer the evidence rather than repeating the same diff.
 Respond with only the JSON object, no other text before or after it.`
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.

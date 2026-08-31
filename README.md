@@ -98,13 +98,19 @@ YoloCoder keeps the loop deliberately small:
    direct reply and stops there; only a coding task continues below.
 2. Builds a compact map of the current folder (`.gitignore`-aware when it
    already has its own Git repository, a plain walk otherwise).
-3. Lets the model read likely files or search only when needed.
-4. Requests a strict JSON implementation plan.
-5. Requests a strict JSON response containing a unified diff.
-6. Checks and applies the diff with `git apply`, which works directly
-   against the folder without requiring a Git repository.
-7. Runs the repository's detected test command.
-8. Retries at most twice using only patch or test failure evidence.
+3. Opens one conversation that reads the files it needs (or searches, when
+   the map isn't enough) and then answers with a summary, the files it
+   touches, and a unified diff. Planning and patching are the same request:
+   the files are already in the conversation from the tool calls, so asking
+   separately would resend all of them to learn nothing new.
+4. Applies the diff with `git apply`, which works directly against the
+   folder without requiring a Git repository. If Git rejects it, the hunks
+   are placed by matching their content instead, since a model reliably
+   gets the content right and the line numbers and counts wrong.
+5. Runs the repository's detected test command.
+6. Retries at most twice, continuing the same conversation so a repair
+   costs only the failure evidence rather than the whole context again.
+7. Falls back to writing whole files when no diff will apply at all.
 
 The model never receives a shell tool. Local code exposes only bounded
 `read_files` and `search` tools during context gathering. Patch application

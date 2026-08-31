@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/term"
+
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 var ErrEditorCancelled = errors.New("task entry cancelled")
@@ -184,7 +186,7 @@ func workingDirectory() string {
 
 func drawEditor(output io.Writer, buffer *textBuffer, folder string) {
 	fmt.Fprint(output, "\x1b[H\x1b[2J")
-	fmt.Fprintf(output, "\x1b[36m[^_^] YoloCoder\x1b[0m  \x1b[2m%s\x1b[0m\r\n", folder)
+	fmt.Fprintf(output, "\x1b[36m[^_^] YoloCoder %s\x1b[0m  \x1b[2m%s\x1b[0m\r\n", version.Display(), folder)
 	fmt.Fprint(output, "Describe the coding task\r\n")
 	fmt.Fprint(output, "\x1b[2mEnter: send  •  Shift+Enter: new line  •  Ctrl+C: cancel  •  arrows: move cursor\x1b[0m\r\n\r\n")
 	lines := strings.Split(string(buffer.text), "\n")

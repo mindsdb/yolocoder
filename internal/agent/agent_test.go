@@ -14,6 +14,33 @@ import (
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
+func TestDecodeJSONHandlesProseAndFences(t *testing.T) {
+	type payload struct {
+		Value string `json:"value"`
+	}
+	tests := []string{
+		`{"value":"ok"}`,
+		"I reviewed the repository. Here is the plan:\n\n" + `{"value":"ok"}`,
+		"```json\n" + `{"value":"ok"}` + "\n```",
+	}
+	for _, text := range tests {
+		var got payload
+		if err := decodeJSON(text, &got); err != nil {
+			t.Fatalf("decodeJSON(%q) error: %v", text, err)
+		}
+		if got.Value != "ok" {
+			t.Fatalf("decodeJSON(%q) = %+v", text, got)
+		}
+	}
+}
+
+func TestDecodeJSONRejectsNonJSON(t *testing.T) {
+	var got map[string]any
+	if err := decodeJSON("I can't help with that.", &got); err == nil {
+		t.Fatal("expected an error for text with no JSON")
+	}
+}
+
 func TestRunnerToolPlanPatchApply(t *testing.T) {
 	repository := integrationRepository(t)
 	requests := 0

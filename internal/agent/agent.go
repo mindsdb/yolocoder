@@ -39,6 +39,33 @@ type inputMessage struct {
 	Content string `json:"content"`
 }
 
+// decodeJSON unmarshals text into target, falling back to the first
+// {...} or [...] span in text. Not every OpenAI-compatible provider
+// enforces the requested JSON schema strictly; some let the model preface
+// the JSON with prose or wrap it in a markdown fence.
+func decodeJSON(text string, target any) error {
+	if err := json.Unmarshal([]byte(text), target); err == nil {
+		return nil
+	}
+	if span := jsonSpan(text); span != "" {
+		if err := json.Unmarshal([]byte(span), target); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("no valid JSON found in response: %s", strings.TrimSpace(text))
+}
+
+func jsonSpan(text string) string {
+	for _, delimiters := range [][2]byte{{'{', '}'}, {'[', ']'}} {
+		start := strings.IndexByte(text, delimiters[0])
+		end := strings.LastIndexByte(text, delimiters[1])
+		if start != -1 && end > start {
+			return text[start : end+1]
+		}
+	}
+	return ""
+}
+
 type Runner struct {
 	client     *Client
 	repository *repo.Repository
@@ -126,7 +153,7 @@ func (runner *Runner) route(ctx context.Context, task string) (routeDecision, er
 		return routeDecision{}, err
 	}
 	var decision routeDecision
-	if err := json.Unmarshal([]byte(text), &decision); err != nil {
+	if err := decodeJSON(text, &decision); err != nil {
 		return routeDecision{}, fmt.Errorf("decode message route: %w", err)
 	}
 	return decision, nil
@@ -167,7 +194,7 @@ func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, str
 				return Plan{}, "", err
 			}
 			var plan Plan
-			if err := json.Unmarshal([]byte(text), &plan); err != nil {
+			if err := decodeJSON(text, &plan); err != nil {
 				return Plan{}, "", fmt.Errorf("decode implementation plan: %w", err)
 			}
 			return plan, collected.String(), nil
@@ -206,7 +233,7 @@ func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan
 		return Patch{}, err
 	}
 	var patch Patch
-	if err := json.Unmarshal([]byte(text), &patch); err != nil {
+	if err := decodeJSON(text, &patch); err != nil {
 		return Patch{}, fmt.Errorf("decode patch: %w", err)
 	}
 	if strings.TrimSpace(patch.Diff) == "" {
@@ -299,14 +326,17 @@ func objectSchema(properties map[string]any, required []string) map[string]any {
 const planningInstructions = `You are the context and planning phase of a small coding agent.
 Start from the repository map. Use read_files for likely files. Use search only when needed.
 Get enough context to make the requested change safely, but avoid wandering.
-Return a concrete plan. Distinguish files to modify from files needed only as context.`
+Return a concrete plan. Distinguish files to modify from files needed only as context.
+Once you are done with tool calls, respond with only the JSON object, no other text before or after it.`
 
 const patchInstructions = `You are the patch phase of a small coding agent.
 Use only the supplied task, map, plan, relevant file contents, and any new test/apply evidence.
 Return one git-compatible unified diff in the diff field. Do not use markdown fences.
 Make the smallest complete change. Include tests when the repository already has tests.
-If repairing a test failure, produce an incremental diff against the current repository state.`
+If repairing a test failure, produce an incremental diff against the current repository state.
+Respond with only the JSON object, no other text before or after it.`
 
 const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.
 Set coding_task to true only when the user wants code written, fixed, explained from the files, or otherwise wants the project inspected or changed.
-When coding_task is false, put your complete, direct reply to the user in reply. When coding_task is true, leave reply empty.`
+When coding_task is false, put your complete, direct reply to the user in reply. When coding_task is true, leave reply empty.
+Respond with only the JSON object, no other text before or after it.`

@@ -219,6 +219,29 @@ func (repository *Repository) Apply(patch string) error {
 	return nil
 }
 
+// Write replaces path's entire contents, creating it and any parent
+// directories when needed and preserving an existing file's mode. It is
+// the fallback for edits a unified diff can't express reliably: a diff
+// only applies when its context and removed lines match the file byte for
+// byte, which a model-written one often doesn't.
+func (repository *Repository) Write(path, content string) error {
+	fullPath, err := repository.safePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return fmt.Errorf("create directory for %s: %w", path, err)
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(fullPath); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(fullPath, []byte(content), mode); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 func (repository *Repository) safePath(path string) (string, error) {
 	clean := filepath.Clean(filepath.FromSlash(path))
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {

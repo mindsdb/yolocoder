@@ -30,6 +30,17 @@ type routeDecision struct {
 	Reply      string `json:"reply"`
 }
 
+// Rewrite carries whole files rather than a diff, for when patching fails.
+type Rewrite struct {
+	Summary string        `json:"summary"`
+	Files   []RewriteFile `json:"files"`
+}
+
+type RewriteFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 type toolArguments struct {
 	Paths []string `json:"paths"`
 	Query string   `json:"query"`
@@ -109,7 +120,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	if err != nil {
 		return "", err
 	}
-	progress.Log("  plan: " + plan.Summary)
+	logSummary(progress, "plan", plan.Summary)
 	for _, path := range plan.FilesToModify {
 		progress.Log("  will edit " + path)
 	}
@@ -135,7 +146,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 		if err != nil {
 			return "", err
 		}
-		progress.Log("  patch: " + patch.Summary)
+		logSummary(progress, "patch", patch.Summary)
 
 		progress.Status("Applying the patch...")
 		if err := runner.repository.Apply(patch.Diff); err != nil {
@@ -157,6 +168,38 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
+	}
+
+	// Every diff was rejected. A diff only applies when its context and
+	// removed lines match the file exactly, which a model-written one
+	// often gets subtly wrong, so fall back to writing whole files.
+	if strings.HasPrefix(evidence, "The patch did not apply") {
+		progress.Status("Rewriting the files instead...")
+		contextText, err = runner.readPlanFiles(plan)
+		if err != nil {
+			return "", err
+		}
+		rewrite, err := runner.rewrite(ctx, task, plan, contextText, evidence)
+		if err != nil {
+			return "", err
+		}
+		for _, file := range rewrite.Files {
+			if err := runner.repository.Write(file.Path, file.Content); err != nil {
+				return "", err
+			}
+			progress.Log("  wrote " + file.Path)
+		}
+		progress.Status("Testing the change...")
+		testResult := RunTests(ctx, runner.repository.Root)
+		if testResult.Passed {
+			if testResult.Skipped {
+				progress.Log("  no test command detected")
+			} else {
+				progress.Log("  tests passed")
+			}
+			return rewrite.Summary, nil
+		}
+		return "", fmt.Errorf("rewrote the files, but tests failed:\n%s", testResult.Output)
 	}
 	return "", fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
 }
@@ -267,6 +310,40 @@ func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan
 	return patch, nil
 }
 
+// rewrite asks for the complete new contents of the files the plan
+// touches, used when no diff would apply.
+func (runner *Runner) rewrite(ctx context.Context, task string, plan Plan, contextText, evidence string) (Rewrite, error) {
+	planJSON, _ := json.Marshal(plan)
+	input := fmt.Sprintf("TASK:\n%s\n\nPLAN:\n%s\n\nCURRENT FILE CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, planJSON, contextText, evidence)
+	callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	response, err := runner.client.create(callCtx, responseRequest{
+		Instructions: rewriteInstructions,
+		Input:        input,
+		Text:         strictSchema("file_rewrite", rewriteSchema()),
+	})
+	if err != nil {
+		return Rewrite{}, err
+	}
+	text, err := response.text()
+	if err != nil {
+		return Rewrite{}, err
+	}
+	var result Rewrite
+	if err := decodeJSON(text, &result); err != nil {
+		return Rewrite{}, fmt.Errorf("decode file rewrite: %w", err)
+	}
+	if len(result.Files) == 0 {
+		return Rewrite{}, fmt.Errorf("model returned no files to write")
+	}
+	for _, file := range result.Files {
+		if strings.TrimSpace(file.Path) == "" {
+			return Rewrite{}, fmt.Errorf("model returned a file with no path")
+		}
+	}
+	return result, nil
+}
+
 // describeCall renders a tool call as a short line for the progress log,
 // so the user can see which files the model is actually looking at.
 func describeCall(call responseItem) string {
@@ -281,6 +358,14 @@ func describeCall(call responseItem) string {
 		return "search " + strconv.Quote(arguments.Query)
 	default:
 		return call.Name
+	}
+}
+
+// logSummary logs "label: summary", skipping the line entirely when the
+// model left the summary empty rather than printing a dangling label.
+func logSummary(progress Progress, label, summary string) {
+	if summary = strings.TrimSpace(summary); summary != "" {
+		progress.Log("  " + label + ": " + summary)
 	}
 }
 
@@ -365,6 +450,16 @@ func patchSchema() map[string]any {
 	}, []string{"summary", "diff"})
 }
 
+func rewriteSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"summary": map[string]any{"type": "string"},
+		"files": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		}, []string{"path", "content"})},
+	}, []string{"summary", "files"})
+}
+
 func routeSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"coding_task": map[string]any{"type": "boolean"},
@@ -387,6 +482,14 @@ Use only the supplied task, map, plan, relevant file contents, and any new test/
 Return one git-compatible unified diff in the diff field. Do not use markdown fences.
 Make the smallest complete change. Include tests when the repository already has tests.
 If repairing a test failure, produce an incremental diff against the current repository state.
+Respond with only the JSON object, no other text before or after it.`
+
+const rewriteInstructions = `You are the repair phase of a small coding agent.
+Your unified diff could not be applied, so supply whole files instead.
+For every file the change touches, return its complete new contents, copied
+from the supplied current contents with only the required edits made.
+Never abbreviate, summarize, or elide any part of a file with comments like
+"unchanged" or "...": the content you return replaces the file exactly.
 Respond with only the JSON object, no other text before or after it.`
 
 const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.

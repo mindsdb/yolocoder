@@ -131,6 +131,78 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 	}
 }
 
+func TestRunnerRewritesFilesWhenNoDiffApplies(t *testing.T) {
+	// Reproduces a real failure: the file contains the HTML entity
+	// "&amp;" but the model's diff writes "&" in the line it removes, so
+	// the hunk can never anchor and no git apply flag can rescue it.
+	// After the diff attempts fail, the whole-file rewrite must land.
+	root := t.TempDir()
+	original := "<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+
+	badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
+	rewritten := "<html>\n<title>TICTACTRIS</title>\n</html>\n"
+
+	rewrites := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		name := ""
+		if text, ok := body["text"].(map[string]any); ok {
+			if format, ok := text["format"].(map[string]any); ok {
+				name, _ = format["name"].(string)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch name {
+		case "message_route":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+		case "implementation_plan":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Retitle\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[\"Rename\"]}"}]}]}`)
+		case "unified_patch":
+			payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: badDiff})
+			writeOutputText(writer, string(payload))
+		case "file_rewrite":
+			rewrites++
+			payload, _ := json.Marshal(Rewrite{Summary: "Retitled to TICTACTRIS", Files: []RewriteFile{{Path: "index.html", Content: rewritten}}})
+			writeOutputText(writer, string(payload))
+		default:
+			t.Fatalf("unexpected schema %q", name)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	progress := &recordingProgress{}
+	reply, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Retitled to TICTACTRIS" {
+		t.Fatalf("reply = %q", reply)
+	}
+	if rewrites != 1 {
+		t.Fatalf("rewrite requests = %d, want 1", rewrites)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil || string(content) != rewritten {
+		t.Fatalf("index.html = %q, %v", content, err)
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "wrote index.html") {
+		t.Fatalf("progress log missing the rewrite:\n%s", trail)
+	}
+}
+
+func writeOutputText(writer http.ResponseWriter, text string) {
+	response := responseEnvelope{Output: []responseItem{{Type: "message", Content: []contentItem{{Type: "output_text", Text: text}}}}}
+	_ = json.NewEncoder(writer).Encode(response)
+}
+
 func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -14,7 +14,7 @@ import (
 
 var ErrEditorCancelled = errors.New("task entry cancelled")
 
-const editorContentRow = 4
+const editorContentRow = 5
 
 type textBuffer struct {
 	text   []rune
@@ -116,12 +116,16 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 	}
 	defer term.Restore(int(reader.input.Fd()), state)
 
-	fmt.Fprint(output, "\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h")
-	defer fmt.Fprint(output, "\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l")
+	// >4;2m and >1u ask the terminal to report Shift+Enter distinctly from
+	// Enter (xterm modifyOtherKeys and the Kitty keyboard protocol,
+	// respectively); terminals that don't understand them ignore them.
+	fmt.Fprint(output, "\x1b[?1049h\x1b[?2004h\x1b[>4;2m\x1b[>1u")
+	defer fmt.Fprint(output, "\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?1049l")
 
+	folder := workingDirectory()
 	buffer := &textBuffer{}
 	for {
-		drawEditor(output, buffer)
+		drawEditor(output, buffer, folder)
 		key, err := reader.buffer.ReadByte()
 		if err != nil {
 			return "", ErrEditorCancelled
@@ -129,12 +133,11 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 		switch key {
 		case 3:
 			return "", ErrEditorCancelled
-		case 4:
-			task := strings.TrimSpace(string(buffer.text))
-			if task != "" {
+		case 4, '\r':
+			if task, ok := submit(buffer); ok {
 				return task, nil
 			}
-		case '\r', '\n':
+		case '\n':
 			buffer.insert("\n")
 		case 8, 127:
 			buffer.backspace()
@@ -143,8 +146,14 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 		case 5:
 			buffer.end()
 		case 27:
-			if err := handleEditorEscape(reader.buffer, buffer); err != nil {
+			enter, err := handleEditorEscape(reader.buffer, buffer)
+			if err != nil {
 				return "", err
+			}
+			if enter {
+				if task, ok := submit(buffer); ok {
+					return task, nil
+				}
 			}
 		default:
 			character, err := readRune(reader.buffer, key)
@@ -155,10 +164,29 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 	}
 }
 
-func drawEditor(output io.Writer, buffer *textBuffer) {
+func submit(buffer *textBuffer) (string, bool) {
+	task := strings.TrimSpace(string(buffer.text))
+	return task, task != ""
+}
+
+func workingDirectory() string {
+	directory, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if relative, ok := strings.CutPrefix(directory, home); ok {
+			directory = "~" + relative
+		}
+	}
+	return directory
+}
+
+func drawEditor(output io.Writer, buffer *textBuffer, folder string) {
 	fmt.Fprint(output, "\x1b[H\x1b[2J")
+	fmt.Fprintf(output, "\x1b[36m[^_^] YoloCoder\x1b[0m  \x1b[2m%s\x1b[0m\r\n", folder)
 	fmt.Fprint(output, "Describe the coding task\r\n")
-	fmt.Fprint(output, "\x1b[2mEnter: new line  •  Ctrl+D: submit  •  Ctrl+C: cancel  •  arrows/click: move cursor\x1b[0m\r\n\r\n")
+	fmt.Fprint(output, "\x1b[2mEnter: send  •  Shift+Enter: new line  •  Ctrl+C: cancel  •  arrows: move cursor\x1b[0m\r\n\r\n")
 	lines := strings.Split(string(buffer.text), "\n")
 	for _, line := range lines {
 		fmt.Fprintf(output, "\x1b[36m│\x1b[0m %s\x1b[K\r\n", line)
@@ -167,16 +195,31 @@ func drawEditor(output io.Writer, buffer *textBuffer) {
 	fmt.Fprintf(output, "\x1b[%d;%dH", editorContentRow+row, 3+column)
 }
 
-func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer) error {
+// handleEditorEscape parses one CSI sequence following an ESC byte and
+// applies it to buffer. It reports enter=true when the sequence represents
+// a plain Enter key reported through the CSI u keyboard protocol.
+func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer) (bool, error) {
 	next, err := reader.ReadByte()
-	if err != nil || next != '[' {
-		return nil
-	}
-	code, err := reader.ReadByte()
 	if err != nil {
-		return ErrEditorCancelled
+		return false, ErrEditorCancelled
 	}
-	switch code {
+	if next != '[' {
+		return false, nil
+	}
+	first, err := reader.ReadByte()
+	if err != nil {
+		return false, ErrEditorCancelled
+	}
+	var params strings.Builder
+	final := first
+	for final < 0x40 || final > 0x7e {
+		params.WriteByte(final)
+		final, err = reader.ReadByte()
+		if err != nil {
+			return false, ErrEditorCancelled
+		}
+	}
+	switch final {
 	case 'A':
 		buffer.moveVertical(-1)
 	case 'B':
@@ -189,44 +232,36 @@ func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer) error {
 		buffer.home()
 	case 'F':
 		buffer.end()
-	case '3':
-		if terminator, _ := reader.ReadByte(); terminator == '~' {
+	case '~':
+		switch params.String() {
+		case "3":
 			buffer.delete()
-		}
-	case '2':
-		sequence, err := readControlSequence(reader, '~')
-		if err != nil {
-			return err
-		}
-		if sequence == "00" {
+		case "200":
 			pasted, err := readBracketedPaste(reader)
 			if err != nil {
-				return err
+				return false, err
 			}
 			buffer.insert(pasted)
 		}
-	case '<':
-		sequence, err := readMouseSequence(reader)
-		if err != nil {
-			return err
-		}
-		positionMouse(buffer, sequence)
+	case 'u':
+		return handleKeyboardProtocol(params.String(), buffer), nil
 	}
-	return nil
+	return false, nil
 }
 
-func readControlSequence(reader *bufio.Reader, terminator byte) (string, error) {
-	var sequence strings.Builder
-	for {
-		character, err := reader.ReadByte()
-		if err != nil {
-			return "", ErrEditorCancelled
-		}
-		if character == terminator {
-			return sequence.String(), nil
-		}
-		sequence.WriteByte(character)
+// handleKeyboardProtocol interprets a CSI u sequence ("codepoint;modifiers")
+// sent by terminals that support xterm's modifyOtherKeys or the Kitty
+// keyboard protocol. It reports enter=true for a plain Enter key press.
+func handleKeyboardProtocol(params string, buffer *textBuffer) bool {
+	codepoint, modifiers, _ := strings.Cut(params, ";")
+	if codepoint != "13" {
+		return false
 	}
+	if modifiers == "2" {
+		buffer.insert("\n")
+		return false
+	}
+	return true
 }
 
 func readBracketedPaste(reader *bufio.Reader) (string, error) {
@@ -248,36 +283,6 @@ func readBracketedPaste(reader *bufio.Reader) (string, error) {
 			window = window[1:]
 		}
 	}
-}
-
-func readMouseSequence(reader *bufio.Reader) (string, error) {
-	var sequence strings.Builder
-	for {
-		character, err := reader.ReadByte()
-		if err != nil {
-			return "", ErrEditorCancelled
-		}
-		sequence.WriteByte(character)
-		if character == 'M' || character == 'm' {
-			return sequence.String(), nil
-		}
-	}
-}
-
-func positionMouse(buffer *textBuffer, sequence string) {
-	if !strings.HasSuffix(sequence, "M") {
-		return
-	}
-	fields := strings.Split(strings.TrimSuffix(sequence, "M"), ";")
-	if len(fields) != 3 || fields[0] != "0" {
-		return
-	}
-	column, columnErr := strconv.Atoi(fields[1])
-	row, rowErr := strconv.Atoi(fields[2])
-	if columnErr != nil || rowErr != nil || row < editorContentRow {
-		return
-	}
-	buffer.setPosition(row-editorContentRow, column-3)
 }
 
 func readRune(reader *bufio.Reader, first byte) (rune, error) {

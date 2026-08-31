@@ -9,9 +9,11 @@ yolocoder "Add expiration support to user sessions"
 At startup, YoloCoder prints the current folder it will work in before mapping
 the repository.
 
-Running `yolocoder` without a task opens a multiline terminal editor. Paste
-multiline instructions normally, use arrow keys or the mouse to reposition the
-cursor, press Enter for a new line, and press Ctrl+D to submit.
+Running `yolocoder` without a task opens a multiline terminal editor showing
+the current folder. Paste multiline instructions normally, use arrow keys to
+reposition the cursor, press Enter to submit, and press Shift+Enter for a new
+line (falls back to Enter-only in terminals that don't report Shift+Enter
+separately).
 
 ## Install
 

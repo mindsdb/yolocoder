@@ -38,12 +38,33 @@ func TestReadBracketedPastePreservesNewlines(t *testing.T) {
 	}
 }
 
-func TestPositionMouseMovesCursor(t *testing.T) {
-	buffer := &textBuffer{text: []rune("first\nsecond")}
-	positionMouse(buffer, "0;5;5M")
-	row, column := buffer.position()
-	if row != 1 || column != 2 {
-		t.Fatalf("position = %d,%d", row, column)
+func TestHandleKeyboardProtocolShiftEnterInsertsNewline(t *testing.T) {
+	buffer := &textBuffer{text: []rune("hi"), cursor: 2}
+	if handleKeyboardProtocol("13;2", buffer) {
+		t.Fatal("shift+enter should not report enter")
+	}
+	if string(buffer.text) != "hi\n" {
+		t.Fatalf("buffer text = %q", buffer.text)
+	}
+}
+
+func TestHandleKeyboardProtocolPlainEnterReportsEnter(t *testing.T) {
+	buffer := &textBuffer{text: []rune("hi")}
+	if !handleKeyboardProtocol("13", buffer) {
+		t.Fatal("plain enter should report enter")
+	}
+	if string(buffer.text) != "hi" {
+		t.Fatalf("buffer text = %q", buffer.text)
+	}
+}
+
+func TestHandleKeyboardProtocolIgnoresOtherKeys(t *testing.T) {
+	buffer := &textBuffer{text: []rune("hi")}
+	if handleKeyboardProtocol("65", buffer) {
+		t.Fatal("non-enter key should not report enter")
+	}
+	if string(buffer.text) != "hi" {
+		t.Fatalf("buffer text = %q", buffer.text)
 	}
 }
 

@@ -131,6 +131,71 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 	}
 }
 
+func TestRunnerFeedsTheFailedDiffBackAsEvidence(t *testing.T) {
+	// A retry is only useful if the model can see what it got wrong, so
+	// the next attempt must receive both git's complaint (including the
+	// text it searched for) and the diff that failed.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<html>\n<title>BLOCK &amp; BOARD</title>\n</html>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+
+	badDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK & BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
+	goodDiff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>BLOCK &amp; BOARD</title>\n+<title>TICTACTRIS</title>\n </html>\n"
+
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		name := ""
+		if text, ok := body["text"].(map[string]any); ok {
+			if format, ok := text["format"].(map[string]any); ok {
+				name, _ = format["name"].(string)
+			}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch name {
+		case "message_route":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+		case "implementation_plan":
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"Retitle\",\"files_to_modify\":[\"index.html\"],\"context_files\":[],\"steps\":[\"Rename\"]}"}]}]}`)
+		case "unified_patch":
+			patches++
+			if patches == 2 {
+				input, _ := body["input"].(string)
+				for _, want := range []string{"THE DIFF THAT FAILED", badDiff, "while searching for"} {
+					if !strings.Contains(input, want) {
+						t.Fatalf("retry input missing %q:\n%s", want, input)
+					}
+				}
+				payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: goodDiff})
+				writeOutputText(writer, string(payload))
+				return
+			}
+			payload, _ := json.Marshal(Patch{Summary: "Retitle", Diff: badDiff})
+			writeOutputText(writer, string(payload))
+		default:
+			t.Fatalf("unexpected schema %q", name)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	if _, err := NewRunner(client, repository).Run(context.Background(), "retitle it", &recordingProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if patches != 2 {
+		t.Fatalf("patch requests = %d, want 2 (the corrected retry should land)", patches)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil || !strings.Contains(string(content), "TICTACTRIS") {
+		t.Fatalf("index.html = %q, %v", content, err)
+	}
+}
+
 func TestRunnerRewritesFilesWhenNoDiffApplies(t *testing.T) {
 	// Reproduces a real failure: the file contains the HTML entity
 	// "&amp;" but the model's diff writes "&" in the line it removes, so

@@ -151,7 +151,16 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 		progress.Status("Applying the patch...")
 		if err := runner.repository.Apply(patch.Diff); err != nil {
 			progress.Log("  patch did not apply, retrying")
-			evidence = "The patch did not apply:\n" + err.Error()
+			// Feed back the diff that failed alongside git's complaint.
+			// Without seeing its own output the model has no way to tell
+			// what was wrong with it and tends to reproduce it verbatim.
+			evidence = fmt.Sprintf(
+				"The patch did not apply. Git looks for the context and removed lines exactly as written, "+
+					"so any difference from the real file (an HTML entity spelled out, a changed attribute, "+
+					"reflowed whitespace) makes the whole hunk fail. Compare git's \"while searching for\" text "+
+					"below against the real contents above and copy those lines character for character.\n\n"+
+					"GIT REPORTED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
+				err.Error(), patch.Diff)
 			continue
 		}
 		progress.Log("  applied the patch")

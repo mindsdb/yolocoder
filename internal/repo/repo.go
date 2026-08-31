@@ -200,11 +200,14 @@ func (repository *Repository) Search(ctx context.Context, query string) (string,
 // a model-generated diff miscounting them (a common mistake, especially on
 // longer hunks) otherwise fails with "corrupt patch at line N". --whitespace=fix
 // silently normalizes trailing whitespace rather than erroring on it.
+// --verbose makes a rejection report the exact text git searched for and
+// could not find, which is the only part of the failure specific enough
+// for the model to correct itself from.
 func (repository *Repository) Apply(patch string) error {
 	if strings.TrimSpace(patch) == "" {
 		return fmt.Errorf("patch is empty")
 	}
-	applyArgs := []string{"-c", "core.autocrlf=false", "apply", "--recount", "--whitespace=fix"}
+	applyArgs := []string{"-c", "core.autocrlf=false", "apply", "--recount", "--whitespace=fix", "--verbose"}
 	for _, args := range [][]string{
 		append(append([]string{}, applyArgs...), "--check", "-"),
 		append(append([]string{}, applyArgs...), "-"),

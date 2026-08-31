@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,14 @@ func jsonSpan(text string) string {
 	return ""
 }
 
+// Progress reports what the agent is doing. Status replaces a transient
+// activity line; Log writes a permanent line, leaving the user a readable
+// trail of the work rather than a single message that overwrites itself.
+type Progress interface {
+	Status(string)
+	Log(string)
+}
+
 type Runner struct {
 	client     *Client
 	repository *repo.Repository
@@ -78,8 +87,8 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 // Run routes the message first: a plain conversational message gets the
 // model's direct reply with the repository never touched, and only an
 // actual coding task goes through the map/plan/patch/test loop.
-func (runner *Runner) Run(ctx context.Context, task string, progress func(string)) (string, error) {
-	progress("Reading your message...")
+func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (string, error) {
+	progress.Status("Reading your message...")
 	decision, err := runner.route(ctx, task)
 	if err != nil {
 		return "", err
@@ -88,50 +97,65 @@ func (runner *Runner) Run(ctx context.Context, task string, progress func(string
 		return decision.Reply, nil
 	}
 
+	progress.Status("Mapping the folder...")
 	repoMap, err := runner.repository.Map()
 	if err != nil {
 		return "", err
 	}
-	progress("Finding the right code...")
-	plan, contextText, err := runner.plan(ctx, task, repoMap)
+	progress.Log(fmt.Sprintf("  mapped %d files", countMapped(repoMap)))
+
+	progress.Status("Finding the right code...")
+	plan, contextText, err := runner.plan(ctx, task, repoMap, progress)
 	if err != nil {
 		return "", err
+	}
+	progress.Log("  plan: " + plan.Summary)
+	for _, path := range plan.FilesToModify {
+		progress.Log("  will edit " + path)
 	}
 	plannedContext, err := runner.readPlanFiles(plan)
 	if err != nil {
 		return "", err
 	}
 	contextText += "\nPLANNED FILES:\n" + plannedContext
-	progress("Making the change...")
-	patch, err := runner.patch(ctx, task, repoMap, plan, contextText, "")
-	if err != nil {
-		return "", err
-	}
 
 	var evidence string
+	var patch Patch
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			progress("Repairing from new evidence...")
+			progress.Status("Repairing from new evidence...")
 			contextText, err = runner.readPlanFiles(plan)
 			if err != nil {
 				return "", err
 			}
-			patch, err = runner.patch(ctx, task, repoMap, plan, contextText, evidence)
-			if err != nil {
-				return "", err
-			}
+		} else {
+			progress.Status("Writing the change...")
 		}
-		progress("Applying the patch...")
+		patch, err = runner.patch(ctx, task, repoMap, plan, contextText, evidence)
+		if err != nil {
+			return "", err
+		}
+		progress.Log("  patch: " + patch.Summary)
+
+		progress.Status("Applying the patch...")
 		if err := runner.repository.Apply(patch.Diff); err != nil {
+			progress.Log("  patch did not apply, retrying")
 			evidence = "The patch did not apply:\n" + err.Error()
 			continue
 		}
-		progress("Testing the change...")
+		progress.Log("  applied the patch")
+
+		progress.Status("Testing the change...")
 		testResult := RunTests(ctx, runner.repository.Root)
 		if testResult.Passed {
-			progress("Done.")
+			if testResult.Skipped {
+				progress.Log("  no test command detected")
+			} else {
+				progress.Log("  tests passed")
+			}
 			return patch.Summary, nil
 		}
+		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
 	}
 	return "", fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
@@ -165,7 +189,7 @@ func (runner *Runner) route(ctx context.Context, task string) (routeDecision, er
 // response state, and one that doesn't will reject a function_call_output
 // referencing a call_id it never stored, so the transcript is tracked here
 // instead.
-func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, string, error) {
+func (runner *Runner) plan(ctx context.Context, task, repoMap string, progress Progress) (Plan, string, error) {
 	taskText := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
 	var transcript []any
 	var collected strings.Builder
@@ -203,6 +227,7 @@ func (runner *Runner) plan(ctx context.Context, task, repoMap string) (Plan, str
 			transcript = []any{inputMessage{Role: "user", Content: taskText}}
 		}
 		for _, call := range calls {
+			progress.Log("  " + describeCall(call))
 			output := runner.runTool(ctx, call)
 			fmt.Fprintf(&collected, "\nTOOL %s:\n%s\n", call.Name, output)
 			transcript = append(transcript, call)
@@ -240,6 +265,34 @@ func (runner *Runner) patch(ctx context.Context, task, repoMap string, plan Plan
 		return Patch{}, fmt.Errorf("model returned an empty patch")
 	}
 	return patch, nil
+}
+
+// describeCall renders a tool call as a short line for the progress log,
+// so the user can see which files the model is actually looking at.
+func describeCall(call responseItem) string {
+	var arguments toolArguments
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
+		return call.Name
+	}
+	switch call.Name {
+	case "read_files":
+		return "read " + strings.Join(arguments.Paths, ", ")
+	case "search":
+		return "search " + strconv.Quote(arguments.Query)
+	default:
+		return call.Name
+	}
+}
+
+// countMapped counts the files listed in a repository map.
+func countMapped(repoMap string) int {
+	count := 0
+	for _, line := range strings.Split(repoMap, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func (runner *Runner) runTool(ctx context.Context, call responseItem) string {

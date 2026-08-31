@@ -11,11 +11,19 @@ repository is required: YoloCoder maps and patches the folder directly. If
 the folder already has its own `.git` (not an ancestor directory's), it's
 used opportunistically for a `.gitignore`-aware map and faster patch checks.
 
-Running `yolocoder` without a task opens a multiline terminal editor showing
-the current folder. Paste multiline instructions normally, use arrow keys to
-reposition the cursor, press Enter to submit, and press Shift+Enter for a new
+Passing a task runs it once and exits. Running `yolocoder` with no task starts
+an interactive session instead: it prompts, works, reports what it did, then
+prompts again, all in one continuous transcript. Leave with `/exit` or Ctrl+C.
+
+At the prompt, paste multiline instructions normally, use arrow keys to
+reposition the cursor, press Enter to send, and press Shift+Enter for a new
 line (falls back to Enter-only in terminals that don't report Shift+Enter
 separately).
+
+While it works, YoloCoder prints what it is actually doing — the files it
+reads, the searches it runs, the plan, the patch, and the test result — so
+the finished session leaves a readable trail rather than a single status
+line that overwrites itself.
 
 ## Install
 

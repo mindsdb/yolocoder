@@ -16,8 +16,8 @@ import (
 const Help = `YoloCoder
 
 Usage:
-  yolocoder <task>                make and test a coding change
-  yolocoder                       prompt for a task
+  yolocoder <task>                make and test a coding change, then exit
+  yolocoder                       start an interactive session
   yolocoder --llm-from-env-vars <task>
                                   use OPENAI_* environment variables
   yolocoder config show           show the saved provider

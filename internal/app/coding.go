@@ -12,24 +12,29 @@ import (
 	"github.com/mindsdb/yolocoder/internal/terminal"
 )
 
-func PrepareTask(task string, fromEnvironment bool) (string, config.LLM, error) {
-	provider, err := resolveProvider(fromEnvironment)
+// Provider resolves the LLM provider to use, prompting for one when none
+// is configured yet.
+func Provider(fromEnvironment bool) (config.LLM, error) {
+	return resolveProvider(fromEnvironment)
+}
+
+// PromptTask reads one task from the interactive editor. It returns
+// terminal.ErrEditorCancelled when the user presses Ctrl+C.
+func PromptTask() (string, error) {
+	if !terminalInput() {
+		return "", fmt.Errorf("a task is required\n\nUsage: yolocoder [--llm-from-env-vars] <task>")
+	}
+	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout)
 	if err != nil {
-		return "", config.LLM{}, err
+		return "", err
 	}
-	if strings.TrimSpace(task) == "" {
-		task, err = promptTask()
-		if err != nil {
-			return "", config.LLM{}, err
-		}
-	}
-	return task, provider, nil
+	return strings.TrimSpace(task), nil
 }
 
 // RunTask returns the model's reply. For a plain conversational message,
 // that's its direct answer; for a completed coding task, it's a short
 // summary of the change (may be empty).
-func RunTask(ctx context.Context, task string, provider config.LLM, progress func(string)) (string, error) {
+func RunTask(ctx context.Context, task string, provider config.LLM, progress agent.Progress) (string, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
 		return "", err
@@ -64,17 +69,16 @@ func resolveProvider(fromEnvironment bool) (config.LLM, error) {
 	return provider, nil
 }
 
-func promptTask() (string, error) {
-	if !terminalInput() {
-		return "", fmt.Errorf("a task is required\n\nUsage: yolocoder [--llm-from-env-vars] <task>")
-	}
-	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout)
+// Folder is the current working directory, shortened with ~ for display.
+func Folder() string {
+	directory, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("read task: %w", err)
+		return ""
 	}
-	task = strings.TrimSpace(task)
-	if task == "" {
-		return "", fmt.Errorf("task is required")
+	if home, err := os.UserHomeDir(); err == nil {
+		if relative, ok := strings.CutPrefix(directory, home); ok {
+			return "~" + relative
+		}
 	}
-	return task, nil
+	return directory
 }

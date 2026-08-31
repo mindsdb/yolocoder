@@ -5,18 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"unicode/utf8"
 
 	"golang.org/x/term"
-
-	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 var ErrEditorCancelled = errors.New("task entry cancelled")
 
-const editorContentRow = 5
+// editorPrefixWidth is the width of the "› " / "│ " marker each prompt
+// line is drawn with.
+const editorPrefixWidth = 2
 
 type textBuffer struct {
 	text   []rune
@@ -121,13 +120,23 @@ func (reader *Reader) EditTask(output io.Writer) (string, error) {
 	// >4;2m and >1u ask the terminal to report Shift+Enter distinctly from
 	// Enter (xterm modifyOtherKeys and the Kitty keyboard protocol,
 	// respectively); terminals that don't understand them ignore them.
-	fmt.Fprint(output, "\x1b[?1049h\x1b[?2004h\x1b[>4;2m\x1b[>1u")
-	defer fmt.Fprint(output, "\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?1049l")
+	// Deliberately no alternate screen: the prompt draws inline so the
+	// session's transcript above it stays on screen and in scrollback.
+	fmt.Fprint(output, "\x1b[?2004h\x1b[>4;2m\x1b[>1u")
+	defer fmt.Fprint(output, "\x1b[<u\x1b[>4;0m\x1b[?2004l")
 
-	folder := workingDirectory()
 	buffer := &textBuffer{}
+	layout := editorLayout{}
+	defer func() {
+		// Leave the cursor on a fresh line below the prompt so whatever
+		// prints next starts cleanly instead of overwriting it.
+		if down := layout.rows - layout.cursorRow; down > 0 {
+			fmt.Fprintf(output, "\x1b[%dB", down)
+		}
+		fmt.Fprint(output, "\r")
+	}()
 	for {
-		drawEditor(output, buffer, folder)
+		layout = drawEditor(output, buffer, reader.width(), layout)
 		key, err := reader.buffer.ReadByte()
 		if err != nil {
 			return "", ErrEditorCancelled
@@ -171,30 +180,68 @@ func submit(buffer *textBuffer) (string, bool) {
 	return task, task != ""
 }
 
-func workingDirectory() string {
-	directory, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if relative, ok := strings.CutPrefix(directory, home); ok {
-			directory = "~" + relative
-		}
-	}
-	return directory
+// editorLayout records how much of the terminal the prompt currently
+// occupies, so the next redraw can replace exactly that region in place
+// instead of clearing the screen and losing the transcript above it.
+type editorLayout struct {
+	rows      int // terminal rows the prompt occupies, wrapping included
+	cursorRow int // 0-based row of the text cursor within those rows
 }
 
-func drawEditor(output io.Writer, buffer *textBuffer, folder string) {
-	fmt.Fprint(output, "\x1b[H\x1b[2J")
-	fmt.Fprintf(output, "\x1b[36m[^_^] YoloCoder %s\x1b[0m  \x1b[2m%s\x1b[0m\r\n", version.Display(), folder)
-	fmt.Fprint(output, "Describe the coding task\r\n")
-	fmt.Fprint(output, "\x1b[2mEnter: send  •  Shift+Enter: new line  •  Ctrl+C: cancel  •  arrows: move cursor\x1b[0m\r\n\r\n")
-	lines := strings.Split(string(buffer.text), "\n")
-	for _, line := range lines {
-		fmt.Fprintf(output, "\x1b[36m│\x1b[0m %s\x1b[K\r\n", line)
+// width reports the terminal's column count, falling back to a sane
+// default when it can't be determined.
+func (reader *Reader) width() int {
+	columns, _, err := term.GetSize(int(reader.input.Fd()))
+	if err != nil || columns < editorPrefixWidth+2 {
+		return 80
 	}
+	return columns
+}
+
+// wrappedRows is how many terminal rows a prompt line of the given rune
+// count occupies once the marker prefix and wrapping are accounted for.
+// A line that exactly fills the width still occupies one row, so this
+// rounds up rather than adding one unconditionally.
+func wrappedRows(runes, width int) int {
+	cells := runes + editorPrefixWidth
+	rows := (cells + width - 1) / width
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
+func drawEditor(output io.Writer, buffer *textBuffer, width int, previous editorLayout) editorLayout {
+	if previous.cursorRow > 0 {
+		fmt.Fprintf(output, "\x1b[%dA", previous.cursorRow)
+	}
+	// Back to column 1 and wipe everything below: handles the prompt
+	// shrinking as well as growing.
+	fmt.Fprint(output, "\r\x1b[0J")
+
+	lines := strings.Split(string(buffer.text), "\n")
 	row, column := buffer.position()
-	fmt.Fprintf(output, "\x1b[%d;%dH", editorContentRow+row, 3+column)
+	layout := editorLayout{}
+	for index, line := range lines {
+		marker := "\x1b[36m│\x1b[0m "
+		if index == 0 {
+			marker = "\x1b[36m›\x1b[0m "
+		}
+		fmt.Fprintf(output, "%s%s\r\n", marker, line)
+		rows := wrappedRows(len([]rune(line)), width)
+		if index == row {
+			layout.cursorRow = layout.rows + (column+editorPrefixWidth)/width
+		}
+		layout.rows += rows
+	}
+
+	// The trailing \r\n left the cursor below the prompt; come back up to
+	// the line the text cursor belongs on and sit at the right column.
+	if up := layout.rows - layout.cursorRow; up > 0 {
+		fmt.Fprintf(output, "\x1b[%dA", up)
+	}
+	fmt.Fprintf(output, "\r\x1b[%dG", (column+editorPrefixWidth)%width+1)
+	return layout
 }
 
 // handleEditorEscape parses one CSI sequence following an ESC byte and

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/app"
+	"github.com/mindsdb/yolocoder/internal/config"
+	"github.com/mindsdb/yolocoder/internal/terminal"
 	"github.com/mindsdb/yolocoder/internal/ui"
 	"github.com/mindsdb/yolocoder/internal/update"
 	"github.com/mindsdb/yolocoder/internal/version"
@@ -43,6 +46,7 @@ func main() {
 		// loaded until the next separate invocation. If it can't even
 		// start the new binary, fall through and keep running on the
 		// old one rather than aborting.
+		fmt.Println("[^_^] Updated to a new build, restarting...")
 		if err := update.Relaunch(); err != nil {
 			fmt.Fprintln(os.Stderr, "restart after update:", err)
 		}
@@ -67,36 +71,69 @@ func main() {
 		os.Exit(app.RunModel(args[1:]))
 	}
 
-	fmt.Printf("YoloCoder %s\n", version.Display())
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "find current folder: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Folder: %s\n", workingDirectory)
 	fromEnvironment := false
 	if len(args) > 0 && args[0] == "--llm-from-env-vars" {
 		fromEnvironment = true
 		args = args[1:]
 	}
-	task := strings.TrimSpace(strings.Join(args, " "))
-	task, provider, err := app.PrepareTask(task, fromEnvironment)
+
+	fmt.Printf("\x1b[36m[^_^] YoloCoder %s\x1b[0m  \x1b[2m%s\x1b[0m\n", version.Display(), app.Folder())
+
+	provider, err := app.Provider(fromEnvironment)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	var reply string
-	var runErr error
-	ui.WithRobot(os.Stdout, "Thinking...", func(status ui.RobotStatus) {
-		reply, runErr = app.RunTask(context.Background(), task, provider, status)
-	})
-	if runErr != nil {
-		fmt.Fprintln(os.Stderr, runErr)
-		os.Exit(1)
+
+	// A task on the command line is a one-shot run; without one, stay in
+	// an interactive session so follow-up tasks keep the same context on
+	// screen instead of ending after a single change.
+	if task := strings.TrimSpace(strings.Join(args, " ")); task != "" {
+		if err := runTask(task, provider); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
-	if reply != "" {
-		fmt.Printf("[*_*] %s\n", reply)
-	} else {
-		fmt.Println("[*_*] Done.")
+
+	fmt.Printf("\x1b[2mEnter: send  •  Shift+Enter: new line  •  Ctrl+C or /exit: quit\x1b[0m\n\n")
+	for {
+		task, err := app.PromptTask()
+		if err != nil {
+			if errors.Is(err, terminal.ErrEditorCancelled) {
+				fmt.Println("[^_^] Bye.")
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		switch task {
+		case "":
+			continue
+		case "/exit", "/quit":
+			fmt.Println("[^_^] Bye.")
+			return
+		}
+		if err := runTask(task, provider); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		fmt.Println()
 	}
+}
+
+// runTask runs one task, reporting progress as it goes and printing the
+// model's reply at the end.
+func runTask(task string, provider config.LLM) error {
+	session := ui.NewSession(os.Stdout)
+	session.Start("Thinking...")
+	reply, err := app.RunTask(context.Background(), task, provider, session)
+	session.Stop()
+	if err != nil {
+		return err
+	}
+	if reply == "" {
+		reply = "Done."
+	}
+	fmt.Printf("[*_*] %s\n", reply)
+	return nil
 }

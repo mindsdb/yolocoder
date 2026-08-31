@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mindsdb/yolocoder/internal/repo"
@@ -103,12 +104,20 @@ func TestRunnerToolPlanPatchApply(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	runner := NewRunner(client, repository)
-	reply, err := runner.Run(context.Background(), "Change old to new", func(string) {})
+	progress := &recordingProgress{}
+	reply, err := runner.Run(context.Background(), "Change old to new", progress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reply != "Update greeting" {
 		t.Fatalf("reply = %q", reply)
+	}
+	// The permanent log is what tells the user what actually happened.
+	trail := strings.Join(progress.logs, "\n")
+	for _, want := range []string{"read hello.txt", "plan: Update greeting", "will edit hello.txt", "applied the patch"} {
+		if !strings.Contains(trail, want) {
+			t.Fatalf("progress log missing %q:\n%s", want, trail)
+		}
 	}
 	content, err := os.ReadFile(filepath.Join(repository.Root, "hello.txt"))
 	if err != nil {
@@ -134,7 +143,7 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
 	runner := NewRunner(client, repository)
-	reply, err := runner.Run(context.Background(), "hi", func(string) {})
+	reply, err := runner.Run(context.Background(), "hi", &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,4 +172,19 @@ func integrationRepository(t *testing.T) *repo.Repository {
 		t.Fatalf("git add: %v: %s", err, output)
 	}
 	return &repo.Repository{Root: root}
+}
+
+// recordingProgress captures progress output so tests can assert on the
+// trail the user would see.
+type recordingProgress struct {
+	statuses []string
+	logs     []string
+}
+
+func (progress *recordingProgress) Status(message string) {
+	progress.statuses = append(progress.statuses, message)
+}
+
+func (progress *recordingProgress) Log(message string) {
+	progress.logs = append(progress.logs, message)
 }

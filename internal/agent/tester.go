@@ -14,13 +14,16 @@ const maxTestOutput = 128 << 10
 
 type TestResult struct {
 	Passed bool
-	Output string
+	// Skipped reports that no test command was detected, so Passed is
+	// true only because there was nothing to run.
+	Skipped bool
+	Output  string
 }
 
 func RunTests(ctx context.Context, root string) TestResult {
 	name, args := detectTestCommand(root)
 	if name == "" {
-		return TestResult{Passed: true, Output: "No supported test command detected."}
+		return TestResult{Passed: true, Skipped: true, Output: "No supported test command detected."}
 	}
 	testCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()

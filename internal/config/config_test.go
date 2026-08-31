@@ -9,7 +9,11 @@ import (
 )
 
 func TestSaveAndLoad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir reads $HOME on Unix but %USERPROFILE% on Windows, so
+	// both must be set for this override to take effect on every runner.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	want := LLM{Provider: "openai-compatible", BaseURL: "https://llm.example/v1/", APIKey: "secret", Model: "test-model"}
 	if err := Save(want); err != nil {
 		t.Fatal(err)
@@ -32,7 +36,7 @@ func TestSaveAndLoad(t *testing.T) {
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials permissions = %o", info.Mode().Perm())
 	}
-	if filepath.Dir(credentialsPath) != filepath.Join(os.Getenv("HOME"), ".config", "yolocoder") {
+	if filepath.Dir(credentialsPath) != filepath.Join(home, ".config", "yolocoder") {
 		t.Fatalf("credentials path = %s", credentialsPath)
 	}
 	configPath, _, _ := Paths()

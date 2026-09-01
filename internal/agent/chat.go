@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
@@ -78,10 +79,19 @@ type chatChoice struct {
 }
 
 // toChat converts a Responses-style request into a chat completion.
-func toChat(request responseRequest) (chatRequest, error) {
+// dropSchema omits response_format for providers that reject it alongside
+// tools, describing the shape in the instructions instead so the reply is
+// still JSON we can read.
+func toChat(request responseRequest, dropSchema bool) (chatRequest, error) {
 	converted := chatRequest{Model: request.Model, ToolChoice: request.ToolChoice}
-	if request.Instructions != "" {
-		converted.Messages = append(converted.Messages, chatMessage{Role: "system", Content: request.Instructions})
+	instructions := request.Instructions
+	if dropSchema && request.Text != nil {
+		if hint := schemaHint(request.Text.Format); hint != "" {
+			instructions = strings.TrimSpace(instructions + "\n" + hint)
+		}
+	}
+	if instructions != "" {
+		converted.Messages = append(converted.Messages, chatMessage{Role: "system", Content: instructions})
 	}
 	messages, err := chatMessages(request.Input)
 	if err != nil {
@@ -99,7 +109,7 @@ func toChat(request responseRequest) (chatRequest, error) {
 			},
 		})
 	}
-	if request.Text != nil {
+	if request.Text != nil && !dropSchema {
 		converted.ResponseFormat = &chatFormat{
 			Type: "json_schema",
 			JSONSchema: &chatJSONSchema{
@@ -110,6 +120,60 @@ func toChat(request responseRequest) (chatRequest, error) {
 		}
 	}
 	return converted, nil
+}
+
+// schemaHint describes a schema in a sentence, for providers that won't
+// take one alongside tools. Without enforcement the shape has to be asked
+// for in words, or the reply comes back in whatever shape the model likes.
+func schemaHint(format schemaFormat) string {
+	properties, _ := format.Schema["properties"].(map[string]any)
+	if len(properties) == 0 {
+		return ""
+	}
+	names := orderedKeys(format.Schema, properties)
+	described := make([]string, 0, len(names))
+	for _, name := range names {
+		described = append(described, name+" ("+jsonTypeOf(properties[name])+")")
+	}
+	return "Return only a JSON object with exactly these keys: " + strings.Join(described, ", ") + "."
+}
+
+// orderedKeys lists a schema's properties in its stated required order,
+// so the description matches the order the fields should be written in.
+func orderedKeys(schema map[string]any, properties map[string]any) []string {
+	var names []string
+	seen := map[string]bool{}
+	if required, ok := schema["required"].([]string); ok {
+		for _, name := range required {
+			if _, present := properties[name]; present && !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	var rest []string
+	for name := range properties {
+		if !seen[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(names, rest...)
+}
+
+func jsonTypeOf(property any) string {
+	definition, ok := property.(map[string]any)
+	if !ok {
+		return "value"
+	}
+	kind, _ := definition["type"].(string)
+	if kind == "array" {
+		return "array of strings"
+	}
+	if kind == "" {
+		return "value"
+	}
+	return kind
 }
 
 // chatMessages turns a Responses input — a bare string, or the transcript

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,7 +44,7 @@ func TestToChatConvertsATranscript(t *testing.T) {
 		ToolChoice: "auto",
 		Text:       strictSchema("code_change", changeSchema()),
 	}
-	converted, err := toChat(request)
+	converted, err := toChat(request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestToChatConvertsATranscript(t *testing.T) {
 }
 
 func TestToChatConvertsABareString(t *testing.T) {
-	converted, err := toChat(responseRequest{Model: "m", Input: "hi"})
+	converted, err := toChat(responseRequest{Model: "m", Input: "hi"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,5 +302,103 @@ func TestClientDoesNotFallBackWhenTheDialectWasSaved(t *testing.T) {
 	}
 	if len(paths) != 1 {
 		t.Fatalf("paths = %v, want no retry", paths)
+	}
+}
+
+func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
+	// Without response_format there is no enforcement, so the shape has
+	// to be asked for in words or the reply comes back however the model
+	// likes. The keys are listed in the schema's required order.
+	request := responseRequest{
+		Model:        "m",
+		Instructions: "be brief",
+		Input:        "hi",
+		Tools:        repositoryTools(),
+		Text:         strictSchema("code_change", changeSchema()),
+	}
+	converted, err := toChat(request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.ResponseFormat != nil {
+		t.Fatalf("response format = %+v, want it omitted", converted.ResponseFormat)
+	}
+	if len(converted.Tools) == 0 {
+		t.Fatal("tools must survive; they are what the schema was dropped for")
+	}
+	system := converted.Messages[0].Content
+	if !strings.Contains(system, "be brief") {
+		t.Fatalf("system message lost the instructions: %q", system)
+	}
+	want := "summary (string), files_to_modify (array of strings), diff (string)"
+	if !strings.Contains(system, want) {
+		t.Fatalf("system message = %q, want it to describe %q", system, want)
+	}
+}
+
+func TestRejectsSchemaWithTools(t *testing.T) {
+	// Cerebras's own wording, plus shapes other providers use.
+	rejecting := []string{
+		`{"message":"\"tools\" is incompatible with \"response_format\"","code":"wrong_api_format"}`,
+		`{"error":{"message":"response_format is not supported with tools"}}`,
+		`{"error":{"message":"response_format cannot be used together with tool calling"}}`,
+	}
+	for _, body := range rejecting {
+		if !rejectsSchemaWithTools([]byte(body)) {
+			t.Fatalf("rejectsSchemaWithTools(%s) = false, want true", body)
+		}
+	}
+	// An unrelated failure must not trigger the retry.
+	other := []string{
+		`{"error":{"message":"Wrong API Key"}}`,
+		`{"error":{"message":"model not found"}}`,
+		"",
+	}
+	for _, body := range other {
+		if rejectsSchemaWithTools([]byte(body)) {
+			t.Fatalf("rejectsSchemaWithTools(%s) = true, want false", body)
+		}
+	}
+}
+
+func TestClientRetriesWithoutTheSchemaWhenRejected(t *testing.T) {
+	var withSchema []bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body chatRequest
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		withSchema = append(withSchema, body.ResponseFormat != nil)
+		if body.ResponseFormat != nil && len(body.Tools) > 0 {
+			writer.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(writer, `{"message":"\"tools\" is incompatible with \"response_format\"","code":"wrong_api_format"}`)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(chatEnvelope{Choices: []chatChoice{{
+			Message: chatMessage{Role: "assistant", Content: `{"ok":true}`},
+		}}})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m", API: config.APIChat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := responseRequest{Input: "hi", Tools: repositoryTools(), Text: strictSchema("code_change", changeSchema())}
+	response, err := client.create(context.Background(), request)
+	if err != nil {
+		t.Fatalf("create() = %v, want the retry to succeed", err)
+	}
+	if text, _ := response.text(); text != `{"ok":true}` {
+		t.Fatalf("text = %q", text)
+	}
+	if len(withSchema) != 2 || !withSchema[0] || withSchema[1] {
+		t.Fatalf("requests carried schema %v, want the first to and the retry not to", withSchema)
+	}
+	// Having learned it, later calls skip the rejected attempt.
+	if _, err := client.create(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(withSchema) != 3 || withSchema[2] {
+		t.Fatalf("requests carried schema %v, want no repeat of the rejected form", withSchema)
 	}
 }

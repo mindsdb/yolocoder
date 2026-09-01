@@ -22,6 +22,9 @@ type Client struct {
 	// chat selects the /v1/chat/completions dialect, which most
 	// OpenAI-compatible providers implement instead of the Responses API.
 	chat bool
+	// dropSchema means this provider rejected response_format alongside
+	// tools, so the shape is asked for in the instructions instead.
+	dropSchema bool
 	// autoDialect means the saved provider didn't record which API the
 	// endpoint speaks, so a 404 on the Responses route is taken as the
 	// answer rather than an error. Configs saved before the dialect was
@@ -119,7 +122,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	request.Model = client.model
 	body := any(request)
 	if client.chat {
-		converted, err := toChat(request)
+		converted, err := toChat(request, client.dropSchema)
 		if err != nil {
 			return responseEnvelope{}, err
 		}
@@ -164,6 +167,15 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return client.create(ctx, request)
 	}
 
+	// Some providers won't take tool definitions and a JSON schema in the
+	// same request. Ask again without the schema, describing the shape in
+	// the instructions instead, and keep doing that for this run.
+	if client.chat && !client.dropSchema && rejectsSchemaWithTools(replyBody) {
+		debug.Log("SCHEMA", "the provider rejects response_format alongside tools; describing the shape in the instructions instead")
+		client.dropSchema = true
+		return client.create(ctx, request)
+	}
+
 	envelope, parseErr := client.decode(replyBody)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, replyBody, envelope)
@@ -187,6 +199,23 @@ func (client *Client) decode(body []byte) (responseEnvelope, error) {
 	var envelope responseEnvelope
 	err := json.Unmarshal(body, &envelope)
 	return envelope, err
+}
+
+// rejectsSchemaWithTools recognizes a provider refusing a request that
+// carries both tool definitions and a JSON schema, which several
+// OpenAI-compatible endpoints do (Cerebras: "\"tools\" is incompatible
+// with \"response_format\"").
+func rejectsSchemaWithTools(body []byte) bool {
+	text := strings.ToLower(string(body))
+	if !strings.Contains(text, "response_format") {
+		return false
+	}
+	for _, complaint := range []string{"incompatible", "not supported", "cannot be used", "can not be used", "unsupported"} {
+		if strings.Contains(text, complaint) {
+			return true
+		}
+	}
+	return false
 }
 
 // statusError explains a non-2xx reply. A 404 in particular almost always

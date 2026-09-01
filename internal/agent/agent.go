@@ -253,6 +253,22 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 		}
 		progress.Log("  applied the patch")
 
+		// The model names the files it means to touch, and that claim is
+		// worth checking: a patch that quietly leaves out the new files it
+		// promised applies perfectly well and looks like success.
+		if missing := runner.missingFiles(change.FilesToModify); len(missing) > 0 {
+			progress.Log("  but " + strings.Join(missing, ", ") + " was not created, retrying")
+			evidence = fmt.Sprintf(
+				"The patch applied, but it did not create %s, which you said it would modify. "+
+					"A file that does not exist yet has to be created by the patch itself: use "+
+					"\"*** Add File: <path>\" followed by every line of its contents, or a unified "+
+					"diff whose header is \"--- /dev/null\". Include the complete contents of each "+
+					"file, not a description of them.",
+				strings.Join(missing, ", "))
+			session.report(evidence)
+			continue
+		}
+
 		progress.Status("Testing the change...")
 		testResult := RunTests(ctx, runner.repository.Root)
 		if testResult.Passed {
@@ -552,6 +568,19 @@ func (runner *Runner) describeCall(call responseItem) string {
 	}
 }
 
+// missingFiles are the paths a change said it would touch that still
+// aren't there, which is how a patch that silently omitted the new files
+// it promised gives itself away.
+func (runner *Runner) missingFiles(claimed []string) []string {
+	var missing []string
+	for _, path := range claimed {
+		if path = strings.TrimSpace(path); path != "" && !runner.repository.Exists(path) {
+			missing = append(missing, path)
+		}
+	}
+	return missing
+}
+
 // alreadyShown reports whether path's current contents are the ones the
 // model was already given.
 func (runner *Runner) alreadyShown(path string) bool {
@@ -710,6 +739,10 @@ already has them.
 The diff may be a unified diff or the "*** Begin Patch / *** Update File:" format; either is
 read by matching its text against the file, so line numbers and hunk counts are ignored and do
 not need to be correct.
+A file that does not exist yet is created by the same diff: use "*** Add File: <path>" followed
+by every line of its contents, or a unified diff whose header is "--- /dev/null". Every file you
+list as modified must appear in the diff with its full contents; describing a file you mean to
+add, or naming it without including it, leaves it uncreated.
 What must be exact is the text itself. Copy every context and removed line from the file
 character for character, including indentation, escapes and HTML entities such as &amp;. A line
 that differs by even one character cannot be located. Surround each change with a few unchanged

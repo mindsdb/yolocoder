@@ -642,3 +642,73 @@ func TestSalvageChangeAcceptsOtherSpellingsOfTheFileList(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerRetriesWhenPromisedFilesAreNotCreated(t *testing.T) {
+	// Reproduces a real failure: asked for a server, the model listed
+	// server.js, package.json, install.sh and launch.sh as modified but
+	// put only the HTML change in the diff. That patch applies cleanly,
+	// so the run reported success while four promised files did not
+	// exist.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<html>\n<body>old</body>\n</html>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+
+	incomplete, _ := json.Marshal(Change{
+		Summary:       "Add a server",
+		FilesToModify: []string{"index.html", "server.js"},
+		Diff:          "*** Begin Patch\n*** Update File: index.html\n@@\n-<body>old</body>\n+<body>new</body>\n</html>\n*** End Patch",
+	})
+	complete, _ := json.Marshal(Change{
+		Summary:       "Add a server",
+		FilesToModify: []string{"server.js"},
+		Diff:          "*** Begin Patch\n*** Add File: server.js\n@@\n+const http = require('http');\n*** End Patch",
+	})
+
+	changes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			routeAsCodingTask(writer)
+		case "code_change":
+			changes++
+			if changes == 1 {
+				writeOutputText(writer, string(incomplete))
+				return
+			}
+			// The retry must say which file was missing and how to make it.
+			input, _ := json.Marshal(body["input"])
+			for _, want := range []string{"server.js", "Add File"} {
+				if !strings.Contains(string(input), want) {
+					t.Fatalf("evidence missing %q:\n%s", want, input)
+				}
+			}
+			writeOutputText(writer, string(complete))
+		default:
+			t.Fatalf("unexpected schema %q", schemaName(body))
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	progress := &recordingProgress{}
+	if _, err := NewRunner(client, repository).Run(context.Background(), "add a server", progress); err != nil {
+		t.Fatal(err)
+	}
+	if changes != 2 {
+		t.Fatalf("change requests = %d, want 2 (the omission should be caught)", changes)
+	}
+	if _, err := os.Stat(filepath.Join(root, "server.js")); err != nil {
+		t.Fatalf("server.js was never created: %v", err)
+	}
+	trail := strings.Join(progress.logs, "\n")
+	if !strings.Contains(trail, "was not created") {
+		t.Fatalf("the trail should say a promised file was missing:\n%s", trail)
+	}
+}

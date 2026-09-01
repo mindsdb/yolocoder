@@ -74,6 +74,41 @@ func TestDecodeJSONHandlesProseAndFences(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONToleratesAStrayClosingBrace(t *testing.T) {
+	// Verbatim shape from a real reply: the object is correct but closed
+	// one brace too many. Taking the last "}" swallowed the stray one and
+	// failed to parse an otherwise perfect answer, so the whole change was
+	// thrown away.
+	reply := `{
+  "summary": "Celebrate a win",
+  "files_to_modify": ["base_index.html"],
+  "diff": "*** Begin Patch\n-  if(a){b()}\n+  if(a){ c() }\n*** End Patch"}
+}`
+	var change Change
+	if err := decodeJSON(reply, &change); err != nil {
+		t.Fatalf("decodeJSON() = %v", err)
+	}
+	if change.Summary != "Celebrate a win" {
+		t.Fatalf("Summary = %q", change.Summary)
+	}
+	// The braces inside the diff string must not confuse the scan.
+	if !strings.Contains(change.Diff, "if(a){ c() }") {
+		t.Fatalf("Diff = %q", change.Diff)
+	}
+}
+
+func TestDecodeJSONIgnoresTrailingProse(t *testing.T) {
+	var change Change
+	if err := decodeJSON(`{"summary":"s","files_to_modify":[],"diff":"d"}
+
+Let me know if you would like anything else!`, &change); err != nil {
+		t.Fatalf("decodeJSON() = %v", err)
+	}
+	if change.Summary != "s" {
+		t.Fatalf("Summary = %q", change.Summary)
+	}
+}
+
 func TestDecodeJSONRejectsNonJSON(t *testing.T) {
 	var got map[string]any
 	if err := decodeJSON("I can't help with that.", &got); err == nil {

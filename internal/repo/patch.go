@@ -133,9 +133,17 @@ func (repository *Repository) applyByContent(patch string) error {
 		if len(file.hunks) == 0 {
 			continue
 		}
-		current, err := repository.ReadFile(file.path)
-		if err != nil {
-			return err
+		// A patch may touch the same file more than once — models happily
+		// emit several "*** Begin Patch" blocks for one file. Each block
+		// has to build on the last, or the final one silently discards
+		// every change before it.
+		current, carried := updated[file.path]
+		if !carried {
+			read, err := repository.ReadFile(file.path)
+			if err != nil {
+				return err
+			}
+			current = read
 		}
 		content, err := applyHunks(current, file.hunks)
 		if err != nil {

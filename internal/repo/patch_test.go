@@ -248,3 +248,34 @@ func TestApplyRefusesToDeleteFiles(t *testing.T) {
 		t.Fatal("the file must be left alone")
 	}
 }
+
+func TestApplySeveralPatchBlocksForOneFile(t *testing.T) {
+	// Models emit one "*** Begin Patch" block per edit rather than one
+	// patch with several hunks. Each block has to build on the last:
+	// reading the file fresh for every block made the final one silently
+	// discard every change before it.
+	patch := "*** Begin Patch\n" +
+		"*** Update File: index.html\n" +
+		"@@\n" +
+		"-  <title>Tec-Tac-Tris</title>\n" +
+		"+  <title>one</title>\n" +
+		"   <style>\n" +
+		"*** End Patch\n" +
+		"*** Begin Patch\n" +
+		"*** Update File: index.html\n" +
+		"@@\n" +
+		"-      <div><h1>Tec-Tac-Tris</h1><p class=\"tagline\">Drop a piece.</p></div>\n" +
+		"+      <div><h1>two</h1><p class=\"tagline\">Drop a piece.</p></div>\n" +
+		"*** End Patch"
+
+	got := patchedPage(t, patch)
+	if !strings.Contains(got, "<title>one</title>") {
+		t.Fatalf("the first block was discarded:\n%s", got)
+	}
+	if !strings.Contains(got, "<h1>two</h1>") {
+		t.Fatalf("the second block was not applied:\n%s", got)
+	}
+	if strings.Contains(got, "Tec-Tac-Tris") {
+		t.Fatalf("an occurrence was left behind:\n%s", got)
+	}
+}

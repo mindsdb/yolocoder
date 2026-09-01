@@ -125,15 +125,52 @@ func isShapeError(err error) bool {
 	return errors.As(err, &typeErr)
 }
 
+// jsonSpan is the first complete JSON value in text, found by matching
+// brackets rather than by taking the last one. A model that closes its
+// object one brace too many, or writes anything at all after it, would
+// otherwise poison the whole span. Brackets inside strings are skipped,
+// which matters because the diff field is full of them.
 func jsonSpan(text string) string {
 	for _, delimiters := range [][2]byte{{'{', '}'}, {'[', ']'}} {
 		start := strings.IndexByte(text, delimiters[0])
-		end := strings.LastIndexByte(text, delimiters[1])
-		if start != -1 && end > start {
+		if start == -1 {
+			continue
+		}
+		if end := matchingBracket(text, start, delimiters[0], delimiters[1]); end > start {
 			return text[start : end+1]
 		}
 	}
 	return ""
+}
+
+// matchingBracket finds the close that balances the open at start, or -1.
+func matchingBracket(text string, start int, open, close byte) int {
+	depth, inString, escaped := 0, false, false
+	for index := start; index < len(text); index++ {
+		character := text[index]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case character == '\\':
+				escaped = true
+			case character == '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case open:
+			depth++
+		case close:
+			if depth--; depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
 }
 
 // Progress reports what the agent is doing. Status replaces a transient

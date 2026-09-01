@@ -16,13 +16,24 @@ type LLM struct {
 	BaseURL  string
 	APIKey   string
 	Model    string
+	// API is the dialect the endpoint speaks: APIResponses or APIChat.
+	// Most OpenAI-compatible providers implement only chat completions,
+	// so an empty value is resolved by asking the endpoint rather than
+	// assumed.
+	API string
 }
+
+const (
+	APIResponses = "responses"
+	APIChat      = "chat"
+)
 
 type settings struct {
 	Version  int    `json:"version"`
 	Provider string `json:"provider"`
 	BaseURL  string `json:"base_url"`
 	Model    string `json:"model,omitempty"`
+	API      string `json:"api,omitempty"`
 }
 
 type credentials struct {
@@ -68,7 +79,7 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model}, true, nil
+	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API}, true, nil
 }
 
 func Save(provider LLM) error {
@@ -83,7 +94,7 @@ func Save(provider LLM) error {
 	if err != nil {
 		return err
 	}
-	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model}
+	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API}
 	if err := writeJSON(filepath.Join(dir, "config.json"), public, 0o644); err != nil {
 		return fmt.Errorf("save configuration: %w", err)
 	}
@@ -126,7 +137,7 @@ func FromEnvironment(getenv func(string) string) (LLM, error) {
 	if model == "" {
 		return LLM{}, fmt.Errorf("OPENAI_MODEL is required with --llm-from-env-vars")
 	}
-	return LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: model}, nil
+	return LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: model, API: strings.TrimSpace(getenv("OPENAI_API_DIALECT"))}, nil
 }
 
 func ValidateBaseURL(raw string) (string, error) {

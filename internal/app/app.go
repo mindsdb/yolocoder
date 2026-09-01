@@ -32,9 +32,12 @@ Environment provider:
   OPENAI_BASE_URL                 OpenAI-compatible endpoint
   OPENAI_API_KEY                  endpoint API key
   OPENAI_MODEL                    optional model name
+  OPENAI_API_DIALECT              "chat" for /v1/chat/completions,
+                                  otherwise the Responses API
 `
 
 const listModelsTimeout = 10 * time.Second
+const detectAPITimeout = 10 * time.Second
 const defaultMindsHubModel = "mindshub_air"
 
 func terminalInput() bool {
@@ -82,6 +85,11 @@ func RunConfig(args []string) int {
 		fmt.Printf("Provider: %s\nEndpoint: %s\n", provider.Provider, provider.BaseURL)
 		if provider.Model != "" {
 			fmt.Printf("Model: %s\n", provider.Model)
+		}
+		if provider.API == config.APIChat {
+			fmt.Println("API: chat completions")
+		} else {
+			fmt.Println("API: responses")
 		}
 		fmt.Printf("API key: configured\nConfig: %s\nCredentials: %s\n", configPath, credentialsPath)
 		return 0
@@ -253,7 +261,27 @@ func connectOther(output *os.File, reader *terminal.Reader) (config.LLM, error) 
 		return config.LLM{}, fmt.Errorf("model is required")
 	}
 	provider := config.LLM{Provider: "openai-compatible", BaseURL: baseURL, APIKey: apiKey, Model: model}
+	provider.API = detectAPI(output, provider)
 	return saveProvider(output, provider)
+}
+
+// detectAPI works out which dialect an endpoint speaks and says so, since
+// "OpenAI-compatible" covers both the Responses API and the far more
+// common chat completions. Falling back to Responses on a failed probe
+// keeps the previous behavior for an endpoint that is simply unreachable
+// at connect time.
+func detectAPI(output *os.File, provider config.LLM) string {
+	ctx, cancel := context.WithTimeout(context.Background(), detectAPITimeout)
+	defer cancel()
+	dialect, err := agent.DetectAPI(ctx, provider.BaseURL, provider.APIKey)
+	if err != nil {
+		fmt.Fprintf(output, "Could not check which API the endpoint offers (%v); assuming the Responses API.\n", err)
+		return config.APIResponses
+	}
+	if dialect == config.APIChat {
+		fmt.Fprintln(output, "This endpoint offers chat completions rather than the Responses API; using that.")
+	}
+	return dialect
 }
 
 func promptAPIKey(output *os.File, reader *terminal.Reader) (string, error) {

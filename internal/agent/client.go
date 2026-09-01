@@ -18,7 +18,10 @@ type Client struct {
 	endpoint string
 	apiKey   string
 	model    string
-	http     *http.Client
+	// chat selects the /v1/chat/completions dialect, which most
+	// OpenAI-compatible providers implement instead of the Responses API.
+	chat bool
+	http *http.Client
 }
 
 type responseRequest struct {
@@ -82,17 +85,30 @@ func NewClient(provider config.LLM) (*Client, error) {
 	if strings.TrimSpace(provider.Model) == "" {
 		return nil, fmt.Errorf("an LLM model is required; reconnect with `yolocoder config connect` or set OPENAI_MODEL")
 	}
-	return &Client{
+	client := &Client{
 		endpoint: responsesEndpoint(provider.BaseURL),
 		apiKey:   provider.APIKey,
 		model:    provider.Model,
 		http:     http.DefaultClient,
-	}, nil
+	}
+	if provider.API == config.APIChat {
+		client.endpoint = chatEndpoint(provider.BaseURL)
+		client.chat = true
+	}
+	return client, nil
 }
 
 func (client *Client) create(ctx context.Context, request responseRequest) (responseEnvelope, error) {
 	request.Model = client.model
-	payload, err := json.Marshal(request)
+	body := any(request)
+	if client.chat {
+		converted, err := toChat(request)
+		if err != nil {
+			return responseEnvelope{}, err
+		}
+		body = converted
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return responseEnvelope{}, err
 	}
@@ -112,24 +128,38 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return responseEnvelope{}, fmt.Errorf("call LLM: %w", err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	replyBody, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 	if err != nil {
 		return responseEnvelope{}, err
 	}
-	debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(body))
+	debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(replyBody))
 
 	// Check the status before parsing. Decoding first turned a 404 with
 	// an empty body into "decode LLM response: unexpected end of JSON
 	// input", which says nothing about the endpoint being wrong.
-	var envelope responseEnvelope
-	parseErr := json.Unmarshal(body, &envelope)
+	envelope, parseErr := client.decode(replyBody)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, body, envelope)
+		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, replyBody, envelope)
 	}
 	if parseErr != nil {
-		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w: %s", parseErr, snippet(string(body)))
+		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w: %s", parseErr, snippet(string(replyBody)))
 	}
 	return envelope, nil
+}
+
+// decode reads a reply in whichever dialect this client speaks, returning
+// it in the Responses shape the rest of the agent works with.
+func (client *Client) decode(body []byte) (responseEnvelope, error) {
+	if client.chat {
+		chat, err := decodeChat(body)
+		if err != nil {
+			return responseEnvelope{}, err
+		}
+		return fromChat(chat), nil
+	}
+	var envelope responseEnvelope
+	err := json.Unmarshal(body, &envelope)
+	return envelope, err
 }
 
 // statusError explains a non-2xx reply. A 404 in particular almost always

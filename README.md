@@ -68,7 +68,13 @@ go test ./...
 On first launch, YoloCoder asks you to connect either:
 
 - MindsHub using browser sign-in
-- Any other OpenAI-compatible endpoint using a base URL and API key
+- Custom: any OpenAI-compatible endpoint using a base URL and API key
+
+"OpenAI-compatible" covers two different APIs. YoloCoder speaks both: the
+Responses API, and the `/v1/chat/completions` that most providers (Cerebras,
+Groq, Together, Ollama, vLLM and others) offer instead. Connecting a custom
+endpoint checks which one it has and saves that alongside it, so there is
+nothing to configure by hand.
 
 The endpoint configuration is saved to `~/.config/yolocoder/config.json`.
 The API key is stored separately in `~/.config/yolocoder/credentials.json`

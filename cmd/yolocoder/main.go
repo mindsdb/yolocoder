@@ -142,6 +142,17 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		toggleDebug()
 		fmt.Println()
 		return true, false
+	case "/setup":
+		if fromEnvironment {
+			fmt.Println("[*_*] /setup can't change an OPENAI_* environment provider; restart without --llm-from-env-vars to use a saved one.")
+			fmt.Println()
+			return true, false
+		}
+		if code := app.RunConfig([]string{"connect"}); code == 0 {
+			reloadProvider(provider)
+		}
+		fmt.Println()
+		return true, false
 	case "/model":
 		if fromEnvironment {
 			fmt.Println("[*_*] /model can't change an OPENAI_* environment provider; set OPENAI_MODEL instead.")
@@ -149,10 +160,7 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 			return true, false
 		}
 		if code := app.RunModel(nil); code == 0 {
-			// The saved model changed, so reload it for the next task.
-			if updated, err := app.Provider(false); err == nil {
-				*provider = updated
-			}
+			reloadProvider(provider)
 		}
 		fmt.Println()
 		return true, false
@@ -164,6 +172,14 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		return true, false
 	}
 	return false, false
+}
+
+// reloadProvider picks up a provider the user just changed, so the next
+// task runs against it rather than the one the session started with.
+func reloadProvider(provider *config.LLM) {
+	if updated, err := app.Provider(false); err == nil {
+		*provider = updated
+	}
 }
 
 // activeSession is the session currently reporting progress, so trace

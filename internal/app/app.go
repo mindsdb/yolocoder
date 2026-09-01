@@ -185,7 +185,7 @@ func connect(input *os.File, output *os.File) (config.LLM, error) {
 	fmt.Fprintln(output)
 	choice, err := reader.Select(output, []terminal.Choice{
 		{Label: "MindsHub (recommended)", Detail: "sign in with your browser"},
-		{Label: "Other", Detail: "any OpenAI-compatible endpoint"},
+		{Label: "Custom", Detail: "any OpenAI-compatible endpoint"},
 	}, 0)
 	if err != nil {
 		return config.LLM{}, err

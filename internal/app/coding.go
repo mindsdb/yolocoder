@@ -20,6 +20,7 @@ func Provider(fromEnvironment bool) (config.LLM, error) {
 
 // SessionCommands are the slash commands the interactive prompt offers.
 var SessionCommands = []terminal.Command{
+	{Name: "/setup", Description: "connect an LLM provider"},
 	{Name: "/model", Description: "choose the model to use"},
 	{Name: "/debug", Description: "show the raw model exchange"},
 	{Name: "/help", Description: "show these commands"},

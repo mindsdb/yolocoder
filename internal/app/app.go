@@ -18,6 +18,12 @@ const Help = `YoloCoder
 Usage:
   yolocoder <task>                make and test a coding change, then exit
   yolocoder                       start an interactive session
+  yolocoder --context <text> <task>
+                                  add background for the run; repeatable,
+                                  and "-" reads it from stdin. A one-shot
+                                  run is told nothing else about this
+                                  folder, so this is how a script supplies
+                                  what an interactive session would recall.
   yolocoder --llm-from-env-vars <task>
                                   use OPENAI_* environment variables
   yolocoder config show           show the saved provider

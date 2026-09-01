@@ -84,6 +84,10 @@ type Recollection struct {
 	Message string
 	Summary string
 	Files   []string
+	// Note marks background handed in with --context rather than a turn
+	// that actually happened here, so it can be stated as a fact instead
+	// of being retold as something the user once asked for.
+	Note bool
 }
 
 type routeDecision struct {
@@ -404,16 +408,24 @@ func (runner *Runner) route(ctx context.Context, task string, history []Recollec
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	notes, turns := split(history)
 	instructions, schema := routingInstructions, routeSchema()
 	input := any(task)
 	if len(history) > 0 {
 		// Asking for relevance selection costs schema and instructions,
 		// so it is only asked for when there is something to select from.
 		instructions, schema = recallingInstructions, recallSchema()
-		input = []any{
-			inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + renderHistory(history)},
-			inputMessage{Role: "user", Content: "MESSAGE:\n" + task},
+		var messages []any
+		// Notes are fixed for the whole invocation where history grows
+		// each turn, so they sit ahead of it: the more stable a block is,
+		// the earlier it belongs.
+		if len(notes) > 0 {
+			messages = append(messages, inputMessage{Role: "user", Content: "PROJECT CONTEXT:\n" + renderNotes(notes)})
 		}
+		if len(turns) > 0 {
+			messages = append(messages, inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + renderHistory(turns)})
+		}
+		input = append(messages, inputMessage{Role: "user", Content: "MESSAGE:\n" + task})
 	}
 	response, err := runner.client.create(callCtx, responseRequest{
 		Instructions: instructions,
@@ -667,8 +679,34 @@ func renderHistory(history []Recollection) string {
 	return text.String()
 }
 
+// renderNotes lays out background the caller supplied. It is unnumbered
+// because, unlike recorded history, it is not a list to choose from.
+func renderNotes(notes []Recollection) string {
+	var text strings.Builder
+	for _, note := range notes {
+		fmt.Fprintf(&text, "- %s\n", strings.TrimSpace(note.Message))
+	}
+	return text.String()
+}
+
+// split separates supplied background from turns that actually happened,
+// which are handled differently at every step: notes always carry, turns
+// are selected from.
+func split(history []Recollection) (notes, turns []Recollection) {
+	for _, entry := range history {
+		if entry.Note {
+			notes = append(notes, entry)
+			continue
+		}
+		turns = append(turns, entry)
+	}
+	return notes, turns
+}
+
 // recall picks out the turns the router chose, keeping the recorded text
-// rather than any retelling of it.
+// rather than any retelling of it. Supplied notes are kept whatever the
+// router decided: the caller passed them in on purpose, so dropping them
+// is not a judgement the router gets to make.
 func recall(history []Recollection, chosen []int) []Recollection {
 	wanted := make(map[int]bool, len(chosen))
 	for _, number := range chosen {
@@ -676,7 +714,7 @@ func recall(history []Recollection, chosen []int) []Recollection {
 	}
 	var kept []Recollection
 	for _, turn := range history {
-		if wanted[turn.Number] {
+		if turn.Note || wanted[turn.Number] {
 			kept = append(kept, turn)
 		}
 	}
@@ -689,13 +727,20 @@ func background(brief string, turns []Recollection) string {
 	if strings.TrimSpace(brief) == "" && len(turns) == 0 {
 		return ""
 	}
+	notes, recorded := split(turns)
 	var text strings.Builder
+	if len(notes) > 0 {
+		text.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
+	}
+	if strings.TrimSpace(brief) == "" && len(recorded) == 0 {
+		return text.String()
+	}
 	text.WriteString("EARLIER IN THIS FOLDER:\n")
 	if brief = strings.TrimSpace(brief); brief != "" {
 		text.WriteString(brief + "\n")
 	}
-	if len(turns) > 0 {
-		text.WriteString(renderHistory(turns))
+	if len(recorded) > 0 {
+		text.WriteString(renderHistory(recorded))
 	}
 	return text.String() + "\n"
 }
@@ -918,6 +963,8 @@ or otherwise wants the project inspected or changed.
 When coding_task is false, answer the user yourself in reply, using the earlier turns when the
 question is about them ("what did I ask before?" is answered from the list, not guessed at).
 When coding_task is true, leave reply empty.
+A PROJECT CONTEXT block, if present, was handed to you directly rather than asked in an earlier
+turn. Treat it as fact about the project, and do not list it in relevant: it is carried anyway.
 In relevant, list the numbers of the earlier turns that genuinely bear on the new message.
 Prefer constraints the user stated, corrections they made, and the goal they are working toward;
 a correction is worth more than a success, because it is the user refining what they meant.

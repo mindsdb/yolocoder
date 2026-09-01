@@ -74,6 +74,12 @@ func main() {
 		os.Exit(app.RunModel(args[1:]))
 	}
 
+	notes, args, err := app.ParseContext(args, os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	fromEnvironment := false
 	if len(args) > 0 && args[0] == "--llm-from-env-vars" {
 		fromEnvironment = true
@@ -100,7 +106,7 @@ func main() {
 	// an interactive session so follow-up tasks keep the same context on
 	// screen instead of ending after a single change.
 	if task := strings.TrimSpace(strings.Join(args, " ")); task != "" {
-		if err := runTask(task, provider, history, false); err != nil {
+		if err := runTask(task, provider, history, app.Notes(notes)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -129,7 +135,7 @@ func main() {
 			}
 			continue
 		}
-		if err := runTask(task, provider, history, true); err != nil {
+		if err := runTask(task, provider, history, earlier(notes)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		fmt.Println()
@@ -252,11 +258,11 @@ func indent(text string) string {
 
 // runTask runs one task, reporting progress as it goes and printing the
 // model's reply at the end.
-func runTask(task string, provider config.LLM, history *session.Log, recall bool) error {
+func runTask(task string, provider config.LLM, history *session.Log, recalled []agent.Recollection) error {
 	reporter := ui.NewSession(os.Stdout)
 	reporter.Start("Thinking...")
 	activeSession = reporter
-	outcome, err := app.RunTask(context.Background(), task, provider, earlier(recall), reporter)
+	outcome, err := app.RunTask(context.Background(), task, provider, recalled, reporter)
 	activeSession = nil
 	reporter.Stop()
 	if err != nil {
@@ -271,22 +277,22 @@ func runTask(task string, provider config.LLM, history *session.Log, recall bool
 	return nil
 }
 
-// earlier is the history a run should be told about. A one-shot
-// invocation gets none: a scripted call should do the same thing every
-// time rather than depend on whatever happened in this folder earlier.
-func earlier(recall bool) []agent.Recollection {
-	if !recall {
-		return nil
-	}
+// earlier is the history an interactive turn should be told about: the
+// notes given on the command line, then what has been recorded in this
+// folder. A one-shot invocation never comes through here, and so gets
+// only its notes: a scripted call should do the same thing every time
+// rather than depend on whatever happened in this folder earlier.
+func earlier(notes []string) []agent.Recollection {
+	recalled := app.Notes(notes)
 	folder, err := os.Getwd()
 	if err != nil {
-		return nil
+		return recalled
 	}
 	turns, err := session.Recent(folder)
 	if err != nil {
-		return nil
+		return recalled
 	}
-	return app.Recollections(turns)
+	return append(recalled, app.Recollections(turns)...)
 }
 
 // record keeps a note of the turn for a later run to draw on. It is only

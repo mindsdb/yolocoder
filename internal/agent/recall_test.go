@@ -12,6 +12,20 @@ import (
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
+// content reads one input message's text back out of a decoded request.
+func content(t *testing.T, part any) string {
+	t.Helper()
+	message, ok := part.(map[string]any)
+	if !ok {
+		t.Fatalf("input part = %#v, want a message object", part)
+	}
+	text, ok := message["content"].(string)
+	if !ok {
+		t.Fatalf("message = %#v, want string content", message)
+	}
+	return text
+}
+
 var pastTurns = []Recollection{
 	{Number: 1, Message: "make it multilingual", Summary: "Added i18n", Files: []string{"translations.js"}},
 	{Number: 2, Message: "hi", Summary: "Hello!"},
@@ -182,5 +196,79 @@ func TestNumberListTolerance(t *testing.T) {
 	}
 	if len(single.Relevant) != 1 || single.Relevant[0] != 3 {
 		t.Fatalf("relevant = %v", single.Relevant)
+	}
+}
+
+func TestNotesGoAheadOfHistoryInTheRequest(t *testing.T) {
+	var inputs []any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		inputs = append(inputs, body["input"])
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"ok\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
+	}))
+	defer server.Close()
+	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
+
+	supplied := append([]Recollection{{Message: "this is a Django project", Note: true}}, pastTurns...)
+	if _, err := runner.route(context.Background(), "and now?", supplied); err != nil {
+		t.Fatal(err)
+	}
+	parts, ok := inputs[0].([]any)
+	if !ok || len(parts) != 3 {
+		t.Fatalf("input = %#v, want notes, history, then message", inputs[0])
+	}
+	// Notes are fixed for the whole invocation and history grows every
+	// turn, so the notes must come first for the prefix cache to hold.
+	first := content(t, parts[0])
+	if !strings.HasPrefix(first, "PROJECT CONTEXT:") || !strings.Contains(first, "Django") {
+		t.Fatalf("first block = %q, want the supplied context", first)
+	}
+	if second := content(t, parts[1]); !strings.HasPrefix(second, "EARLIER IN THIS FOLDER:") {
+		t.Fatalf("second block = %q, want the history", second)
+	}
+	// Unnumbered, so a note can never be confused with a recorded turn.
+	if strings.Contains(first, "1.") {
+		t.Fatalf("notes should not be numbered: %q", first)
+	}
+}
+
+func TestSuppliedNotesSurviveARouterThatSelectsNothing(t *testing.T) {
+	// The caller passed these in deliberately; dropping them is not a
+	// judgement the router gets to make.
+	supplied := append([]Recollection{{Message: "the app is called Foo", Note: true}}, pastTurns...)
+	kept := recall(supplied, nil)
+	if len(kept) != 1 || !kept[0].Note {
+		t.Fatalf("recall kept %+v, want just the note", kept)
+	}
+	kept = recall(supplied, []int{3})
+	if len(kept) != 2 || !kept[0].Note || kept[1].Number != 3 {
+		t.Fatalf("recall kept %+v, want the note and turn 3", kept)
+	}
+}
+
+func TestBackgroundSeparatesSuppliedNotesFromRecalledTurns(t *testing.T) {
+	text := background("", []Recollection{{Message: "uses Postgres", Note: true}})
+	if !strings.Contains(text, "PROJECT CONTEXT:") || strings.Contains(text, "EARLIER IN THIS FOLDER:") {
+		t.Fatalf("background = %q, want only the context block", text)
+	}
+	text = background("carries on from turn 1", []Recollection{
+		{Message: "uses Postgres", Note: true},
+		{Number: 1, Message: "add a login page", Summary: "Added it"},
+	})
+	notes := strings.Index(text, "PROJECT CONTEXT:")
+	history := strings.Index(text, "EARLIER IN THIS FOLDER:")
+	if notes < 0 || history < 0 || notes > history {
+		t.Fatalf("background = %q, want the context block first", text)
+	}
+	if !strings.Contains(text, "1. asked: add a login page") {
+		t.Fatalf("background = %q, want the numbered turn", text)
+	}
+}
+
+func TestBackgroundIsEmptyWithNothingToSay(t *testing.T) {
+	if text := background("", nil); text != "" {
+		t.Fatalf("background = %q, want empty", text)
 	}
 }

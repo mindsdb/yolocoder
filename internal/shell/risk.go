@@ -75,7 +75,7 @@ func inspectCommand(tokens []string, folder string) Review {
 	}
 	// Only the bare name, so a path to a lookalike binary is not taken
 	// for the real thing.
-	if strings.ContainsAny(head, "/") {
+	if strings.ContainsAny(head, `/\`) {
 		return Review{Reason: "it runs a program by path (" + head + ")"}
 	}
 	arguments := tokens[1:]
@@ -201,12 +201,29 @@ func inside(folder, token string) bool {
 		return false
 	}
 	path := token
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(folder, path)
+	if !absolute(path) {
+		path = folder + "/" + path
 	}
-	path = filepath.Clean(path)
-	folder = filepath.Clean(folder)
-	return path == folder || strings.HasPrefix(path, folder+string(filepath.Separator))
+	// Compared in one spelling. Cleaning happens in the platform's own
+	// form so that ".." is resolved, and the result is put back into
+	// slashes so a folder written one way and a path written the other
+	// still compare as what they are.
+	path = tidy(path)
+	root := tidy(folder)
+	return path == root || strings.HasPrefix(path, root+"/")
+}
+
+// absolute is stricter than filepath.IsAbs, which on Windows calls a
+// leading slash relative. For deciding whether a path leaves the folder a
+// leading separator has to count as a root everywhere: the alternative is
+// joining "/etc/passwd" onto the folder and concluding it was inside all
+// along, which is exactly the mistake that matters.
+func absolute(path string) bool {
+	return filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`)
+}
+
+func tidy(path string) string {
+	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 }
 
 // split breaks a script into the separate commands it runs.

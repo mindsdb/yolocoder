@@ -161,3 +161,25 @@ func TestNothingIsConfined(t *testing.T) {
 		t.Fatal("an empty script is not something to run")
 	}
 }
+
+func TestAPathEscapeIsCaughtOnEveryPlatform(t *testing.T) {
+	// filepath.IsAbs calls a leading slash relative on Windows, so a
+	// naive check joins "/etc/passwd" onto the folder and concludes it
+	// was inside all along. These must read the same everywhere.
+	for _, path := range []string{"/etc/passwd", `\Windows\System32`, "/", `\`} {
+		if inside(here, path) {
+			t.Errorf("%q must count as outside %s on any platform", path, here)
+		}
+	}
+	if !inside(here, "src/main.go") || !inside(here, `src\main.go`) {
+		t.Error("a relative path is inside however it is spelled")
+	}
+}
+
+func TestAProgramNamedByPathIsNotTakenForTheRealThing(t *testing.T) {
+	for _, script := range []string{"./ls", "/bin/ls", "bin/ls"} {
+		if Inspect(script, here).Confined {
+			t.Errorf("%q runs a program by path and must be confirmed", script)
+		}
+	}
+}

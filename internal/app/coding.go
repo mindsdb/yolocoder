@@ -9,6 +9,7 @@ import (
 	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/repo"
+	"github.com/mindsdb/yolocoder/internal/session"
 	"github.com/mindsdb/yolocoder/internal/terminal"
 )
 
@@ -50,7 +51,7 @@ func PrintCommands() {
 // RunTask reports what the run amounted to: the reply to show, whether
 // it was a coding task, and what it touched, which is what the caller
 // needs to record the turn.
-func RunTask(ctx context.Context, task string, provider config.LLM, progress agent.Progress) (agent.Outcome, error) {
+func RunTask(ctx context.Context, task string, provider config.LLM, history []agent.Recollection, progress agent.Progress) (agent.Outcome, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
 		return agent.Outcome{}, err
@@ -59,7 +60,7 @@ func RunTask(ctx context.Context, task string, provider config.LLM, progress age
 	if err != nil {
 		return agent.Outcome{}, err
 	}
-	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, progress)
+	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, history, progress)
 	rememberDialect(provider, client)
 	return outcome, runErr
 }
@@ -96,6 +97,21 @@ func resolveProvider(fromEnvironment bool) (config.LLM, error) {
 		return config.LLM{}, fmt.Errorf("no LLM inference provider configured")
 	}
 	return provider, nil
+}
+
+// Recollections maps recorded turns into what the agent takes, keeping
+// the agent free of any notion of where history is stored.
+func Recollections(turns []session.Turn) []agent.Recollection {
+	recalled := make([]agent.Recollection, 0, len(turns))
+	for _, turn := range turns {
+		recalled = append(recalled, agent.Recollection{
+			Number:  turn.Number,
+			Message: turn.Message,
+			Summary: turn.Summary,
+			Files:   turn.Files,
+		})
+	}
+	return recalled
 }
 
 // Folder is the current working directory, shortened with ~ for display.

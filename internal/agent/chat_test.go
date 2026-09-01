@@ -203,7 +203,7 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}

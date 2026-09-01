@@ -266,7 +266,7 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	if _, err := NewRunner(client, repository).Run(context.Background(), "retitle it", &recordingProgress{}); err != nil {
+	if _, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	if changes != 2 {
@@ -403,7 +403,7 @@ func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	_, err := NewRunner(client, repository).Run(context.Background(), "retitle it", &recordingProgress{})
+	_, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{})
 	if err == nil || !strings.Contains(err.Error(), "refusing to empty") {
 		t.Fatalf("err = %v, want a refusal to empty the file", err)
 	}
@@ -473,7 +473,7 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", &recordingProgress{})
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", nil, &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +698,7 @@ func TestRunnerRetriesWhenPromisedFilesAreNotCreated(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
 	progress := &recordingProgress{}
-	if _, err := NewRunner(client, repository).Run(context.Background(), "add a server", progress); err != nil {
+	if _, err := NewRunner(client, repository).Run(context.Background(), "add a server", nil, progress); err != nil {
 		t.Fatal(err)
 	}
 	if changes != 2 {

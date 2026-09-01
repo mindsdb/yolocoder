@@ -76,9 +76,55 @@ type Outcome struct {
 	Applied bool
 }
 
+// Recollection is one earlier turn in this folder, as the agent sees it.
+// The agent deliberately takes this rather than reading the store itself,
+// so it stays free of any notion of where history lives.
+type Recollection struct {
+	Number  int
+	Message string
+	Summary string
+	Files   []string
+}
+
 type routeDecision struct {
 	CodingTask bool   `json:"coding_task"`
 	Reply      string `json:"reply"`
+	// Relevant are the turn numbers worth carrying into the work, and
+	// Context ties them to the new message. Numbers are asked for as well
+	// as prose because they can be checked: the summaries fed onward are
+	// the ones actually recorded, so a brief that drifts cannot invent
+	// history that never happened.
+	Relevant numberList `json:"relevant"`
+	Context  string     `json:"context"`
+}
+
+// numberList tolerates the shapes a model reaches for when asked for a
+// list of numbers: [3, 7], ["3", "7"], or a bare 3.
+type numberList []int
+
+func (list *numberList) UnmarshalJSON(data []byte) error {
+	var numbers []int
+	if err := json.Unmarshal(data, &numbers); err == nil {
+		*list = numbers
+		return nil
+	}
+	var single int
+	if err := json.Unmarshal(data, &single); err == nil {
+		*list = numberList{single}
+		return nil
+	}
+	var text stringList
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	values := make(numberList, 0, len(text))
+	for _, entry := range text {
+		if number, err := strconv.Atoi(strings.TrimSpace(entry)); err == nil {
+			values = append(values, number)
+		}
+	}
+	*list = values
+	return nil
 }
 
 // Rewrite carries one file's complete new contents, for when no diff will
@@ -207,14 +253,19 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 // Run routes the message first: a plain conversational message gets the
 // model's direct reply with the repository never touched, and only an
 // actual coding task goes through the map/plan/patch/test loop.
-func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (Outcome, error) {
+func (runner *Runner) Run(ctx context.Context, task string, history []Recollection, progress Progress) (Outcome, error) {
 	progress.Status("Reading your message...")
-	decision, err := runner.route(ctx, task)
+	decision, err := runner.route(ctx, task, history)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if !decision.CodingTask {
 		return Outcome{Reply: decision.Reply}, nil
+	}
+
+	carried := recall(history, decision.Relevant)
+	if len(carried) > 0 {
+		progress.Log(fmt.Sprintf("  recalled %d earlier %s", len(carried), plural(len(carried), "turn", "turns")))
 	}
 
 	progress.Status("Mapping the folder...")
@@ -226,7 +277,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
 
 	progress.Status("Working out the change...")
-	session := runner.newChangeSession(task, repoMap)
+	session := runner.newChangeSession(task, repoMap, background(decision.Context, carried))
 
 	var evidence string
 	var change Change
@@ -341,13 +392,33 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	return Outcome{}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
 }
 
-func (runner *Runner) route(ctx context.Context, task string) (routeDecision, error) {
+// route decides whether the message is a question or a change, and when
+// there is history to draw on, which of it matters.
+//
+// The request is ordered constant-first: the instructions, then the
+// history, then the new message. History only ever grows at its end, so
+// each turn's prompt is the previous turn's prompt plus a little more,
+// which is the only arrangement a provider's prefix cache can reuse.
+// Putting the new message first would defeat it entirely.
+func (runner *Runner) route(ctx context.Context, task string, history []Recollection) (routeDecision, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+
+	instructions, schema := routingInstructions, routeSchema()
+	input := any(task)
+	if len(history) > 0 {
+		// Asking for relevance selection costs schema and instructions,
+		// so it is only asked for when there is something to select from.
+		instructions, schema = recallingInstructions, recallSchema()
+		input = []any{
+			inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + renderHistory(history)},
+			inputMessage{Role: "user", Content: "MESSAGE:\n" + task},
+		}
+	}
 	response, err := runner.client.create(callCtx, responseRequest{
-		Instructions: routingInstructions,
-		Input:        task,
-		Text:         strictSchema("message_route", routeSchema()),
+		Instructions: instructions,
+		Input:        input,
+		Text:         strictSchema("message_route", schema),
 	})
 	if err != nil {
 		return routeDecision{}, err
@@ -378,8 +449,8 @@ type changeSession struct {
 	readPaths  []string
 }
 
-func (runner *Runner) newChangeSession(task, repoMap string) *changeSession {
-	opening := fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
+func (runner *Runner) newChangeSession(task, repoMap, earlier string) *changeSession {
+	opening := earlier + fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
 	return &changeSession{
 		runner:     runner,
 		transcript: []any{inputMessage{Role: "user", Content: opening}},
@@ -578,6 +649,64 @@ func (runner *Runner) describeCall(call responseItem) string {
 	}
 }
 
+// renderHistory lays out earlier turns for the router, numbered by their
+// own absolute turn numbers so the selection that comes back can be
+// matched to real records.
+func renderHistory(history []Recollection) string {
+	var text strings.Builder
+	for _, turn := range history {
+		fmt.Fprintf(&text, "%d. asked: %s", turn.Number, strings.TrimSpace(turn.Message))
+		if turn.Summary != "" {
+			fmt.Fprintf(&text, "\n   result: %s", turn.Summary)
+		}
+		if len(turn.Files) > 0 {
+			fmt.Fprintf(&text, " (%s)", strings.Join(turn.Files, ", "))
+		}
+		text.WriteString("\n")
+	}
+	return text.String()
+}
+
+// recall picks out the turns the router chose, keeping the recorded text
+// rather than any retelling of it.
+func recall(history []Recollection, chosen []int) []Recollection {
+	wanted := make(map[int]bool, len(chosen))
+	for _, number := range chosen {
+		wanted[number] = true
+	}
+	var kept []Recollection
+	for _, turn := range history {
+		if wanted[turn.Number] {
+			kept = append(kept, turn)
+		}
+	}
+	return kept
+}
+
+// background is what the work should know about what came before: the
+// router's brief, then the turns it pointed at, verbatim from the record.
+func background(brief string, turns []Recollection) string {
+	if strings.TrimSpace(brief) == "" && len(turns) == 0 {
+		return ""
+	}
+	var text strings.Builder
+	text.WriteString("EARLIER IN THIS FOLDER:\n")
+	if brief = strings.TrimSpace(brief); brief != "" {
+		text.WriteString(brief + "\n")
+	}
+	if len(turns) > 0 {
+		text.WriteString(renderHistory(turns))
+	}
+	return text.String() + "\n"
+}
+
+func plural(count int, one, many string) string {
+	if count == 1 {
+		return one
+	}
+	return many
+}
+
 // missingFiles are the paths a change said it would touch that still
 // aren't there, which is how a patch that silently omitted the new files
 // it promised gives itself away.
@@ -726,6 +855,17 @@ func rewriteSchema() map[string]any {
 	}, []string{"summary", "content"})
 }
 
+// recallSchema is the routing schema plus relevance selection, used only
+// when there is history to select from.
+func recallSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"coding_task": map[string]any{"type": "boolean"},
+		"reply":       map[string]any{"type": "string"},
+		"relevant":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+		"context":     map[string]any{"type": "string"},
+	}, []string{"coding_task", "reply", "relevant", "context"})
+}
+
 func routeSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"coding_task": map[string]any{"type": "boolean"},
@@ -767,6 +907,24 @@ from the supplied current contents with only the required edit made.
 Never abbreviate, summarize, or elide any part of the file with comments
 like "unchanged" or "...": what you return replaces the file exactly, so
 anything you leave out is deleted.
+Respond with only the JSON object, no other text before or after it.`
+
+const recallingInstructions = `You are the first step of a small coding agent, and you are shown
+what has already been asked in this folder before the new message.
+Decide whether the new message is a coding task that requires reading or changing files, or just
+a conversational message.
+Set coding_task to true only when the user wants code written, fixed, explained from the files,
+or otherwise wants the project inspected or changed.
+When coding_task is false, answer the user yourself in reply, using the earlier turns when the
+question is about them ("what did I ask before?" is answered from the list, not guessed at).
+When coding_task is true, leave reply empty.
+In relevant, list the numbers of the earlier turns that genuinely bear on the new message.
+Prefer constraints the user stated, corrections they made, and the goal they are working toward;
+a correction is worth more than a success, because it is the user refining what they meant.
+Leave out turns that merely went well and have no bearing now. An empty list is the right answer
+when nothing earlier matters.
+In context, write one or two sentences tying those turns to the new message, for whoever does
+the work. Say only what the list supports; do not invent history.
 Respond with only the JSON object, no other text before or after it.`
 
 const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.

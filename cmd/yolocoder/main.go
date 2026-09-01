@@ -100,7 +100,7 @@ func main() {
 	// an interactive session so follow-up tasks keep the same context on
 	// screen instead of ending after a single change.
 	if task := strings.TrimSpace(strings.Join(args, " ")); task != "" {
-		if err := runTask(task, provider, history); err != nil {
+		if err := runTask(task, provider, history, false); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -129,7 +129,7 @@ func main() {
 			}
 			continue
 		}
-		if err := runTask(task, provider, history); err != nil {
+		if err := runTask(task, provider, history, true); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		fmt.Println()
@@ -252,11 +252,11 @@ func indent(text string) string {
 
 // runTask runs one task, reporting progress as it goes and printing the
 // model's reply at the end.
-func runTask(task string, provider config.LLM, history *session.Log) error {
+func runTask(task string, provider config.LLM, history *session.Log, recall bool) error {
 	reporter := ui.NewSession(os.Stdout)
 	reporter.Start("Thinking...")
 	activeSession = reporter
-	outcome, err := app.RunTask(context.Background(), task, provider, reporter)
+	outcome, err := app.RunTask(context.Background(), task, provider, earlier(recall), reporter)
 	activeSession = nil
 	reporter.Stop()
 	if err != nil {
@@ -269,6 +269,24 @@ func runTask(task string, provider config.LLM, history *session.Log) error {
 	}
 	fmt.Printf("[*_*] %s\n", reply)
 	return nil
+}
+
+// earlier is the history a run should be told about. A one-shot
+// invocation gets none: a scripted call should do the same thing every
+// time rather than depend on whatever happened in this folder earlier.
+func earlier(recall bool) []agent.Recollection {
+	if !recall {
+		return nil
+	}
+	folder, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	turns, err := session.Recent(folder)
+	if err != nil {
+		return nil
+	}
+	return app.Recollections(turns)
 }
 
 // record keeps a note of the turn for a later run to draw on. It is only

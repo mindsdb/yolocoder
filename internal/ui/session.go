@@ -80,6 +80,19 @@ func (session *Session) Stop() {
 	session.status = ""
 }
 
+// Suspend clears the activity line and stops animating it, returning the
+// function that starts it again on the status it had. It is for handing
+// the terminal to something that draws for itself — a command running on
+// its own pseudo-terminal — which would otherwise be redrawing over us
+// and us over it.
+func (session *Session) Suspend() (resume func()) {
+	session.mutex.Lock()
+	status := session.status
+	session.mutex.Unlock()
+	session.Stop()
+	return func() { session.Start(status) }
+}
+
 func (session *Session) animate() {
 	defer close(session.finished)
 	ticker := time.NewTicker(140 * time.Millisecond)

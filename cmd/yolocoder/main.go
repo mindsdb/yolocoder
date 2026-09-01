@@ -74,11 +74,12 @@ func main() {
 		os.Exit(app.RunModel(args[1:]))
 	}
 
-	notes, args, err := app.ParseContext(args, os.Stdin)
+	flags, args, err := app.ParseFlags(args, os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	commander := app.NewCommander(os.Stdout, flags.AllowCommands)
 
 	fromEnvironment := false
 	if len(args) > 0 && args[0] == "--llm-from-env-vars" {
@@ -106,7 +107,7 @@ func main() {
 	// an interactive session so follow-up tasks keep the same context on
 	// screen instead of ending after a single change.
 	if task := strings.TrimSpace(strings.Join(args, " ")); task != "" {
-		if err := runTask(task, provider, history, app.Notes(notes)); err != nil {
+		if err := runTask(task, provider, history, app.Notes(flags.Notes), commander); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -141,7 +142,7 @@ func main() {
 			}
 			continue
 		}
-		if err := runTask(task, provider, history, earlier(notes)); err != nil {
+		if err := runTask(task, provider, history, earlier(flags.Notes), commander); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		fmt.Println()
@@ -264,17 +265,25 @@ func indent(text string) string {
 
 // runTask runs one task, reporting progress as it goes and printing the
 // model's reply at the end.
-func runTask(task string, provider config.LLM, history *session.Log, recalled []agent.Recollection) error {
+func runTask(task string, provider config.LLM, history *session.Log, recalled []agent.Recollection, commander *app.Commander) error {
 	reporter := ui.NewSession(os.Stdout)
 	reporter.Start("Thinking...")
 	activeSession = reporter
-	outcome, err := app.RunTask(context.Background(), task, provider, recalled, reporter)
+	// A command takes the terminal over while it runs, so the spinner has
+	// to stand down for the duration rather than draw through its output.
+	commander.Suspend = reporter.Suspend
+	outcome, err := app.RunTask(context.Background(), task, provider, recalled, commander, reporter)
 	activeSession = nil
 	reporter.Stop()
+	// Recorded even when the run returned an error: a command that exited
+	// non-zero is exactly the sort of thing the next turn needs to know
+	// about. A run that got nowhere has no Kind and nothing to record.
+	if outcome.Kind != "" {
+		record(history, task, outcome)
+	}
 	if err != nil {
 		return err
 	}
-	record(history, task, outcome)
 	reply := outcome.Reply
 	if reply == "" {
 		reply = "Done."
@@ -314,14 +323,16 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 	if history == nil {
 		return
 	}
-	kind := "chat"
-	if outcome.Coding {
-		kind = "code"
+	summary := outcome.Reply
+	if outcome.Kind == agent.KindCommand && outcome.Command != "" {
+		// The script matters more than the sentence describing it: "run
+		// that install again" needs the command, not a retelling of it.
+		summary = strings.TrimSpace(summary + "\n" + outcome.Command)
 	}
 	_ = history.Append(session.Turn{
 		Message: task,
-		Kind:    kind,
-		Summary: outcome.Reply,
+		Kind:    outcome.Kind,
+		Summary: summary,
 		Files:   outcome.Files,
 		Applied: outcome.Applied,
 	})

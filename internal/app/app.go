@@ -24,6 +24,11 @@ Usage:
                                   run is told nothing else about this
                                   folder, so this is how a script supplies
                                   what an interactive session would recall.
+  yolocoder --allow-commands <task>
+                                  run a generated command without asking
+                                  first. Without it, a command is shown
+                                  and confirmed, and a run with nobody at
+                                  the terminal will not run one at all.
   yolocoder --llm-from-env-vars <task>
                                   use OPENAI_* environment variables
   yolocoder config show           show the saved provider

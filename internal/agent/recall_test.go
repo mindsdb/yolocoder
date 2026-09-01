@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mindsdb/yolocoder/internal/repo"
+	"github.com/mindsdb/yolocoder/internal/shell"
 )
 
 // content reads one input message's text back out of a decoded request.
@@ -41,7 +42,7 @@ func TestRouteAsksForRelevanceOnlyWhenThereIsHistory(t *testing.T) {
 		schemas = append(schemas, schemaName(body))
 		inputs = append(inputs, body["input"])
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"ok\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
+		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"chat\",\"reply\":\"ok\",\"command\":\"\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
 	}))
 	defer server.Close()
 	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
@@ -76,7 +77,7 @@ func TestRouteputsHistoryBeforeTheMessageForTheCache(t *testing.T) {
 		encoded, _ := json.Marshal(body["input"])
 		bodies = append(bodies, string(encoded))
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"ok\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
+		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"chat\",\"reply\":\"ok\",\"command\":\"\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
 	}))
 	defer server.Close()
 	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
@@ -151,7 +152,7 @@ func TestRunGivesTheWorkOnlyTheChosenHistory(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
 		case "message_route":
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\",\"relevant\":[3],\"context\":\"Continuing the layout work.\"}"}]}]}`)
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"code\",\"reply\":\"\",\"command\":\"\",\"relevant\":[3],\"context\":\"Continuing the layout work.\"}"}]}]}`)
 		case "code_change":
 			encoded, _ := json.Marshal(body["input"])
 			changeInput = string(encoded)
@@ -206,7 +207,7 @@ func TestNotesGoAheadOfHistoryInTheRequest(t *testing.T) {
 		_ = json.NewDecoder(request.Body).Decode(&body)
 		inputs = append(inputs, body["input"])
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"ok\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
+		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"chat\",\"reply\":\"ok\",\"command\":\"\",\"relevant\":[],\"context\":\"\"}"}]}]}`)
 	}))
 	defer server.Close()
 	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
@@ -270,5 +271,124 @@ func TestBackgroundSeparatesSuppliedNotesFromRecalledTurns(t *testing.T) {
 func TestBackgroundIsEmptyWithNothingToSay(t *testing.T) {
 	if text := background("", nil); text != "" {
 		t.Fatalf("background = %q, want empty", text)
+	}
+}
+
+// fakeCommander records what it was asked to run.
+type fakeCommander struct {
+	scripts []string
+	err     error
+}
+
+func (commander *fakeCommander) Run(_ context.Context, script string, _ shell.Supervisor) error {
+	commander.scripts = append(commander.scripts, script)
+	return commander.err
+}
+
+// routeAs replies to the router with one decision and fails any other call.
+func routeAs(t *testing.T, decision string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if name := schemaName(body); name != "message_route" {
+			t.Errorf("unexpected %q call: the command route must not reach the change loop", name)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writeOutputText(writer, decision)
+	}))
+}
+
+func TestCommandRouteRunsTheScriptWithoutMappingTheFolder(t *testing.T) {
+	server := routeAs(t, `{"action":"command","reply":"Checking the node version.","command":"node --version"}`)
+	defer server.Close()
+	commander := &fakeCommander{}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: t.TempDir()}).Commands(commander)
+
+	outcome, err := runner.Run(context.Background(), "what node am I on?", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commander.scripts) != 1 || commander.scripts[0] != "node --version" {
+		t.Fatalf("scripts = %q", commander.scripts)
+	}
+	if outcome.Kind != KindCommand || !outcome.Applied {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if outcome.Command != "node --version" {
+		t.Fatalf("outcome did not carry the script: %+v", outcome)
+	}
+}
+
+func TestDeclinedCommandIsNotAFailure(t *testing.T) {
+	server := routeAs(t, `{"action":"command","reply":"","command":"rm -rf /tmp/whatever"}`)
+	defer server.Close()
+	commander := &fakeCommander{err: ErrCommandDeclined}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: t.TempDir()}).Commands(commander)
+
+	outcome, err := runner.Run(context.Background(), "clean that up", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatalf("saying no is not an error: %v", err)
+	}
+	if outcome.Applied {
+		t.Fatalf("outcome = %+v, want it not marked applied", outcome)
+	}
+	// Still recorded, so "what was that command?" has an answer.
+	if outcome.Command == "" {
+		t.Fatalf("outcome = %+v, want the declined script kept", outcome)
+	}
+}
+
+func TestCommandRouteDescribesItselfWithNoCommander(t *testing.T) {
+	// Nothing executes because a caller forgot to say who approves it.
+	server := routeAs(t, `{"action":"command","reply":"Installing it.","command":"npm install"}`)
+	defer server.Close()
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+
+	outcome, err := NewRunner(client, &repo.Repository{Root: t.TempDir()}).
+		Run(context.Background(), "install it", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Applied {
+		t.Fatal("nothing should run without a commander")
+	}
+	if !strings.Contains(outcome.Reply, "npm install") {
+		t.Fatalf("reply = %q, want it to say what it would have run", outcome.Reply)
+	}
+}
+
+func TestAnEmptyCommandFallsBackToChat(t *testing.T) {
+	// "command" with nothing to run is not a command route; replying is
+	// better than reporting an empty script the user has to make sense of.
+	server := routeAs(t, `{"action":"command","reply":"I need more to go on.","command":""}`)
+	defer server.Close()
+	commander := &fakeCommander{}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: t.TempDir()}).Commands(commander)
+
+	outcome, err := runner.Run(context.Background(), "run it", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Kind != KindChat || len(commander.scripts) != 0 {
+		t.Fatalf("outcome = %+v, scripts = %q", outcome, commander.scripts)
+	}
+}
+
+func TestUnknownActionsAreReadAsChat(t *testing.T) {
+	// Chat is the only route that cannot touch anything, so it is where an
+	// unrecognised answer belongs.
+	for action, want := range map[string]string{
+		"code": KindCode, "coding": KindCode, "CODE": KindCode,
+		"command": KindCommand, "shell": KindCommand, "cmd": KindCommand,
+		"chat": KindChat, "": KindChat, "banana": KindChat, "delete_everything": KindChat,
+	} {
+		decision := routeDecision{Action: action, Command: "true"}
+		if got := decision.route(); got != want {
+			t.Fatalf("action %q routed to %q, want %q", action, got, want)
+		}
 	}
 }

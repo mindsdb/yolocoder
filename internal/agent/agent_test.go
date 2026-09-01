@@ -36,7 +36,7 @@ func writeOutputText(writer http.ResponseWriter, text string) {
 }
 
 func routeAsCodingTask(writer http.ResponseWriter) {
-	fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
+	fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"code\",\"reply\":\"\",\"command\":\"\"}"}]}]}`)
 }
 
 // recordingProgress captures progress output so tests can assert on the
@@ -467,7 +467,7 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests++
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"id":"resp_route","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"Hi there!\"}"}]}]}`)
+		fmt.Fprint(writer, `{"id":"resp_route","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"chat\",\"reply\":\"Hi there!\",\"command\":\"\"}"}]}]}`)
 	}))
 	defer server.Close()
 

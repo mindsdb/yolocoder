@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -64,7 +65,7 @@ func PrintCommands() {
 // RunTask reports what the run amounted to: the reply to show, whether
 // it was a coding task, and what it touched, which is what the caller
 // needs to record the turn.
-func RunTask(ctx context.Context, task string, provider config.LLM, history []agent.Recollection, progress agent.Progress) (agent.Outcome, error) {
+func RunTask(ctx context.Context, task string, provider config.LLM, history []agent.Recollection, commander agent.Commander, progress agent.Progress) (agent.Outcome, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
 		return agent.Outcome{}, err
@@ -73,9 +74,25 @@ func RunTask(ctx context.Context, task string, provider config.LLM, history []ag
 	if err != nil {
 		return agent.Outcome{}, err
 	}
-	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, history, progress)
+	outcome, runErr := agent.NewRunner(client, repository).Commands(commander).Run(ctx, task, history, progress)
 	rememberDialect(provider, client)
 	return outcome, runErr
+}
+
+// NewCommander builds what runs a generated command, asking first
+// whenever there is someone at the terminal to ask.
+func NewCommander(output io.Writer, allow bool) *Commander {
+	folder, err := os.Getwd()
+	if err != nil {
+		folder = "."
+	}
+	return &Commander{
+		Folder:      folder,
+		Out:         output,
+		In:          os.Stdin,
+		Assume:      allow,
+		Interactive: terminalInput(),
+	}
 }
 
 // rememberDialect saves which API the endpoint turned out to speak, so a

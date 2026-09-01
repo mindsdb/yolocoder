@@ -12,44 +12,58 @@ import (
 // folder history a scripted call deliberately does not get.
 const contextFlag = "--context"
 
-// ParseContext pulls --context out of args and returns what it carried
-// along with the arguments left over, in the order they were given.
+// allowCommandsFlag runs a generated command without asking first.
+const allowCommandsFlag = "--allow-commands"
+
+// Flags are the options a run was started with.
+type Flags struct {
+	// Notes is what --context carried, in the order it was given.
+	Notes []string
+	// AllowCommands skips the confirmation before a generated command
+	// runs. It is for scripted runs, where there is nobody to ask.
+	AllowCommands bool
+}
+
+// ParseFlags pulls the options out of args and returns what is left, in
+// the order it was given, to be joined back into the task.
 //
-// It accepts "--context text", "--context=text" and repetition, which
-// accumulates. A value of "-" reads the note from stdin, so a caller can
-// pipe in a file without worrying about quoting. "--" ends flag parsing
+// --context accepts "--context text" and "--context=text", repeats to
+// accumulate, and takes "-" to read the note from stdin so a caller can
+// pipe a file in without worrying about quoting. "--" ends flag parsing,
 // for the benefit of a task that begins with a dash.
-func ParseContext(args []string, stdin io.Reader) (notes []string, rest []string, err error) {
+func ParseFlags(args []string, stdin io.Reader) (flags Flags, rest []string, err error) {
 	usedStdin := false
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		switch {
 		case argument == "--":
-			return notes, append(rest, args[index+1:]...), nil
+			return flags, append(rest, args[index+1:]...), nil
+		case argument == allowCommandsFlag:
+			flags.AllowCommands = true
 		case argument == contextFlag:
 			// The value is the next argument, which must exist. Silently
 			// treating a trailing --context as empty would quietly drop
 			// context the caller believed they had passed.
 			if index+1 >= len(args) {
-				return nil, nil, fmt.Errorf("%s needs a value", contextFlag)
+				return Flags{}, nil, fmt.Errorf("%s needs a value", contextFlag)
 			}
 			index++
 			note, err := contextValue(args[index], stdin, &usedStdin)
 			if err != nil {
-				return nil, nil, err
+				return Flags{}, nil, err
 			}
-			notes = appendNote(notes, note)
+			flags.Notes = appendNote(flags.Notes, note)
 		case strings.HasPrefix(argument, contextFlag+"="):
 			note, err := contextValue(strings.TrimPrefix(argument, contextFlag+"="), stdin, &usedStdin)
 			if err != nil {
-				return nil, nil, err
+				return Flags{}, nil, err
 			}
-			notes = appendNote(notes, note)
+			flags.Notes = appendNote(flags.Notes, note)
 		default:
 			rest = append(rest, argument)
 		}
 	}
-	return notes, rest, nil
+	return flags, rest, nil
 }
 
 // contextValue resolves one --context value, reading stdin for "-".

@@ -59,7 +59,20 @@ func RunTask(ctx context.Context, task string, provider config.LLM, progress age
 	if err != nil {
 		return "", err
 	}
-	return agent.NewRunner(client, repository).Run(ctx, task, progress)
+	reply, runErr := agent.NewRunner(client, repository).Run(ctx, task, progress)
+	rememberDialect(provider, client)
+	return reply, runErr
+}
+
+// rememberDialect saves which API the endpoint turned out to speak, so a
+// provider saved before that was recorded costs one 404 to discover rather
+// than one on every run. An environment provider isn't ours to write.
+func rememberDialect(provider config.LLM, client *agent.Client) {
+	if provider.Provider == "environment" || provider.API == client.Dialect() {
+		return
+	}
+	provider.API = client.Dialect()
+	_ = config.Save(provider)
 }
 
 func resolveProvider(fromEnvironment bool) (config.LLM, error) {

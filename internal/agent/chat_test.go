@@ -236,3 +236,70 @@ func TestNewClientPicksTheEndpointForTheDialect(t *testing.T) {
 		t.Fatalf("responses client = %+v", responses)
 	}
 }
+
+func TestClientFallsBackToChatOnA404(t *testing.T) {
+	// A config saved before the dialect was recorded has no API set. The
+	// Responses route 404ing is then the answer, not a failure: it must
+	// switch and carry on without the user reconnecting anything.
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		if strings.HasSuffix(request.URL.Path, "/responses") {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(chatEnvelope{ID: "c", Choices: []chatChoice{{
+			Message: chatMessage{Role: "assistant", Content: `{"ok":true}`},
+		}}})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.create(context.Background(), responseRequest{Input: "hi"})
+	if err != nil {
+		t.Fatalf("create() = %v, want the retry to succeed", err)
+	}
+	if text, _ := response.text(); text != `{"ok":true}` {
+		t.Fatalf("text = %q", text)
+	}
+	if len(paths) != 2 || !strings.HasSuffix(paths[0], "/responses") || !strings.HasSuffix(paths[1], "/chat/completions") {
+		t.Fatalf("paths = %v, want the 404 then the retry", paths)
+	}
+	if client.Dialect() != config.APIChat {
+		t.Fatalf("Dialect() = %q, want chat so it can be saved", client.Dialect())
+	}
+
+	// Having learned it, the next call goes straight to chat completions.
+	if _, err := client.create(context.Background(), responseRequest{Input: "again"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 3 || !strings.HasSuffix(paths[2], "/chat/completions") {
+		t.Fatalf("paths = %v, want no second probe", paths)
+	}
+}
+
+func TestClientDoesNotFallBackWhenTheDialectWasSaved(t *testing.T) {
+	// An explicit Responses provider that 404s has a real problem, and
+	// silently retrying elsewhere would hide it.
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m", API: config.APIResponses})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.create(context.Background(), responseRequest{Input: "hi"}); err == nil {
+		t.Fatal("expected the 404 to be reported")
+	}
+	if len(paths) != 1 {
+		t.Fatalf("paths = %v, want no retry", paths)
+	}
+}

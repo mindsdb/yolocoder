@@ -16,12 +16,18 @@ import (
 
 type Client struct {
 	endpoint string
+	baseURL  string
 	apiKey   string
 	model    string
 	// chat selects the /v1/chat/completions dialect, which most
 	// OpenAI-compatible providers implement instead of the Responses API.
 	chat bool
-	http *http.Client
+	// autoDialect means the saved provider didn't record which API the
+	// endpoint speaks, so a 404 on the Responses route is taken as the
+	// answer rather than an error. Configs saved before the dialect was
+	// recorded would otherwise keep failing until reconnected by hand.
+	autoDialect bool
+	http        *http.Client
 }
 
 type responseRequest struct {
@@ -86,16 +92,27 @@ func NewClient(provider config.LLM) (*Client, error) {
 		return nil, fmt.Errorf("an LLM model is required; reconnect with `yolocoder config connect` or set OPENAI_MODEL")
 	}
 	client := &Client{
-		endpoint: responsesEndpoint(provider.BaseURL),
-		apiKey:   provider.APIKey,
-		model:    provider.Model,
-		http:     http.DefaultClient,
+		endpoint:    responsesEndpoint(provider.BaseURL),
+		baseURL:     provider.BaseURL,
+		apiKey:      provider.APIKey,
+		model:       provider.Model,
+		autoDialect: strings.TrimSpace(provider.API) == "",
+		http:        http.DefaultClient,
 	}
 	if provider.API == config.APIChat {
 		client.endpoint = chatEndpoint(provider.BaseURL)
 		client.chat = true
 	}
 	return client, nil
+}
+
+// Dialect is the API this client ended up speaking, which callers persist
+// so a later run skips rediscovering it.
+func (client *Client) Dialect() string {
+	if client.chat {
+		return config.APIChat
+	}
+	return config.APIResponses
 }
 
 func (client *Client) create(ctx context.Context, request responseRequest) (responseEnvelope, error) {
@@ -137,6 +154,16 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	// Check the status before parsing. Decoding first turned a 404 with
 	// an empty body into "decode LLM response: unexpected end of JSON
 	// input", which says nothing about the endpoint being wrong.
+	// A 404 on the Responses route from a provider that never told us
+	// which API it speaks is the answer to that question, not a failure:
+	// switch to chat completions and ask again.
+	if response.StatusCode == http.StatusNotFound && client.autoDialect && !client.chat {
+		debug.Log("DIALECT", "the Responses API returned 404; switching to /v1/chat/completions")
+		client.chat = true
+		client.endpoint = chatEndpoint(client.baseURL)
+		return client.create(ctx, request)
+	}
+
 	envelope, parseErr := client.decode(replyBody)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, replyBody, envelope)

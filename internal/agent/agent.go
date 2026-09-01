@@ -398,7 +398,7 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 			return change, nil
 		}
 		for _, call := range calls {
-			progress.Log("  " + describeCall(call))
+			progress.Log("  " + session.runner.describeCall(call))
 			session.readPaths = append(session.readPaths, readFilePaths(call)...)
 			output := session.runner.runTool(ctx, call)
 			session.transcript = append(session.transcript, call)
@@ -495,8 +495,7 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 	var answer strings.Builder
 	var fresh []string
 	for _, path := range paths {
-		current, err := runner.repository.ReadFile(path)
-		if err != nil || runner.served[path] != current || current == "" {
+		if !runner.alreadyShown(path) {
 			// Unreadable paths go through the normal read so it can
 			// report the error properly.
 			fresh = append(fresh, path)
@@ -520,20 +519,48 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 }
 
 // describeCall renders a tool call as a short line for the progress log,
-// so the user can see which files the model is actually looking at.
-func describeCall(call responseItem) string {
+// so the user can see which files the model is actually looking at. A
+// re-read that costs nothing says so, rather than looking like the file
+// was fetched all over again.
+func (runner *Runner) describeCall(call responseItem) string {
 	var arguments toolArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
 		return call.Name
 	}
 	switch call.Name {
 	case "read_files":
-		return "read " + strings.Join(arguments.Paths, ", ")
+		var fresh, seen []string
+		for _, path := range arguments.Paths {
+			if runner.alreadyShown(path) {
+				seen = append(seen, path)
+			} else {
+				fresh = append(fresh, path)
+			}
+		}
+		switch {
+		case len(seen) == 0:
+			return "read " + strings.Join(fresh, ", ")
+		case len(fresh) == 0:
+			return "read " + strings.Join(seen, ", ") + " (already shown, not resent)"
+		default:
+			return "read " + strings.Join(fresh, ", ") + " (" + strings.Join(seen, ", ") + " already shown)"
+		}
 	case "search":
 		return "search " + strconv.Quote(arguments.Query)
 	default:
 		return call.Name
 	}
+}
+
+// alreadyShown reports whether path's current contents are the ones the
+// model was already given.
+func (runner *Runner) alreadyShown(path string) bool {
+	served, ok := runner.served[path]
+	if !ok || served == "" {
+		return false
+	}
+	current, err := runner.repository.ReadFile(path)
+	return err == nil && current == served
 }
 
 // logSummary logs "label: summary", skipping the line entirely when the

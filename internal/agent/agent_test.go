@@ -576,3 +576,39 @@ func TestReadFilesMixesFreshAndAlreadySeen(t *testing.T) {
 		t.Fatalf("b.txt was not sent:\n%s", both)
 	}
 }
+
+func TestDescribeCallSaysWhenAReadCostsNothing(t *testing.T) {
+	// The log prints when the model asks, so a deduplicated re-read used
+	// to look identical to fetching the file all over again.
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("body of "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := NewRunner(nil, &repo.Repository{Root: root})
+	read := func(paths string) responseItem {
+		return responseItem{Name: "read_files", Arguments: `{"paths":[` + paths + `]}`}
+	}
+
+	if got := runner.describeCall(read(`"a.txt"`)); got != "read a.txt" {
+		t.Fatalf("first read described as %q", got)
+	}
+	if _, err := runner.readFiles([]string{"a.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.describeCall(read(`"a.txt"`)); got != "read a.txt (already shown, not resent)" {
+		t.Fatalf("repeat read described as %q", got)
+	}
+	if got := runner.describeCall(read(`"a.txt","b.txt"`)); got != "read b.txt (a.txt already shown)" {
+		t.Fatalf("mixed read described as %q", got)
+	}
+
+	// Once the file changes it is genuinely fetched again, and says so.
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("different"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.describeCall(read(`"a.txt"`)); got != "read a.txt" {
+		t.Fatalf("changed file described as %q", got)
+	}
+}

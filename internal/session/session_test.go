@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,6 +259,12 @@ func TestSessionFilesAreNotWorldReadable(t *testing.T) {
 	info, err := os.Stat(log.Path())
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Windows has no POSIX permission bits: os.Stat always reports 0666
+	// for a writable file there regardless of the mode it was created
+	// with, so only the Unix mode is worth asserting.
+	if runtime.GOOS == "windows" {
+		return
 	}
 	if permissions := info.Mode().Perm(); permissions != 0o600 {
 		t.Fatalf("session file mode = %o, want 600", permissions)

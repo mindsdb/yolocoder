@@ -484,11 +484,7 @@ func (runner *Runner) command(ctx context.Context, decision routeDecision, progr
 		return outcome, nil
 	}
 	progress.Status("Running the command...")
-	err := runner.commander.Run(ctx, script, &watcher{runner: runner, progress: progress})
-	// The status line comes back the moment the command hands the
-	// terminal over, and "Running the command..." would be a lie by then.
-	progress.Status("Finishing up...")
-	if err != nil {
+	if err := runner.commander.Run(ctx, script, &watcher{runner: runner, progress: progress}); err != nil {
 		if errors.Is(err, ErrCommandDeclined) {
 			outcome.Reply = "Left it alone."
 			return outcome, nil
@@ -515,12 +511,12 @@ func (runner *Runner) route(ctx context.Context, task string, history []Recollec
 	defer cancel()
 
 	notes, turns := split(history)
-	instructions, schema := routingInstructions(runner.repository.Root), routeSchema()
+	instructions, schema := routingInstructions(), routeSchema()
 	input := any(task)
 	if len(history) > 0 {
 		// Asking for relevance selection costs schema and instructions,
 		// so it is only asked for when there is something to select from.
-		instructions, schema = recallingInstructions(runner.repository.Root), recallSchema()
+		instructions, schema = recallingInstructions(), recallSchema()
 		var messages []any
 		// Notes are fixed for the whole invocation where history grows
 		// each turn, so they sit ahead of it: the more stable a block is,
@@ -1071,12 +1067,8 @@ Respond with only the JSON object, no other text before or after it.`
 
 // routeChoices describes the three routes. Both router prompts share it
 // so the boundary between them can only be stated once and cannot drift.
-func routeChoices(folder string) string {
-	return `You are working in the folder ` + folder + `, on ` + shell.Describe() + `.
-Where you are, what this folder is called and what platform this is are things you already know
-from that line: answer them yourself rather than running a command to find out.
-
-Choose one action for the user's message.
+func routeChoices() string {
+	return `Choose one action for the user's message.
 
 "code" — the user wants files in this project written, fixed, explained from their contents, or
 otherwise inspected or changed. Anything that needs to know what is in this folder is "code".
@@ -1085,11 +1077,9 @@ otherwise inspected or changed. Anything that needs to know what is in this fold
 upgrading tools, starting or stopping a process, git operations, network or system queries,
 checking a version, looking at the environment. Put a shell script in command, and put one line
 saying what it does in reply.
-Do not reach for "command" to write, edit, read, list or search this project's files in order to
-answer something. That is "code", which has proper tools for it and shows its work; a shell
-command doing the same thing blindly is worse at the job and leaves nothing to review.
-The exception is a message that is itself a shell command the user typed — "ls", "git status",
-"npm test". Run it. They are asking for that command, not for you to choose how to find out.
+Never use "command" to write, edit, read, list or search this project's files. That is "code",
+which has proper tools for it and shows its work; a shell command doing the same thing blindly
+is both worse at the job and leaves nothing to review.
 The script runs in the user's current folder, by ` + shell.Describe() + `. Several lines are fine.
 Prefer the least destructive command that does the job, and add no deletion, overwrite or force
 flag the user did not ask for.
@@ -1100,11 +1090,11 @@ Put your complete reply in reply.
 Set command to "" unless the action is "command", and reply to "" when the action is "code".`
 }
 
-func recallingInstructions(folder string) string {
+func recallingInstructions() string {
 	return `You are the first step of a small coding agent, and you are shown what has already
 been asked in this folder before the new message.
 
-` + routeChoices(folder) + `
+` + routeChoices() + `
 
 When the action is "chat", use the earlier turns where the question is about them ("what did I
 ask before?" is answered from the list, not guessed at).
@@ -1120,7 +1110,7 @@ the work. Say only what the list supports; do not invent history.
 Respond with only the JSON object, no other text before or after it.`
 }
 
-func routingInstructions(folder string) string {
-	return routeChoices(folder) + `
+func routingInstructions() string {
+	return routeChoices() + `
 Respond with only the JSON object, no other text before or after it.`
 }

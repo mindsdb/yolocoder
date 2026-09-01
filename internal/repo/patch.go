@@ -55,15 +55,22 @@ func parsePatch(patch string) ([]filePatch, error) {
 		case strings.HasPrefix(line, "*** Begin Patch"), strings.HasPrefix(line, "*** End Patch"):
 			active = nil
 		case strings.HasPrefix(line, "*** Update File:"), strings.HasPrefix(line, "*** Add File:"):
-			active = nil
 			_, raw, _ := strings.Cut(line, ":")
 			path := patchPath(raw)
 			if path == "" {
 				current = nil
+				active = nil
 				continue
 			}
 			patches = append(patches, filePatch{path: path})
 			current = &patches[len(patches)-1]
+			// "*** Add File:" is followed straight by its "+" lines with
+			// no "@@" of its own, so start collecting immediately or the
+			// whole file's contents are read as noise and nothing is
+			// created. Update File normally does have a "@@"; the empty
+			// hunk that leaves behind is dropped below.
+			current.hunks = append(current.hunks, hunk{})
+			active = &current.hunks[0]
 		case strings.HasPrefix(line, "*** Delete File:"):
 			_, raw, _ := strings.Cut(line, ":")
 			return nil, fmt.Errorf("the patch deletes %s, which YoloCoder does not do", strings.TrimSpace(raw))
@@ -97,6 +104,17 @@ func parsePatch(patch string) ([]filePatch, error) {
 	}
 	if len(patches) == 0 {
 		return nil, fmt.Errorf("no file headers in patch")
+	}
+	// A hunk that collected nothing carries no instruction, and leaving
+	// one in would read as "replace this file with nothing".
+	for index := range patches {
+		kept := patches[index].hunks[:0]
+		for _, current := range patches[index].hunks {
+			if len(current.before) > 0 || len(current.after) > 0 {
+				kept = append(kept, current)
+			}
+		}
+		patches[index].hunks = kept
 	}
 	return patches, nil
 }

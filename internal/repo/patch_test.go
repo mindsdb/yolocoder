@@ -330,3 +330,57 @@ func TestApplyPatchFormatDoesNotConsultGit(t *testing.T) {
 		t.Fatalf("index.html = %q", content)
 	}
 }
+
+func TestAddFileWithNoHunkHeader(t *testing.T) {
+	// Verbatim shape from a real reply: apply_patch puts the "+" lines
+	// straight after "*** Add File:" with no "@@" of its own. Requiring
+	// one meant every content line was read as noise, no hunk was built,
+	// and the whole patch reported "patch changed nothing".
+	root := t.TempDir()
+	repository := &Repository{Root: root}
+	patch := "*** Begin Patch\n" +
+		"*** Add File: package.json\n" +
+		"+{\n" +
+		"+  \"name\": \"super-tic-tac-tris\",\n" +
+		"+  \"scripts\": { \"start\": \"node server.js\" }\n" +
+		"+}\n" +
+		"*** Add File: server.js\n" +
+		"+const express = require('express');\n" +
+		"+const app = express();\n" +
+		"*** Add File: launch.sh\n" +
+		"+#!/bin/sh\n" +
+		"+node server.js\n" +
+		"*** End Patch"
+
+	if err := repository.Apply(patch); err != nil {
+		t.Fatalf("Apply() = %v", err)
+	}
+	for path, want := range map[string]string{
+		"package.json": `"name": "super-tic-tac-tris"`,
+		"server.js":    "const express = require('express');",
+		"launch.sh":    "node server.js",
+	} {
+		content, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("%s was not created: %v", path, err)
+		}
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("%s = %q, want it to contain %q", path, content, want)
+		}
+	}
+}
+
+func TestUpdateFileWithAHunkHeaderIsUnaffected(t *testing.T) {
+	// Starting a hunk at the header leaves an empty one when a "@@"
+	// follows; it must be dropped, or it would read as "replace this
+	// file with nothing".
+	patch := "*** Begin Patch\n*** Update File: index.html\n@@\n" +
+		"-  <title>Tec-Tac-Tris</title>\n+  <title>kept</title>\n   <style>\n*** End Patch"
+	got := patchedPage(t, patch)
+	if !strings.Contains(got, "<title>kept</title>") {
+		t.Fatalf("title not changed:\n%s", got)
+	}
+	if !strings.Contains(got, `<button id="restart">New game</button>`) {
+		t.Fatalf("the rest of the file was lost:\n%s", got)
+	}
+}

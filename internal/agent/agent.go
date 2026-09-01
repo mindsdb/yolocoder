@@ -184,10 +184,14 @@ type Progress interface {
 type Runner struct {
 	client     *Client
 	repository *repo.Repository
+	// served is the contents already handed to the model, so asking for
+	// the same unchanged file again costs a sentence instead of another
+	// copy of it in a transcript that is resent on every turn.
+	served map[string]string
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
-	return &Runner{client: client, repository: repository}
+	return &Runner{client: client, repository: repository, served: map[string]string{}}
 }
 
 // Run routes the message first: a plain conversational message gets the
@@ -482,6 +486,39 @@ func snippet(text string) string {
 	return text
 }
 
+// readFiles answers a read_files call, replacing any file already shown
+// and unchanged with a one-line note. A model will happily ask for the
+// same file several times over, and every copy lands in a transcript that
+// is resent in full on every following turn, so the cost of a needless
+// re-read is paid again and again.
+func (runner *Runner) readFiles(paths []string) (string, error) {
+	var answer strings.Builder
+	var fresh []string
+	for _, path := range paths {
+		current, err := runner.repository.ReadFile(path)
+		if err != nil || runner.served[path] != current || current == "" {
+			// Unreadable paths go through the normal read so it can
+			// report the error properly.
+			fresh = append(fresh, path)
+			continue
+		}
+		fmt.Fprintf(&answer, "--- %s ---\n(unchanged since it was shown above)\n", path)
+	}
+	if len(fresh) == 0 {
+		return answer.String(), nil
+	}
+	text, err := runner.repository.Read(fresh)
+	if err != nil {
+		return "", err
+	}
+	for _, path := range fresh {
+		if content, readErr := runner.repository.ReadFile(path); readErr == nil {
+			runner.served[path] = content
+		}
+	}
+	return answer.String() + text, nil
+}
+
 // describeCall renders a tool call as a short line for the progress log,
 // so the user can see which files the model is actually looking at.
 func describeCall(call responseItem) string {
@@ -573,7 +610,7 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 	}
 	switch call.Name {
 	case "read_files":
-		output, err := runner.repository.Read(arguments.Paths)
+		output, err := runner.readFiles(arguments.Paths)
 		if err != nil {
 			return "ERROR: " + err.Error()
 		}
@@ -630,6 +667,8 @@ const changeInstructions = `You are a small coding agent making one change.
 Start from the repository map. Use read_files for the files you need and search only when the
 map is not enough. Read a file before changing it; never write a diff against contents you have
 not seen. Avoid wandering beyond what the task needs.
+Everything you have already read stays in this conversation, so do not read a file a second
+time or search for text you have already been shown; scroll up and use it.
 When you have enough, answer with the change: a one-line summary, the files it modifies, and the
 diff that makes it. Make the smallest complete change, and include tests when the repository
 already has them.

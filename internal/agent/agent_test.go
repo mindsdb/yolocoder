@@ -503,3 +503,76 @@ func integrationRepository(t *testing.T) *repo.Repository {
 	}
 	return &repo.Repository{Root: root}
 }
+
+func TestReadFilesDoesNotResendAnUnchangedFile(t *testing.T) {
+	// A model will ask for the same file several times over. Every copy
+	// lands in a transcript resent in full on every later turn, so the
+	// second answer must be a note rather than the file again.
+	root := t.TempDir()
+	body := strings.Repeat("x", 5000)
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(nil, &repo.Repository{Root: root})
+
+	first, err := runner.readFiles([]string{"index.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first, body) {
+		t.Fatal("the first read must carry the contents")
+	}
+
+	second, err := runner.readFiles([]string{"index.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(second, body) {
+		t.Fatalf("the file was sent again: %d bytes", len(second))
+	}
+	if !strings.Contains(second, "unchanged") {
+		t.Fatalf("second read = %q, want it to say so", second)
+	}
+
+	// Once the file actually changes, it has to be sent again.
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(body+"changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	third, err := runner.readFiles([]string{"index.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(third, "changed") {
+		t.Fatal("a changed file must be sent again")
+	}
+}
+
+func TestReadFilesStillReportsMissingFiles(t *testing.T) {
+	runner := NewRunner(nil, &repo.Repository{Root: t.TempDir()})
+	if _, err := runner.readFiles([]string{"nope.txt"}); err == nil {
+		t.Fatal("expected a missing file to be reported")
+	}
+}
+
+func TestReadFilesMixesFreshAndAlreadySeen(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("body of "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := NewRunner(nil, &repo.Repository{Root: root})
+	if _, err := runner.readFiles([]string{"a.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	both, err := runner.readFiles([]string{"a.txt", "b.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(both, "body of a.txt") {
+		t.Fatalf("a.txt was resent:\n%s", both)
+	}
+	if !strings.Contains(both, "body of b.txt") {
+		t.Fatalf("b.txt was not sent:\n%s", both)
+	}
+}

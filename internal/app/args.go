@@ -15,10 +15,6 @@ const contextFlag = "--context"
 // allowCommandsFlag runs a generated command without asking first.
 const allowCommandsFlag = "--allow-commands"
 
-// confirmCommandsFlag asks about every command, including the ones that
-// only read.
-const confirmCommandsFlag = "--confirm-commands"
-
 // Flags are the options a run was started with.
 type Flags struct {
 	// Notes is what --context carried, in the order it was given.
@@ -26,9 +22,6 @@ type Flags struct {
 	// AllowCommands skips the confirmation before a generated command
 	// runs. It is for scripted runs, where there is nobody to ask.
 	AllowCommands bool
-	// ConfirmCommands asks about every command, including one that only
-	// reads and stays in this folder.
-	ConfirmCommands bool
 }
 
 // ParseFlags pulls the options out of args and returns what is left, in
@@ -47,8 +40,6 @@ func ParseFlags(args []string, stdin io.Reader) (flags Flags, rest []string, err
 			return flags, append(rest, args[index+1:]...), nil
 		case argument == allowCommandsFlag:
 			flags.AllowCommands = true
-		case argument == confirmCommandsFlag:
-			flags.ConfirmCommands = true
 		case argument == contextFlag:
 			// The value is the next argument, which must exist. Silently
 			// treating a trailing --context as empty would quietly drop

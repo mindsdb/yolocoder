@@ -81,7 +81,7 @@ func RunTask(ctx context.Context, task string, provider config.LLM, history []ag
 
 // NewCommander builds what runs a generated command, asking first
 // whenever there is someone at the terminal to ask.
-func NewCommander(output io.Writer, flags Flags) *Commander {
+func NewCommander(output io.Writer, allow bool) *Commander {
 	folder, err := os.Getwd()
 	if err != nil {
 		folder = "."
@@ -90,8 +90,7 @@ func NewCommander(output io.Writer, flags Flags) *Commander {
 		Folder:      folder,
 		Out:         output,
 		In:          os.Stdin,
-		Assume:      flags.AllowCommands,
-		AlwaysAsk:   flags.ConfirmCommands,
+		Assume:      allow,
 		Interactive: terminalInput(),
 	}
 }

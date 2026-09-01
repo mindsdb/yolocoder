@@ -29,9 +29,6 @@ type Commander struct {
 	// Interactive says whether there is someone who can be asked. Without
 	// one, and without Assume, nothing runs.
 	Interactive bool
-	// AlwaysAsk puts the question even for a command that only reads,
-	// for someone who would rather see everything.
-	AlwaysAsk bool
 	// Suspend stops whatever else is drawing on the terminal and returns
 	// what resumes it, for the duration of the command.
 	Suspend func() func()
@@ -50,7 +47,7 @@ func (commander *Commander) Run(ctx context.Context, script string, watch shell.
 		defer commander.Suspend()()
 	}
 	commander.show(script)
-	allowed, err := commander.permitted(script)
+	allowed, err := commander.permitted()
 	if err != nil {
 		return err
 	}
@@ -95,18 +92,9 @@ func (commander *Commander) show(script string) {
 	}
 }
 
-func (commander *Commander) permitted(script string) (bool, error) {
+func (commander *Commander) permitted() (bool, error) {
 	if commander.Assume {
 		fmt.Fprintf(commander.Out, "\x1b[2mRunning it: %s was given.\x1b[0m\n", allowCommandsFlag)
-		return true, nil
-	}
-	// A command that only reads, and only inside this folder, is not
-	// worth stopping the session over. Being asked about "ls" teaches
-	// people to answer yes without reading, which is the opposite of
-	// what the question is for.
-	review := shell.Inspect(script, commander.Folder)
-	if review.Confined && !commander.AlwaysAsk {
-		fmt.Fprintf(commander.Out, "\x1b[2mRunning it: it only reads, and stays inside this folder.\x1b[0m\n")
 		return true, nil
 	}
 	if !commander.Interactive {
@@ -115,12 +103,6 @@ func (commander *Commander) permitted(script string) (bool, error) {
 		// that disappears exactly when it is least supervised.
 		fmt.Fprintf(commander.Out, "\x1b[2mNot running it: nobody to ask. Pass %s to allow commands in a scripted run.\x1b[0m\n", allowCommandsFlag)
 		return false, nil
-	}
-	if review.Reason != "" && !review.Confined {
-		// Say what the objection is. "Run it? [y/N]" on its own gives the
-		// reader nothing to weigh, and a question with no stated reason
-		// is one people learn to click through.
-		fmt.Fprintf(commander.Out, "\x1b[2mAsking because %s.\x1b[0m\n", review.Reason)
 	}
 	fmt.Fprint(commander.Out, "\x1b[33mRun it? [y/N] \x1b[0m")
 	line, err := commander.answer()

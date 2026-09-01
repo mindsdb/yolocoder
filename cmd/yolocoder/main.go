@@ -79,7 +79,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	commander := app.NewCommander(os.Stdout, flags)
+	commander := app.NewCommander(os.Stdout, flags.AllowCommands)
 
 	fromEnvironment := false
 	if len(args) > 0 && args[0] == "--llm-from-env-vars" {

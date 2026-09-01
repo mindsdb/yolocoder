@@ -279,3 +279,54 @@ func TestApplySeveralPatchBlocksForOneFile(t *testing.T) {
 		t.Fatalf("an occurrence was left behind:\n%s", got)
 	}
 }
+
+func TestIsApplyPatchFormat(t *testing.T) {
+	applyPatch := []string{
+		"*** Begin Patch\n*** Update File: a.go\n@@\n-x\n+y\n*** End Patch",
+		"*** Update File: a.go\n@@\n-x\n+y",
+		"  *** Begin Patch\n*** Add File: new.txt\n@@\n+hi",
+	}
+	for _, patch := range applyPatch {
+		if !isApplyPatchFormat(patch) {
+			t.Fatalf("isApplyPatchFormat(%q) = false, want true", patch)
+		}
+	}
+	unified := []string{
+		"diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-x\n+y",
+		"--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-x\n+y",
+	}
+	for _, patch := range unified {
+		if isApplyPatchFormat(patch) {
+			t.Fatalf("isApplyPatchFormat(%q) = true, want false", patch)
+		}
+	}
+	if isApplyPatchFormat("") {
+		t.Fatal("empty patch must not be treated as apply_patch")
+	}
+}
+
+func TestApplyPatchFormatDoesNotConsultGit(t *testing.T) {
+	// git cannot read this format, so asking it first only produced a
+	// "PATCH FAILED" line on the way to the applier that could. Pointing
+	// the repository at a git binary that would fail loudly proves git is
+	// never invoked for it.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+
+	patch := "*** Begin Patch\n*** Update File: index.html\n@@\n" +
+		"-  <title>Tec-Tac-Tris</title>\n+  <title>fits</title>\n   <style>\n*** End Patch"
+
+	// PATH is emptied so any attempt to run git would error; the apply
+	// must still succeed.
+	t.Setenv("PATH", "")
+	if err := repository.Apply(patch); err != nil {
+		t.Fatalf("Apply() = %v, want it to succeed without git", err)
+	}
+	content, _ := os.ReadFile(filepath.Join(root, "index.html"))
+	if !strings.Contains(string(content), "<title>fits</title>") {
+		t.Fatalf("index.html = %q", content)
+	}
+}

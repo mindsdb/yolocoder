@@ -210,22 +210,35 @@ func (repository *Repository) Apply(patch string) error {
 		return fmt.Errorf("patch is empty")
 	}
 	debug.Log("PATCH", patch)
+
+	// Git cannot read apply_patch format, so handing it over would only
+	// produce a confusing failure on the way to the applier that can.
+	if isApplyPatchFormat(patch) {
+		if err := repository.applyByContent(patch); err != nil {
+			debug.Logf("PATCH FAILED", "%v", err)
+			return err
+		}
+		debug.Log("PATCH APPLIED", "by matching content (apply_patch format)")
+		return nil
+	}
+
 	gitErr := repository.applyWithGit(patch)
 	if gitErr == nil {
 		debug.Log("PATCH APPLIED", "by git apply")
 		return nil
 	}
-	debug.Logf("PATCH FAILED", "%v", gitErr)
+	// Not a failure yet: git insists the patch's own bookkeeping be right,
+	// with correct hunk counts and trailing context proving the hunk isn't
+	// at end of file. A model gets the content right and that arithmetic
+	// wrong, and none of it needs the model, so try placing the hunks by
+	// their content before calling anything failed.
+	debug.Logf("PATCH git apply declined", "%v", gitErr)
 
-	// git apply insists the patch's own bookkeeping be right: correct hunk
-	// counts, and trailing context proving the hunk isn't at end of file.
-	// A model gets the content right and that arithmetic wrong. None of it
-	// needs the model, so place the hunks by their content instead.
 	if contentErr := repository.applyByContent(patch); contentErr != nil {
-		debug.Logf("PATCH FAILED", "by content: %v", contentErr)
+		debug.Logf("PATCH FAILED", "git apply: %v\nby content: %v", gitErr, contentErr)
 		return fmt.Errorf("%w\n\nPlacing the hunks by content also failed: %v", gitErr, contentErr)
 	}
-	debug.Log("PATCH APPLIED", "by content, after git apply rejected its line numbers")
+	debug.Log("PATCH APPLIED", "by matching content, after git apply declined its line numbers")
 	return nil
 }
 

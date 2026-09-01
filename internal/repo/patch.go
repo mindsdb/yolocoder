@@ -101,6 +101,25 @@ func parsePatch(patch string) ([]filePatch, error) {
 	return patches, nil
 }
 
+// isApplyPatchFormat reports whether a patch uses OpenAI's apply_patch
+// headers. Git cannot read that format at all, so there is no point
+// handing it over first and no failure to report when it declines.
+func isApplyPatchFormat(patch string) bool {
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "*** Begin Patch"),
+			strings.HasPrefix(line, "*** Update File:"),
+			strings.HasPrefix(line, "*** Add File:"),
+			strings.HasPrefix(line, "*** Delete File:"):
+			return true
+		case strings.HasPrefix(line, "diff --git "), strings.HasPrefix(line, "--- "):
+			return false
+		}
+	}
+	return false
+}
+
 // patchPath turns a diff header path into a repository-relative one.
 func patchPath(raw string) string {
 	raw = strings.TrimSpace(raw)

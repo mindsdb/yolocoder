@@ -117,18 +117,40 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return responseEnvelope{}, err
 	}
 	debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(body))
+
+	// Check the status before parsing. Decoding first turned a 404 with
+	// an empty body into "decode LLM response: unexpected end of JSON
+	// input", which says nothing about the endpoint being wrong.
 	var envelope responseEnvelope
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w", err)
-	}
+	parseErr := json.Unmarshal(body, &envelope)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := strings.TrimSpace(string(body))
-		if envelope.Error != nil && envelope.Error.Message != "" {
-			message = envelope.Error.Message
-		}
-		return responseEnvelope{}, fmt.Errorf("LLM returned %s: %s", response.Status, message)
+		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, body, envelope)
+	}
+	if parseErr != nil {
+		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w: %s", parseErr, snippet(string(body)))
 	}
 	return envelope, nil
+}
+
+// statusError explains a non-2xx reply. A 404 in particular almost always
+// means the endpoint doesn't implement the Responses API rather than
+// anything being wrong with the request, and saying so saves the user
+// hunting through their key and model name for a fault that isn't there.
+func (client *Client) statusError(code int, status string, body []byte, envelope responseEnvelope) error {
+	message := strings.TrimSpace(string(body))
+	if envelope.Error != nil && envelope.Error.Message != "" {
+		message = envelope.Error.Message
+	}
+	if code == http.StatusNotFound {
+		return fmt.Errorf("LLM returned %s for %s\n\n"+
+			"That endpoint does not implement the OpenAI Responses API, which is what YoloCoder speaks. "+
+			"Many providers only offer /v1/chat/completions. Check the provider's docs for a Responses API "+
+			"endpoint, or connect one that has it with `yolocoder config connect`.", status, client.endpoint)
+	}
+	if message == "" {
+		message = "(no response body)"
+	}
+	return fmt.Errorf("LLM returned %s: %s", status, message)
 }
 
 func (response responseEnvelope) calls() []responseItem {

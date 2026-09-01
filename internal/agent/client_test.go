@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,5 +55,43 @@ func TestListModels(t *testing.T) {
 	want := []string{"mindshub_air", "mindshub_pro"}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("ListModels() = %v, want %v", models, want)
+	}
+}
+
+func TestCreateReportsTheStatusBeforeTryingToParse(t *testing.T) {
+	// A 404 with an empty body is what an endpoint without the Responses
+	// API returns. Parsing first turned that into "unexpected end of JSON
+	// input", which sent the user looking at their key and model.
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL + "/v1/responses", apiKey: "k", model: "m", http: server.Client()}
+	_, err := client.create(context.Background(), responseRequest{Input: "hi"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "end of JSON input") {
+		t.Fatalf("err = %v, want the status, not a parse failure", err)
+	}
+	for _, want := range []string{"404", "does not implement the OpenAI Responses API"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestCreateSurfacesAProviderErrorMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(writer, `{"error":{"message":"Wrong API Key"}}`)
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	_, err := client.create(context.Background(), responseRequest{Input: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "Wrong API Key") {
+		t.Fatalf("err = %v, want the provider's own message", err)
 	}
 }

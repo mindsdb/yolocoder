@@ -612,3 +612,33 @@ func TestDescribeCallSaysWhenAReadCostsNothing(t *testing.T) {
 		t.Fatalf("changed file described as %q", got)
 	}
 }
+
+func TestSalvageChangeAcceptsOtherSpellingsOfTheFileList(t *testing.T) {
+	// Verbatim from a real reply: the model wrote "files_modified" where
+	// the schema said "files_to_modify", so the list was dropped and the
+	// trail lost its "will edit" line.
+	reply := `{"summary":"Compact the cards","files_modified":["base_index.html"],"diff":"*** Begin Patch"}`
+	var change Change
+	if err := decodeJSON(reply, &change); err != nil {
+		t.Fatal(err)
+	}
+	if len(change.FilesToModify) != 0 {
+		t.Fatalf("precondition: the schema decode should come up empty, got %v", change.FilesToModify)
+	}
+	salvageChange(&change, reply)
+	if len(change.FilesToModify) != 1 || change.FilesToModify[0] != "base_index.html" {
+		t.Fatalf("FilesToModify = %v, want base_index.html", change.FilesToModify)
+	}
+
+	for _, key := range []string{"files_changed", "modified_files", "files"} {
+		var other Change
+		payload := `{"summary":"s","` + key + `":["a.go"],"diff":"d"}`
+		if err := decodeJSON(payload, &other); err != nil {
+			t.Fatal(err)
+		}
+		salvageChange(&other, payload)
+		if len(other.FilesToModify) != 1 || other.FilesToModify[0] != "a.go" {
+			t.Fatalf("%s: FilesToModify = %v", key, other.FilesToModify)
+		}
+	}
+}

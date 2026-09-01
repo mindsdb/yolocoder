@@ -579,8 +579,14 @@ type alternatePlan struct {
 		File string `json:"file"`
 		Path string `json:"path"`
 	} `json:"plan"`
-	Files []string `json:"files"`
-	Notes string   `json:"notes"`
+	// Spellings models reach for instead of files_to_modify. Missing one
+	// costs the file list silently: the trail loses its "will edit" line
+	// and the whole-file fallback loses its first choice of target.
+	Files         stringList `json:"files"`
+	FilesModified stringList `json:"files_modified"`
+	FilesChanged  stringList `json:"files_changed"`
+	ModifiedFiles stringList `json:"modified_files"`
+	Notes         string     `json:"notes"`
 }
 
 // salvageChange fills in a change whose file list came back empty because
@@ -600,9 +606,11 @@ func salvageChange(change *Change, text string) {
 			change.FilesToModify = append(change.FilesToModify, path)
 		}
 	}
-	for _, path := range alternate.Files {
-		if path != "" {
-			change.FilesToModify = append(change.FilesToModify, path)
+	for _, group := range []stringList{alternate.Files, alternate.FilesModified, alternate.FilesChanged, alternate.ModifiedFiles} {
+		for _, path := range group {
+			if path != "" {
+				change.FilesToModify = append(change.FilesToModify, path)
+			}
 		}
 	}
 	if change.Summary == "" {

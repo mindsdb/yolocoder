@@ -32,10 +32,20 @@ type Commander struct {
 	// Suspend stops whatever else is drawing on the terminal and returns
 	// what resumes it, for the duration of the command.
 	Suspend func() func()
+
+	// reader is kept across calls so nothing read ahead is lost.
+	reader *bufio.Reader
 }
 
 // Run implements agent.Commander.
 func (commander *Commander) Run(ctx context.Context, script string, watch shell.Supervisor) error {
+	// Before anything is printed, not just before the command runs. The
+	// question is a prompt on a line of its own with no newline after it,
+	// so a spinner still animating in that spot erases it between frames
+	// and the user is left looking at a session that has silently stopped.
+	if commander.Suspend != nil {
+		defer commander.Suspend()()
+	}
 	commander.show(script)
 	allowed, err := commander.permitted()
 	if err != nil {
@@ -43,12 +53,6 @@ func (commander *Commander) Run(ctx context.Context, script string, watch shell.
 	}
 	if !allowed {
 		return agent.ErrCommandDeclined
-	}
-	// The command owns the terminal from here: it draws its own progress
-	// and may redraw over itself, so anything of ours animating in the
-	// same place has to get out of the way first.
-	if commander.Suspend != nil {
-		defer commander.Suspend()()
 	}
 	fmt.Fprintf(commander.Out, "\n\x1b[2m--- output ---\x1b[0m\n")
 	runner := &shell.Runner{
@@ -101,13 +105,38 @@ func (commander *Commander) permitted() (bool, error) {
 		return false, nil
 	}
 	fmt.Fprint(commander.Out, "\x1b[33mRun it? [y/N] \x1b[0m")
-	line, err := bufio.NewReader(commander.In).ReadString('\n')
+	line, err := commander.answer()
+	fmt.Fprintln(commander.Out)
 	if err != nil && strings.TrimSpace(line) == "" {
 		// A closed input is a "no", not a crash.
-		fmt.Fprintln(commander.Out)
 		return false, nil
 	}
 	return affirmative(line), nil
+}
+
+// answer reads one typed line.
+//
+// It ends the line on carriage return as well as newline. A terminal
+// left in raw mode by whatever drew the prompt before us sends Enter as
+// \r, and waiting for a \n that is never coming would hang the session
+// on a question the user has already answered.
+func (commander *Commander) answer() (string, error) {
+	if commander.reader == nil {
+		// Kept across calls: a fresh bufio.Reader would abandon whatever
+		// the last one read ahead of what it returned.
+		commander.reader = bufio.NewReader(commander.In)
+	}
+	var line strings.Builder
+	for {
+		character, _, err := commander.reader.ReadRune()
+		if err != nil {
+			return line.String(), err
+		}
+		if character == '\n' || character == '\r' {
+			return line.String(), nil
+		}
+		line.WriteRune(character)
+	}
 }
 
 // affirmative reads the answer strictly: only a clear yes is a yes, so a

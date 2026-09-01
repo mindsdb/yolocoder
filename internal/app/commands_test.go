@@ -134,3 +134,81 @@ func TestAffirmativeIsStrict(t *testing.T) {
 		}
 	}
 }
+
+// recorder notes the order of what happened to the terminal.
+type recorder struct {
+	events []string
+}
+
+func (log *recorder) Write(data []byte) (int, error) {
+	log.events = append(log.events, "wrote: "+string(data))
+	return len(data), nil
+}
+
+func (log *recorder) suspend() func() {
+	log.events = append(log.events, "suspended")
+	return func() { log.events = append(log.events, "resumed") }
+}
+
+func TestTheSpinnerStandsDownBeforeTheQuestionIsAsked(t *testing.T) {
+	// The question is printed with no newline after it, so anything still
+	// animating in that spot erases it between frames and the session
+	// looks like it has silently stopped. Nothing may be written until
+	// whatever was drawing has been suspended.
+	folder := commandFolder(t)
+	log := &recorder{}
+	commander := &Commander{
+		Folder:      folder,
+		Out:         log,
+		In:          strings.NewReader("n\n"),
+		Interactive: true,
+		Suspend:     log.suspend,
+	}
+	_ = commander.Run(context.Background(), "echo hi", nil)
+
+	if len(log.events) == 0 || log.events[0] != "suspended" {
+		t.Fatalf("first event = %q, want the suspend:\n%s", first(log.events), strings.Join(log.events, "\n"))
+	}
+	if log.events[len(log.events)-1] != "resumed" {
+		t.Fatalf("last event = %q, want the resume", log.events[len(log.events)-1])
+	}
+	// And the question really was put to the user.
+	if !strings.Contains(strings.Join(log.events, ""), "Run it?") {
+		t.Fatalf("the question was never asked:\n%s", strings.Join(log.events, "\n"))
+	}
+}
+
+func TestADeclinedCommandStillResumesTheSpinner(t *testing.T) {
+	// The early return on a decline must not skip the resume, or the
+	// session would lose its status line for good.
+	log := &recorder{}
+	commander := &Commander{
+		Folder: commandFolder(t), Out: log, Interactive: false, Suspend: log.suspend,
+	}
+	_ = commander.Run(context.Background(), "echo hi", nil)
+	if log.events[len(log.events)-1] != "resumed" {
+		t.Fatalf("events:\n%s", strings.Join(log.events, "\n"))
+	}
+}
+
+func TestAnswerAcceptsACarriageReturn(t *testing.T) {
+	// A terminal left in raw mode sends Enter as \r. Waiting for a \n that
+	// is never coming would hang on a question already answered.
+	folder := commandFolder(t)
+	script, proof := marker(folder)
+	var out bytes.Buffer
+	commander := &Commander{Folder: folder, Out: &out, In: strings.NewReader("y\r"), Interactive: true}
+	if err := commander.Run(context.Background(), script, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !ran(proof) {
+		t.Fatal("a carriage-return answer should have been accepted")
+	}
+}
+
+func first(events []string) string {
+	if len(events) == 0 {
+		return ""
+	}
+	return events[0]
+}

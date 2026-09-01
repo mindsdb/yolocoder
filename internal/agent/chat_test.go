@@ -173,7 +173,7 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		}
 		switch requests {
 		case 1:
-			reply(chatMessage{Role: "assistant", Content: `{"action":"code","reply":"","command":""}`})
+			reply(chatMessage{Role: "assistant", Content: `{"coding_task":true,"reply":""}`})
 		case 2:
 			// Ask to read the file, in this dialect's shape.
 			reply(chatMessage{Role: "assistant", ToolCalls: []chatToolCall{{

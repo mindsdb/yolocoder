@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/mindsdb/yolocoder/internal/repo"
-	"github.com/mindsdb/yolocoder/internal/shell"
 )
 
 const maxToolRounds = 8
@@ -71,28 +70,11 @@ func (list *stringList) UnmarshalJSON(data []byte) error {
 // was a coding task at all, and what it touched. The caller needs more
 // than the reply text so it can record the turn.
 type Outcome struct {
-	Reply string
-	// Kind is which route the message took: KindChat, KindCode or
-	// KindCommand.
-	Kind    string
+	Reply   string
+	Coding  bool
 	Files   []string
 	Applied bool
-	// Command is the script the command route produced, recorded whether
-	// or not it was allowed to run.
-	Command string
 }
-
-// The routes a message can take. Everything that reads or changes files
-// in this folder is KindCode; KindCommand is for the work that is not
-// about this folder's contents at all.
-const (
-	KindChat    = "chat"
-	KindCode    = "code"
-	KindCommand = "command"
-)
-
-// Coding reports whether the message was routed to a change.
-func (outcome Outcome) Coding() bool { return outcome.Kind == KindCode }
 
 // Recollection is one earlier turn in this folder, as the agent sees it.
 // The agent deliberately takes this rather than reading the store itself,
@@ -109,11 +91,8 @@ type Recollection struct {
 }
 
 type routeDecision struct {
-	// Action is "chat", "code" or "command".
-	Action string `json:"action"`
-	Reply  string `json:"reply"`
-	// Command is the script to run when Action is "command".
-	Command string `json:"command"`
+	CodingTask bool   `json:"coding_task"`
+	Reply      string `json:"reply"`
 	// Relevant are the turn numbers worth carrying into the work, and
 	// Context ties them to the new message. Numbers are asked for as well
 	// as prose because they can be checked: the summaries fed onward are
@@ -122,42 +101,6 @@ type routeDecision struct {
 	Relevant numberList `json:"relevant"`
 	Context  string     `json:"context"`
 }
-
-// route normalises what the model put in action. Models reach for
-// neighbouring words when asked for an enum, and a value nobody
-// recognises is better read as chat than guessed at: chat is the one
-// route that cannot touch anything.
-func (decision routeDecision) route() string {
-	switch strings.ToLower(strings.TrimSpace(decision.Action)) {
-	case "code", "coding", "coding_task", "change", "edit", "patch":
-		return KindCode
-	case "command", "commands", "shell", "cmd", "script", "run", "command_line":
-		// A command route with nothing to run is not one. Falling back to
-		// the reply is better than reporting an empty script as a refusal
-		// the user then has to make sense of.
-		if strings.TrimSpace(decision.Command) == "" {
-			return KindChat
-		}
-		return KindCommand
-	default:
-		return KindChat
-	}
-}
-
-// Commander runs a command script the model produced.
-//
-// The agent takes this rather than executing anything itself, so that
-// deciding whether a generated command may run stays with the caller
-// that has the user's terminal to ask on.
-// watch is consulted while the script runs, so a long one is not simply
-// trusted from the moment it was approved.
-type Commander interface {
-	Run(ctx context.Context, script string, watch shell.Supervisor) error
-}
-
-// ErrCommandDeclined is what a Commander returns when the user was asked
-// and said no. It is not a failure of the run.
-var ErrCommandDeclined = errors.New("command not run")
 
 // numberList tolerates the shapes a model reaches for when asked for a
 // list of numbers: [3, 7], ["3", "7"], or a bare 3.
@@ -305,22 +248,10 @@ type Runner struct {
 	// the same unchanged file again costs a sentence instead of another
 	// copy of it in a transcript that is resent on every turn.
 	served map[string]string
-	// commander runs what the command route produces. Without one that
-	// route can only describe what it would have done, which is the right
-	// default: nothing should execute because a caller forgot to say who
-	// gets to approve it.
-	commander Commander
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
 	return &Runner{client: client, repository: repository, served: map[string]string{}}
-}
-
-// Commands supplies what runs a generated script, and returns the runner
-// so it can be set where the runner is built.
-func (runner *Runner) Commands(commander Commander) *Runner {
-	runner.commander = commander
-	return runner
 }
 
 // Run routes the message first: a plain conversational message gets the
@@ -332,11 +263,8 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 	if err != nil {
 		return Outcome{}, err
 	}
-	switch decision.route() {
-	case KindChat:
-		return Outcome{Kind: KindChat, Reply: decision.Reply}, nil
-	case KindCommand:
-		return runner.command(ctx, decision, progress)
+	if !decision.CodingTask {
+		return Outcome{Reply: decision.Reply}, nil
 	}
 
 	carried := recall(history, decision.Relevant)
@@ -414,7 +342,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			} else {
 				progress.Log("  tests passed")
 			}
-			return Outcome{Reply: change.Summary, Kind: KindCode, Files: change.FilesToModify, Applied: true}, nil
+			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true}, nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
@@ -461,41 +389,11 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			if summary == "" {
 				summary = "Rewrote " + strings.Join(targets, ", ")
 			}
-			return Outcome{Reply: summary, Kind: KindCode, Files: targets, Applied: true}, nil
+			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true}, nil
 		}
 		return Outcome{}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
 	return Outcome{}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
-}
-
-// command runs what the router produced, once whoever owns the terminal
-// has agreed to it.
-//
-// The script is reported back on the outcome whether or not it ran, so a
-// declined command is still recorded: "what was that command again?" is
-// a fair question to ask after saying no to one.
-func (runner *Runner) command(ctx context.Context, decision routeDecision, progress Progress) (Outcome, error) {
-	script := strings.TrimSpace(decision.Command)
-	outcome := Outcome{Kind: KindCommand, Command: script, Reply: strings.TrimSpace(decision.Reply)}
-	if runner.commander == nil {
-		// Nothing is executed just because a caller neglected to say who
-		// approves it; describing the command is the honest fallback.
-		outcome.Reply = strings.TrimSpace(outcome.Reply + "\n\nThis would run:\n" + script)
-		return outcome, nil
-	}
-	progress.Status("Running the command...")
-	if err := runner.commander.Run(ctx, script, &watcher{runner: runner, progress: progress}); err != nil {
-		if errors.Is(err, ErrCommandDeclined) {
-			outcome.Reply = "Left it alone."
-			return outcome, nil
-		}
-		return outcome, err
-	}
-	outcome.Applied = true
-	if outcome.Reply == "" {
-		outcome.Reply = "Done."
-	}
-	return outcome, nil
 }
 
 // route decides whether the message is a question or a change, and when
@@ -511,12 +409,12 @@ func (runner *Runner) route(ctx context.Context, task string, history []Recollec
 	defer cancel()
 
 	notes, turns := split(history)
-	instructions, schema := routingInstructions(), routeSchema()
+	instructions, schema := routingInstructions, routeSchema()
 	input := any(task)
 	if len(history) > 0 {
 		// Asking for relevance selection costs schema and instructions,
 		// so it is only asked for when there is something to select from.
-		instructions, schema = recallingInstructions(), recallSchema()
+		instructions, schema = recallingInstructions, recallSchema()
 		var messages []any
 		// Notes are fixed for the whole invocation where history grows
 		// each turn, so they sit ahead of it: the more stable a block is,
@@ -1004,29 +902,20 @@ func rewriteSchema() map[string]any {
 
 // recallSchema is the routing schema plus relevance selection, used only
 // when there is history to select from.
-// actionSchema is the route itself. Spelling the choices out as an enum
-// rather than asking for prose is what keeps a provider that enforces the
-// schema from inventing a fourth route.
-func actionSchema() map[string]any {
-	return map[string]any{"type": "string", "enum": []string{KindChat, KindCode, KindCommand}}
-}
-
 func recallSchema() map[string]any {
 	return objectSchema(map[string]any{
-		"action":   actionSchema(),
-		"reply":    map[string]any{"type": "string"},
-		"command":  map[string]any{"type": "string"},
-		"relevant": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-		"context":  map[string]any{"type": "string"},
-	}, []string{"action", "reply", "command", "relevant", "context"})
+		"coding_task": map[string]any{"type": "boolean"},
+		"reply":       map[string]any{"type": "string"},
+		"relevant":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+		"context":     map[string]any{"type": "string"},
+	}, []string{"coding_task", "reply", "relevant", "context"})
 }
 
 func routeSchema() map[string]any {
 	return objectSchema(map[string]any{
-		"action":  actionSchema(),
-		"reply":   map[string]any{"type": "string"},
-		"command": map[string]any{"type": "string"},
-	}, []string{"action", "reply", "command"})
+		"coding_task": map[string]any{"type": "boolean"},
+		"reply":       map[string]any{"type": "string"},
+	}, []string{"coding_task", "reply"})
 }
 
 func objectSchema(properties map[string]any, required []string) map[string]any {
@@ -1065,39 +954,15 @@ like "unchanged" or "...": what you return replaces the file exactly, so
 anything you leave out is deleted.
 Respond with only the JSON object, no other text before or after it.`
 
-// routeChoices describes the three routes. Both router prompts share it
-// so the boundary between them can only be stated once and cannot drift.
-func routeChoices() string {
-	return `Choose one action for the user's message.
-
-"code" — the user wants files in this project written, fixed, explained from their contents, or
-otherwise inspected or changed. Anything that needs to know what is in this folder is "code".
-
-"command" — the user wants something run that is not about this folder's contents: installing or
-upgrading tools, starting or stopping a process, git operations, network or system queries,
-checking a version, looking at the environment. Put a shell script in command, and put one line
-saying what it does in reply.
-Never use "command" to write, edit, read, list or search this project's files. That is "code",
-which has proper tools for it and shows its work; a shell command doing the same thing blindly
-is both worse at the job and leaves nothing to review.
-The script runs in the user's current folder, by ` + shell.Describe() + `. Several lines are fine.
-Prefer the least destructive command that does the job, and add no deletion, overwrite or force
-flag the user did not ask for.
-
-"chat" — anything else: the message can be answered directly, with nothing read, changed or run.
-Put your complete reply in reply.
-
-Set command to "" unless the action is "command", and reply to "" when the action is "code".`
-}
-
-func recallingInstructions() string {
-	return `You are the first step of a small coding agent, and you are shown what has already
-been asked in this folder before the new message.
-
-` + routeChoices() + `
-
-When the action is "chat", use the earlier turns where the question is about them ("what did I
-ask before?" is answered from the list, not guessed at).
+const recallingInstructions = `You are the first step of a small coding agent, and you are shown
+what has already been asked in this folder before the new message.
+Decide whether the new message is a coding task that requires reading or changing files, or just
+a conversational message.
+Set coding_task to true only when the user wants code written, fixed, explained from the files,
+or otherwise wants the project inspected or changed.
+When coding_task is false, answer the user yourself in reply, using the earlier turns when the
+question is about them ("what did I ask before?" is answered from the list, not guessed at).
+When coding_task is true, leave reply empty.
 A PROJECT CONTEXT block, if present, was handed to you directly rather than asked in an earlier
 turn. Treat it as fact about the project, and do not list it in relevant: it is carried anyway.
 In relevant, list the numbers of the earlier turns that genuinely bear on the new message.
@@ -1108,9 +973,8 @@ when nothing earlier matters.
 In context, write one or two sentences tying those turns to the new message, for whoever does
 the work. Say only what the list supports; do not invent history.
 Respond with only the JSON object, no other text before or after it.`
-}
 
-func routingInstructions() string {
-	return routeChoices() + `
+const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.
+Set coding_task to true only when the user wants code written, fixed, explained from the files, or otherwise wants the project inspected or changed.
+When coding_task is false, put your complete, direct reply to the user in reply. When coding_task is true, leave reply empty.
 Respond with only the JSON object, no other text before or after it.`
-}

@@ -5,23 +5,23 @@ import (
 	"testing"
 )
 
-func TestParseFlagsTakesBothSpellings(t *testing.T) {
-	flags, rest, err := ParseFlags([]string{"--context", "one", "--context=two", "fix", "the", "build"}, nil)
+func TestParseContextTakesBothSpellings(t *testing.T) {
+	notes, rest, err := ParseContext([]string{"--context", "one", "--context=two", "fix", "the", "build"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(flags.Notes) != 2 || flags.Notes[0] != "one" || flags.Notes[1] != "two" {
-		t.Fatalf("notes = %q", flags.Notes)
+	if len(notes) != 2 || notes[0] != "one" || notes[1] != "two" {
+		t.Fatalf("notes = %q", notes)
 	}
 	if strings.Join(rest, " ") != "fix the build" {
 		t.Fatalf("rest = %q", rest)
 	}
 }
 
-func TestParseFlagsKeepsTheOrderOfTheTask(t *testing.T) {
+func TestParseContextKeepsTheOrderOfTheTask(t *testing.T) {
 	// The task is rebuilt by joining what is left, so --context appearing
 	// in the middle must not shuffle the words around it.
-	_, rest, err := ParseFlags([]string{"rename", "--context", "note", "the", "title"}, nil)
+	_, rest, err := ParseContext([]string{"rename", "--context", "note", "the", "title"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,51 +30,51 @@ func TestParseFlagsKeepsTheOrderOfTheTask(t *testing.T) {
 	}
 }
 
-func TestParseFlagsReadsStdinForDash(t *testing.T) {
-	flags, rest, err := ParseFlags([]string{"--context", "-", "go"}, strings.NewReader("piped background\n"))
+func TestParseContextReadsStdinForDash(t *testing.T) {
+	notes, rest, err := ParseContext([]string{"--context", "-", "go"}, strings.NewReader("piped background\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(flags.Notes) != 1 || flags.Notes[0] != "piped background" {
-		t.Fatalf("notes = %q", flags.Notes)
+	if len(notes) != 1 || notes[0] != "piped background" {
+		t.Fatalf("notes = %q", notes)
 	}
 	if len(rest) != 1 || rest[0] != "go" {
 		t.Fatalf("rest = %q", rest)
 	}
 }
 
-func TestParseFlagsRefusesASecondStdinRead(t *testing.T) {
+func TestParseContextRefusesASecondStdinRead(t *testing.T) {
 	// The first read consumes stdin entirely, so a second would silently
 	// come back empty.
-	_, _, err := ParseFlags([]string{"--context", "-", "--context", "-"}, strings.NewReader("x"))
+	_, _, err := ParseContext([]string{"--context", "-", "--context", "-"}, strings.NewReader("x"))
 	if err == nil {
 		t.Fatal("expected an error for two stdin notes")
 	}
 }
 
-func TestParseFlagsRefusesAMissingValue(t *testing.T) {
-	if _, _, err := ParseFlags([]string{"do", "it", "--context"}, nil); err == nil {
+func TestParseContextRefusesAMissingValue(t *testing.T) {
+	if _, _, err := ParseContext([]string{"do", "it", "--context"}, nil); err == nil {
 		t.Fatal("expected an error for a trailing --context")
 	}
 }
 
-func TestParseFlagsDropsEmptyNotes(t *testing.T) {
-	flags, _, err := ParseFlags([]string{"--context", "   ", "--context=", "task"}, nil)
+func TestParseContextDropsEmptyNotes(t *testing.T) {
+	notes, _, err := ParseContext([]string{"--context", "   ", "--context=", "task"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(flags.Notes) != 0 {
-		t.Fatalf("notes = %q, want none", flags.Notes)
+	if len(notes) != 0 {
+		t.Fatalf("notes = %q, want none", notes)
 	}
 }
 
-func TestParseFlagsStopsAtADoubleDash(t *testing.T) {
-	flags, rest, err := ParseFlags([]string{"--context", "real", "--", "--context", "literal"}, nil)
+func TestParseContextStopsAtADoubleDash(t *testing.T) {
+	notes, rest, err := ParseContext([]string{"--context", "real", "--", "--context", "literal"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(flags.Notes) != 1 || flags.Notes[0] != "real" {
-		t.Fatalf("notes = %q", flags.Notes)
+	if len(notes) != 1 || notes[0] != "real" {
+		t.Fatalf("notes = %q", notes)
 	}
 	if strings.Join(rest, " ") != "--context literal" {
 		t.Fatalf("rest = %q", rest)

@@ -47,21 +47,21 @@ func PrintCommands() {
 	}
 }
 
-// RunTask returns the model's reply. For a plain conversational message,
-// that's its direct answer; for a completed coding task, it's a short
-// summary of the change (may be empty).
-func RunTask(ctx context.Context, task string, provider config.LLM, progress agent.Progress) (string, error) {
+// RunTask reports what the run amounted to: the reply to show, whether
+// it was a coding task, and what it touched, which is what the caller
+// needs to record the turn.
+func RunTask(ctx context.Context, task string, provider config.LLM, progress agent.Progress) (agent.Outcome, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
-		return "", err
+		return agent.Outcome{}, err
 	}
 	client, err := agent.NewClient(provider)
 	if err != nil {
-		return "", err
+		return agent.Outcome{}, err
 	}
-	reply, runErr := agent.NewRunner(client, repository).Run(ctx, task, progress)
+	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, progress)
 	rememberDialect(provider, client)
-	return reply, runErr
+	return outcome, runErr
 }
 
 // rememberDialect saves which API the endpoint turned out to speak, so a

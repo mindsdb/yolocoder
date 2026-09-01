@@ -7,9 +7,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/app"
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/debug"
+	"github.com/mindsdb/yolocoder/internal/session"
 	"github.com/mindsdb/yolocoder/internal/terminal"
 	"github.com/mindsdb/yolocoder/internal/ui"
 	"github.com/mindsdb/yolocoder/internal/update"
@@ -86,11 +88,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Turns are recorded per folder so a later run can be told what has
+	// been going on here. A store that cannot be opened is not worth
+	// failing over: the run matters, the note about it does not.
+	history, historyErr := openHistory()
+	if historyErr != nil {
+		fmt.Fprintln(os.Stderr, "session log:", historyErr)
+	}
+
 	// A task on the command line is a one-shot run; without one, stay in
 	// an interactive session so follow-up tasks keep the same context on
 	// screen instead of ending after a single change.
 	if task := strings.TrimSpace(strings.Join(args, " ")); task != "" {
-		if err := runTask(task, provider); err != nil {
+		if err := runTask(task, provider, history); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -119,7 +129,7 @@ func main() {
 			}
 			continue
 		}
-		if err := runTask(task, provider); err != nil {
+		if err := runTask(task, provider, history); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 		fmt.Println()
@@ -172,6 +182,15 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		return true, false
 	}
 	return false, false
+}
+
+// openHistory starts or continues this folder's session log.
+func openHistory() (*session.Log, error) {
+	folder, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	return session.Open(folder, session.Terminal(os.Getenv))
 }
 
 // reloadProvider picks up a provider the user just changed, so the next
@@ -233,19 +252,41 @@ func indent(text string) string {
 
 // runTask runs one task, reporting progress as it goes and printing the
 // model's reply at the end.
-func runTask(task string, provider config.LLM) error {
-	session := ui.NewSession(os.Stdout)
-	session.Start("Thinking...")
-	activeSession = session
-	reply, err := app.RunTask(context.Background(), task, provider, session)
+func runTask(task string, provider config.LLM, history *session.Log) error {
+	reporter := ui.NewSession(os.Stdout)
+	reporter.Start("Thinking...")
+	activeSession = reporter
+	outcome, err := app.RunTask(context.Background(), task, provider, reporter)
 	activeSession = nil
-	session.Stop()
+	reporter.Stop()
 	if err != nil {
 		return err
 	}
+	record(history, task, outcome)
+	reply := outcome.Reply
 	if reply == "" {
 		reply = "Done."
 	}
 	fmt.Printf("[*_*] %s\n", reply)
 	return nil
+}
+
+// record keeps a note of the turn for a later run to draw on. It is only
+// ever a convenience, so a store that cannot be written must not take the
+// run down with it.
+func record(history *session.Log, task string, outcome agent.Outcome) {
+	if history == nil {
+		return
+	}
+	kind := "chat"
+	if outcome.Coding {
+		kind = "code"
+	}
+	_ = history.Append(session.Turn{
+		Message: task,
+		Kind:    kind,
+		Summary: outcome.Reply,
+		Files:   outcome.Files,
+		Applied: outcome.Applied,
+	})
 }

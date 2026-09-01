@@ -266,12 +266,12 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	reply, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", progress)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Update greeting" {
-		t.Fatalf("reply = %q", reply)
+	if outcome.Reply != "Update greeting" {
+		t.Fatalf("reply = %q", outcome.Reply)
 	}
 	trail := strings.Join(progress.logs, "\n")
 	for _, want := range []string{"read hello.txt", "plan: Update greeting", "will edit hello.txt", "applied the patch"} {
@@ -403,12 +403,12 @@ func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	reply, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Retitled" {
-		t.Fatalf("reply = %q", reply)
+	if outcome.Reply != "Retitled" {
+		t.Fatalf("reply = %q", outcome.Reply)
 	}
 	if rewrites != 1 {
 		t.Fatalf("rewrite requests = %d, want 1", rewrites)
@@ -473,12 +473,12 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
-	reply, err := NewRunner(client, repository).Run(context.Background(), "hi", &recordingProgress{})
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Hi there!" {
-		t.Fatalf("reply = %q", reply)
+	if outcome.Reply != "Hi there!" {
+		t.Fatalf("reply = %q", outcome.Reply)
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want 1 (repository must not be touched)", requests)

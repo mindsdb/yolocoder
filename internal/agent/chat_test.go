@@ -203,12 +203,12 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	progress := &recordingProgress{}
-	reply, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", progress)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "Retitle" {
-		t.Fatalf("reply = %q", reply)
+	if outcome.Reply != "Retitle" {
+		t.Fatalf("reply = %q", outcome.Reply)
 	}
 	content, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil || !strings.Contains(string(content), "<title>New</title>") {

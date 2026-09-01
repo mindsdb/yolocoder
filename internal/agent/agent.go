@@ -66,6 +66,16 @@ func (list *stringList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Outcome is what a run amounted to: what to tell the user, whether it
+// was a coding task at all, and what it touched. The caller needs more
+// than the reply text so it can record the turn.
+type Outcome struct {
+	Reply   string
+	Coding  bool
+	Files   []string
+	Applied bool
+}
+
 type routeDecision struct {
 	CodingTask bool   `json:"coding_task"`
 	Reply      string `json:"reply"`
@@ -197,20 +207,20 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 // Run routes the message first: a plain conversational message gets the
 // model's direct reply with the repository never touched, and only an
 // actual coding task goes through the map/plan/patch/test loop.
-func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (string, error) {
+func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (Outcome, error) {
 	progress.Status("Reading your message...")
 	decision, err := runner.route(ctx, task)
 	if err != nil {
-		return "", err
+		return Outcome{}, err
 	}
 	if !decision.CodingTask {
-		return decision.Reply, nil
+		return Outcome{Reply: decision.Reply}, nil
 	}
 
 	progress.Status("Mapping the folder...")
 	repoMap, err := runner.repository.Map()
 	if err != nil {
-		return "", err
+		return Outcome{}, err
 	}
 	mapped := mappedPaths(repoMap)
 	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
@@ -226,7 +236,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 		}
 		change, err = session.produce(ctx, progress)
 		if err != nil {
-			return "", err
+			return Outcome{}, err
 		}
 		if attempt == 0 {
 			logSummary(progress, "plan", change.Summary)
@@ -277,7 +287,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 			} else {
 				progress.Log("  tests passed")
 			}
-			return change.Summary, nil
+			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true}, nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
@@ -290,7 +300,7 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 	if strings.HasPrefix(evidence, "The patch did not apply") {
 		targets := rewriteTargets(change.FilesToModify, session.readPaths, mapped)
 		if len(targets) == 0 {
-			return "", fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
+			return Outcome{}, fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
 		}
 		progress.Status("Rewriting the file instead...")
 		summary := ""
@@ -298,15 +308,15 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 			current, _ := runner.repository.ReadFile(path)
 			rewrite, err := runner.rewrite(ctx, task, path, current, evidence)
 			if err != nil {
-				return "", err
+				return Outcome{}, err
 			}
 			// An empty rewrite of a file that has content is the model
 			// failing, not an instruction to truncate the user's file.
 			if strings.TrimSpace(rewrite.Content) == "" && strings.TrimSpace(current) != "" {
-				return "", fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
+				return Outcome{}, fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
 			}
 			if err := runner.repository.Write(path, rewrite.Content); err != nil {
-				return "", err
+				return Outcome{}, err
 			}
 			progress.Log("  wrote " + path)
 			if summary == "" {
@@ -324,11 +334,11 @@ func (runner *Runner) Run(ctx context.Context, task string, progress Progress) (
 			if summary == "" {
 				summary = "Rewrote " + strings.Join(targets, ", ")
 			}
-			return summary, nil
+			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true}, nil
 		}
-		return "", fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
+		return Outcome{}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
-	return "", fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+	return Outcome{}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
 }
 
 func (runner *Runner) route(ctx context.Context, task string) (routeDecision, error) {

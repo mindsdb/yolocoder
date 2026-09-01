@@ -47,6 +47,27 @@ func parsePatch(patch string) ([]filePatch, error) {
 			}
 			patches = append(patches, filePatch{path: path})
 			current = &patches[len(patches)-1]
+
+		// Models trained on OpenAI's apply_patch format reach for it
+		// instead of a unified diff. It carries no line numbers at all,
+		// which suits placing hunks by content exactly, so the only thing
+		// missing was recognizing its headers.
+		case strings.HasPrefix(line, "*** Begin Patch"), strings.HasPrefix(line, "*** End Patch"):
+			active = nil
+		case strings.HasPrefix(line, "*** Update File:"), strings.HasPrefix(line, "*** Add File:"):
+			active = nil
+			_, raw, _ := strings.Cut(line, ":")
+			path := patchPath(raw)
+			if path == "" {
+				current = nil
+				continue
+			}
+			patches = append(patches, filePatch{path: path})
+			current = &patches[len(patches)-1]
+		case strings.HasPrefix(line, "*** Delete File:"):
+			_, raw, _ := strings.Cut(line, ":")
+			return nil, fmt.Errorf("the patch deletes %s, which YoloCoder does not do", strings.TrimSpace(raw))
+
 		case strings.HasPrefix(line, "@@"):
 			if current == nil {
 				return nil, fmt.Errorf("hunk before any file header")

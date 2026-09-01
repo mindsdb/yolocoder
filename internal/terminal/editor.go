@@ -147,6 +147,75 @@ func (buffer *textBuffer) setPosition(targetRow, targetColumn int) {
 	buffer.cursor = index + targetColumn
 }
 
+// set replaces the whole buffer and leaves the cursor at the end, which
+// is where recalling an earlier task should drop you.
+func (buffer *textBuffer) set(text string) {
+	buffer.text = []rune(text)
+	buffer.cursor = len(buffer.text)
+}
+
+// rows is the number of lines the buffer holds.
+func (buffer *textBuffer) rows() int {
+	return strings.Count(string(buffer.text), "\n") + 1
+}
+
+// recall steps back through earlier tasks with Up and forward with Down.
+//
+// Index len(entries) is the draft — whatever was being typed before the
+// first Up — so stepping all the way forward lands back on it rather than
+// on an empty prompt.
+type recall struct {
+	entries []string // oldest first
+	index   int
+	// edited holds changes made to a recalled task, so stepping past one
+	// and back does not silently throw away what was typed into it.
+	edited map[int]string
+}
+
+func newRecall(entries []string) *recall {
+	return &recall{entries: entries, index: len(entries)}
+}
+
+// active reports whether an earlier task is currently on screen, which is
+// what makes Down a step forward rather than a cursor move.
+func (history *recall) active() bool {
+	return history != nil && history.index < len(history.entries)
+}
+
+func (history *recall) at(index int) string {
+	if text, ok := history.edited[index]; ok {
+		return text
+	}
+	if index < 0 || index >= len(history.entries) {
+		return ""
+	}
+	return history.entries[index]
+}
+
+func (history *recall) stash(index int, text string) {
+	if history.edited == nil {
+		history.edited = make(map[int]string)
+	}
+	history.edited[index] = text
+}
+
+// step moves by direction through the entries, loading what it lands on
+// into the buffer. It reports whether it moved; when it did not, the key
+// falls through to its ordinary cursor movement.
+func (history *recall) step(buffer *textBuffer, direction int) bool {
+	if history == nil {
+		return false
+	}
+	target := history.index + direction
+	if target < 0 || target > len(history.entries) {
+		return false
+	}
+	history.stash(history.index, string(buffer.text))
+	history.index = target
+	buffer.set(history.at(target))
+	return true
+}
+
 func (buffer *textBuffer) home() {
 	row, _ := buffer.position()
 	buffer.setPosition(row, 0)
@@ -157,7 +226,9 @@ func (buffer *textBuffer) end() {
 	buffer.setPosition(row, int(^uint(0)>>1))
 }
 
-func (reader *Reader) EditTask(output io.Writer, commands []Command) (string, error) {
+// EditTask reads one task. earlier is the tasks already entered, oldest
+// first, which Up steps back through from the prompt's top line.
+func (reader *Reader) EditTask(output io.Writer, commands []Command, earlier []string) (string, error) {
 	if !IsTTY(reader.input) {
 		return "", errors.New("multiline task entry requires an interactive terminal")
 	}
@@ -176,6 +247,7 @@ func (reader *Reader) EditTask(output io.Writer, commands []Command) (string, er
 	defer fmt.Fprint(output, "\x1b[<u\x1b[>4;0m\x1b[?2004l")
 
 	buffer := &textBuffer{}
+	history := newRecall(earlier)
 	layout := editorLayout{}
 	defer func() {
 		// Leave the cursor on a fresh line below the prompt so whatever
@@ -207,7 +279,7 @@ func (reader *Reader) EditTask(output io.Writer, commands []Command) (string, er
 		case 5:
 			buffer.end()
 		case 27:
-			enter, err := handleEditorEscape(reader.buffer, buffer)
+			enter, err := handleEditorEscape(reader.buffer, buffer, history)
 			if err != nil {
 				return "", err
 			}
@@ -304,7 +376,7 @@ func drawEditor(output io.Writer, buffer *textBuffer, width int, commands []Comm
 // handleEditorEscape parses one CSI sequence following an ESC byte and
 // applies it to buffer. It reports enter=true when the sequence represents
 // a plain Enter key reported through the CSI u keyboard protocol.
-func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer) (bool, error) {
+func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer, history *recall) (bool, error) {
 	next, err := reader.ReadByte()
 	if err != nil {
 		return false, ErrEditorCancelled
@@ -327,9 +399,18 @@ func handleEditorEscape(reader *bufio.Reader, buffer *textBuffer) (bool, error) 
 	}
 	switch final {
 	case 'A':
-		buffer.moveVertical(-1)
+		// Up recalls an earlier task only from the top line, so it still
+		// moves the cursor normally inside a multi-line draft.
+		if row, _ := buffer.position(); row > 0 || !history.step(buffer, -1) {
+			buffer.moveVertical(-1)
+		}
 	case 'B':
-		buffer.moveVertical(1)
+		// Symmetrically, Down steps forward only from the bottom line,
+		// and only while an earlier task is what is on screen.
+		row, _ := buffer.position()
+		if row < buffer.rows()-1 || !history.active() || !history.step(buffer, 1) {
+			buffer.moveVertical(1)
+		}
 	case 'C':
 		buffer.moveHorizontal(1)
 	case 'D':

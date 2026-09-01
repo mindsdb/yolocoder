@@ -113,9 +113,12 @@ func main() {
 		return
 	}
 
-	fmt.Printf("\x1b[2mEnter: send  •  Shift+Enter: new line  •  / for commands  •  Ctrl+C to quit\x1b[0m\n\n")
+	fmt.Printf("\x1b[2mEnter: send  •  Shift+Enter: new line  •  ↑ earlier  •  / for commands  •  Ctrl+C to quit\x1b[0m\n\n")
+	// Seeded from what this folder has already been asked, so Up reaches
+	// back past the start of this session rather than only within it.
+	typed := app.Messages(recorded())
 	for {
-		task, err := app.PromptTask()
+		task, err := app.PromptTask(typed)
 		if err != nil {
 			if errors.Is(err, terminal.ErrEditorCancelled) {
 				fmt.Println("[^_^] Bye.")
@@ -127,6 +130,9 @@ func main() {
 		if task == "" {
 			continue
 		}
+		// Recorded before anything else happens to it, so a task that goes
+		// on to fail is still one keystroke away from being retried.
+		typed = append(typed, task)
 		// Commands are handled here rather than sent to the model, which
 		// would otherwise cheerfully answer "/model" as a question.
 		if handled, quit := runCommand(task, fromEnvironment, &provider); handled {
@@ -283,16 +289,22 @@ func runTask(task string, provider config.LLM, history *session.Log, recalled []
 // only its notes: a scripted call should do the same thing every time
 // rather than depend on whatever happened in this folder earlier.
 func earlier(notes []string) []agent.Recollection {
-	recalled := app.Notes(notes)
+	return append(app.Notes(notes), app.Recollections(recorded())...)
+}
+
+// recorded is what this folder has already been asked, oldest first. A
+// log that cannot be read is not worth reporting over: history is a
+// convenience, and the run works without it.
+func recorded() []session.Turn {
 	folder, err := os.Getwd()
 	if err != nil {
-		return recalled
+		return nil
 	}
 	turns, err := session.Recent(folder)
 	if err != nil {
-		return recalled
+		return nil
 	}
-	return append(recalled, app.Recollections(turns)...)
+	return turns
 }
 
 // record keeps a note of the turn for a later run to draw on. It is only

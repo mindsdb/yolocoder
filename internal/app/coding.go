@@ -28,17 +28,30 @@ var SessionCommands = []terminal.Command{
 	{Name: "/exit", Description: "end the session"},
 }
 
-// PromptTask reads one task from the interactive editor. It returns
-// terminal.ErrEditorCancelled when the user presses Ctrl+C.
-func PromptTask() (string, error) {
+// PromptTask reads one task from the interactive editor. earlier is what
+// has already been asked, oldest first, which Up steps back through. It
+// returns terminal.ErrEditorCancelled when the user presses Ctrl+C.
+func PromptTask(earlier []string) (string, error) {
 	if !terminalInput() {
 		return "", fmt.Errorf("a task is required\n\nUsage: yolocoder [--llm-from-env-vars] <task>")
 	}
-	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout, SessionCommands)
+	task, err := terminal.NewReader(os.Stdin).EditTask(os.Stdout, SessionCommands, earlier)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(task), nil
+}
+
+// Messages are just what was asked, oldest first, which is what the
+// prompt's Up-arrow recall steps back through.
+func Messages(turns []session.Turn) []string {
+	messages := make([]string, 0, len(turns))
+	for _, turn := range turns {
+		if message := strings.TrimSpace(turn.Message); message != "" {
+			messages = append(messages, message)
+		}
+	}
+	return messages
 }
 
 // PrintCommands lists the session's slash commands.

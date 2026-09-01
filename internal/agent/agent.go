@@ -27,6 +27,11 @@ type Change struct {
 	Summary       string     `json:"summary"`
 	FilesToModify stringList `json:"files_to_modify"`
 	Diff          string     `json:"diff"`
+	// Command is what has to be run for the change to take effect: a
+	// server restarted, a dependency installed, a migration applied.
+	// Editing a file is often only most of the job, and without this the
+	// work stopped at the edit and reported that it had no way to finish.
+	Command string `json:"command"`
 }
 
 // stringList is a list of strings that also accepts the shapes models
@@ -414,7 +419,8 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			} else {
 				progress.Log("  tests passed")
 			}
-			return Outcome{Reply: change.Summary, Kind: KindCode, Files: change.FilesToModify, Applied: true}, nil
+			outcome := Outcome{Reply: change.Summary, Kind: KindCode, Files: change.FilesToModify, Applied: true}
+			return runner.finish(ctx, change, outcome, progress), nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
@@ -500,6 +506,49 @@ func (runner *Runner) command(ctx context.Context, decision routeDecision, progr
 		outcome.Reply = "Done."
 	}
 	return outcome, nil
+}
+
+// finish runs whatever the change said had to happen for it to take
+// effect, once the patch is in and the tests have passed.
+//
+// Editing a file is often only most of the job: "add French and restart
+// the server" is one request, and stopping at the edit to report that
+// restarting was not possible answers half of it. The command goes
+// through exactly the same confirmation as any other, so this adds a
+// step the user can see and refuse, not a new way for things to run.
+//
+// A failure here does not undo the change or fail the run. The edit was
+// made and the tests passed; what is left is a follow-up that did not
+// work, and saying so is more useful than throwing the rest away.
+func (runner *Runner) finish(ctx context.Context, change Change, outcome Outcome, progress Progress) Outcome {
+	script := strings.TrimSpace(change.Command)
+	if script == "" {
+		return outcome
+	}
+	outcome.Command = script
+	if runner.commander == nil {
+		outcome.Reply = strings.TrimSpace(outcome.Reply + "\n\nStill to run:\n" + script)
+		return outcome
+	}
+	progress.Status("Running what the change needs...")
+	err := runner.commander.Run(ctx, script, &watcher{runner: runner, progress: progress})
+	progress.Status("Finishing up...")
+	switch {
+	case err == nil:
+		progress.Log("  ran " + firstLine(script))
+	case errors.Is(err, ErrCommandDeclined):
+		outcome.Reply = strings.TrimSpace(outcome.Reply + "\n\nNot run:\n" + script)
+	default:
+		outcome.Reply = strings.TrimSpace(outcome.Reply + "\n\nThe change is in, but this did not work: " + err.Error())
+	}
+	return outcome
+}
+
+func firstLine(text string) string {
+	if line, _, found := strings.Cut(text, "\n"); found {
+		return line + " ..."
+	}
+	return text
 }
 
 // route decides whether the message is a question or a change, and when
@@ -996,7 +1045,8 @@ func changeSchema() map[string]any {
 		"summary":         map[string]any{"type": "string"},
 		"files_to_modify": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"diff":            map[string]any{"type": "string"},
-	}, []string{"summary", "files_to_modify", "diff"})
+		"command":         map[string]any{"type": "string"},
+	}, []string{"summary", "files_to_modify", "diff", "command"})
 }
 
 func rewriteSchema() map[string]any {
@@ -1046,6 +1096,10 @@ time or search for text you have already been shown; scroll up and use it.
 When you have enough, answer with the change: a one-line summary, the files it modifies, and the
 diff that makes it. Make the smallest complete change, and include tests when the repository
 already has them.
+If the change only takes effect once something is run — a server restarted, a dependency
+installed, a migration applied — put that in command and it will be run for you once the patch
+is applied. You have this: never report that you cannot restart or install something. Leave
+command empty when the edit is the whole job, and do not put a build or a test run in it.
 The diff may be a unified diff or the "*** Begin Patch / *** Update File:" format; either is
 read by matching its text against the file, so line numbers and hunk counts are ignored and do
 not need to be correct.

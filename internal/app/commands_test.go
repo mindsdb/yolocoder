@@ -164,7 +164,8 @@ func TestTheSpinnerStandsDownBeforeTheQuestionIsAsked(t *testing.T) {
 		Interactive: true,
 		Suspend:     log.suspend,
 	}
-	_ = commander.Run(context.Background(), "echo hi", nil)
+	// A script that has to be asked about, so the question is reached.
+	_ = commander.Run(context.Background(), "rm -rf /tmp/whatever", nil)
 
 	if len(log.events) == 0 || log.events[0] != "suspended" {
 		t.Fatalf("first event = %q, want the suspend:\n%s", first(log.events), strings.Join(log.events, "\n"))
@@ -185,7 +186,7 @@ func TestADeclinedCommandStillResumesTheSpinner(t *testing.T) {
 	commander := &Commander{
 		Folder: commandFolder(t), Out: log, Interactive: false, Suspend: log.suspend,
 	}
-	_ = commander.Run(context.Background(), "echo hi", nil)
+	_ = commander.Run(context.Background(), "rm -rf /tmp/whatever", nil)
 	if log.events[len(log.events)-1] != "resumed" {
 		t.Fatalf("events:\n%s", strings.Join(log.events, "\n"))
 	}
@@ -211,4 +212,80 @@ func first(events []string) string {
 		return ""
 	}
 	return events[0]
+}
+
+func TestAReadOnlyCommandRunsWithoutAsking(t *testing.T) {
+	// Being asked about "ls" teaches people to answer yes without
+	// reading, which is the opposite of what the question is for.
+	folder := commandFolder(t)
+	var out bytes.Buffer
+	// No input at all: if it stopped to ask, it would have nothing to
+	// read and would decline.
+	commander := &Commander{Folder: folder, Out: &out, Interactive: true}
+
+	if err := commander.Run(context.Background(), "ls", nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Run it?") {
+		t.Fatalf("should not have asked about ls:\n%s", out.String())
+	}
+	// Still shown, so the user can read what ran.
+	if !strings.Contains(out.String(), "ls") {
+		t.Fatalf("the command should still be shown:\n%s", out.String())
+	}
+}
+
+func TestAReadOnlyCommandRunsEvenWithNobodyToAsk(t *testing.T) {
+	// Nothing to confirm means the absence of a person is not a problem.
+	folder := commandFolder(t)
+	var out bytes.Buffer
+	commander := &Commander{Folder: folder, Out: &out, Interactive: false}
+	if err := commander.Run(context.Background(), "pwd", nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Not running it") {
+		t.Fatalf("a read-only command needs no one to approve it:\n%s", out.String())
+	}
+}
+
+func TestAWritingCommandIsStillAskedAbout(t *testing.T) {
+	folder := commandFolder(t)
+	script, proof := marker(folder)
+	var out bytes.Buffer
+	commander := &Commander{Folder: folder, Out: &out, In: strings.NewReader("n\n"), Interactive: true}
+
+	if err := commander.Run(context.Background(), script, nil); !errors.Is(err, agent.ErrCommandDeclined) {
+		t.Fatalf("err = %v, want a decline", err)
+	}
+	if ran(proof) {
+		t.Fatal("it ran despite being declined")
+	}
+	if !strings.Contains(out.String(), "Run it?") {
+		t.Fatalf("a writing command must still be asked about:\n%s", out.String())
+	}
+}
+
+func TestTheQuestionSaysWhyItIsBeingAsked(t *testing.T) {
+	folder := commandFolder(t)
+	var out bytes.Buffer
+	commander := &Commander{Folder: folder, Out: &out, In: strings.NewReader("n\n"), Interactive: true}
+	_ = commander.Run(context.Background(), "cat /etc/passwd", nil)
+	if !strings.Contains(out.String(), "outside") {
+		t.Fatalf("the question should name the objection:\n%s", out.String())
+	}
+}
+
+func TestConfirmCommandsAsksAboutEverything(t *testing.T) {
+	folder := commandFolder(t)
+	var out bytes.Buffer
+	commander := &Commander{
+		Folder: folder, Out: &out, In: strings.NewReader("n\n"),
+		Interactive: true, AlwaysAsk: true,
+	}
+	if err := commander.Run(context.Background(), "ls", nil); !errors.Is(err, agent.ErrCommandDeclined) {
+		t.Fatalf("err = %v, want the question to have been put", err)
+	}
+	if !strings.Contains(out.String(), "Run it?") {
+		t.Fatalf("--confirm-commands should ask about ls too:\n%s", out.String())
+	}
 }

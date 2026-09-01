@@ -3,9 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -390,5 +393,118 @@ func TestUnknownActionsAreReadAsChat(t *testing.T) {
 		if got := decision.route(); got != want {
 			t.Fatalf("action %q routed to %q, want %q", action, got, want)
 		}
+	}
+}
+
+func TestAChangeRunsWhatItNeedsAfterwards(t *testing.T) {
+	// "add French and restart the server" is one request. Stopping at the
+	// edit to report that restarting was not possible answers half of it.
+	root := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			writeOutputText(writer, `{"action":"code","reply":"","command":"","relevant":[],"context":""}`)
+		case "code_change":
+			payload, _ := json.Marshal(Change{
+				Summary: "Added French",
+				Diff:    "*** Begin Patch\n*** Add File: fr.json\n+{}\n*** End Patch",
+				Command: "./launch.sh",
+			})
+			writeOutputText(writer, string(payload))
+		}
+	}))
+	defer server.Close()
+
+	commander := &fakeCommander{}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: root}).Commands(commander)
+
+	outcome, err := runner.Run(context.Background(), "add french and restart the server", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commander.scripts) != 1 || commander.scripts[0] != "./launch.sh" {
+		t.Fatalf("scripts = %q, want the follow-up to have run", commander.scripts)
+	}
+	// It is still a coding turn: the command is how it finished, not what
+	// it was.
+	if outcome.Kind != KindCode || !outcome.Applied {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if outcome.Command != "./launch.sh" {
+		t.Fatalf("outcome did not record the follow-up: %+v", outcome)
+	}
+}
+
+func TestAFailedFollowUpDoesNotThrowAwayTheChange(t *testing.T) {
+	root := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			writeOutputText(writer, `{"action":"code","reply":"","command":"","relevant":[],"context":""}`)
+		case "code_change":
+			payload, _ := json.Marshal(Change{
+				Summary: "Added French",
+				Diff:    "*** Begin Patch\n*** Add File: fr.json\n+{}\n*** End Patch",
+				Command: "./launch.sh",
+			})
+			writeOutputText(writer, string(payload))
+		}
+	}))
+	defer server.Close()
+
+	commander := &fakeCommander{err: errors.New("command exited with status 1")}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: root}).Commands(commander)
+
+	outcome, err := runner.Run(context.Background(), "add french and restart", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatalf("the edit landed; a failed follow-up is not a failed run: %v", err)
+	}
+	if !outcome.Applied {
+		t.Fatalf("outcome = %+v, the patch did apply", outcome)
+	}
+	if !strings.Contains(outcome.Reply, "did not work") {
+		t.Fatalf("reply = %q, want it to say the follow-up failed", outcome.Reply)
+	}
+	// The file the patch created is still there.
+	if _, err := os.Stat(filepath.Join(root, "fr.json")); err != nil {
+		t.Fatalf("the change was thrown away: %v", err)
+	}
+}
+
+func TestAChangeWithNothingToRunRunsNothing(t *testing.T) {
+	root := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			writeOutputText(writer, `{"action":"code","reply":"","command":"","relevant":[],"context":""}`)
+		case "code_change":
+			payload, _ := json.Marshal(Change{
+				Summary: "Renamed it",
+				Diff:    "*** Begin Patch\n*** Add File: note.txt\n+hi\n*** End Patch",
+			})
+			writeOutputText(writer, string(payload))
+		}
+	}))
+	defer server.Close()
+
+	commander := &fakeCommander{}
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(client, &repo.Repository{Root: root}).Commands(commander)
+	if _, err := runner.Run(context.Background(), "rename it", nil, &recordingProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(commander.scripts) != 0 {
+		t.Fatalf("nothing should have run: %q", commander.scripts)
 	}
 }

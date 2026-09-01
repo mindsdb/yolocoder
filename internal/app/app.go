@@ -25,10 +25,15 @@ Usage:
                                   folder, so this is how a script supplies
                                   what an interactive session would recall.
   yolocoder --allow-commands <task>
-                                  run a generated command without asking
-                                  first. Without it, a command is shown
+                                  run any generated command without
+                                  asking. By default a command that only
+                                  reads, and stays inside this folder,
+                                  runs on its own; anything else is shown
                                   and confirmed, and a run with nobody at
                                   the terminal will not run one at all.
+  yolocoder --confirm-commands <task>
+                                  ask about every command, read-only ones
+                                  included.
   yolocoder --llm-from-env-vars <task>
                                   use OPENAI_* environment variables
   yolocoder config show           show the saved provider

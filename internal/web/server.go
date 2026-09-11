@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -125,22 +126,23 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 func (server *Server) prepareProject(ctx context.Context) error {
 	switch {
 	case looksEmpty(server.root):
-		server.hub.publish("chat", chatMessage{Role: "system",
-			Text: "Empty folder: scaffolding a Node/React/Tailwind/Drizzle+SQLite starter."})
+		server.announce("Setting up a new project in " + server.root)
+		server.announce("Empty folder: scaffolding a Node/React/Tailwind/Drizzle+SQLite starter...")
 		if err := scaffoldProject(server.root); err != nil {
 			return fmt.Errorf("scaffold project: %w", err)
 		}
+		server.announce("Project files written.")
 		if err := server.npmInstall(ctx); err != nil {
-			server.hub.publish("chat", chatMessage{Role: "system", Text: "npm install failed: " + err.Error()})
+			server.announce("npm install failed: " + err.Error())
 		}
 		return nil
 	case isYolocoderProject(server.root):
 		if !scriptsExist(server.root) {
-			server.hub.publish("chat", chatMessage{Role: "system",
-				Text: "Restoring scripts/start.sh, restart.sh and stop.sh."})
+			server.announce("Setting up this project: scripts/start.sh, restart.sh and stop.sh are missing, restoring them...")
 			if err := restoreScripts(server.root); err != nil {
 				return fmt.Errorf("restore scripts: %w", err)
 			}
+			server.announce("Scripts restored.")
 		}
 		return nil
 	default:
@@ -150,23 +152,73 @@ func (server *Server) prepareProject(ctx context.Context) error {
 	}
 }
 
+// announce reports a first-time setup step to whatever is watching. The
+// terminal is the only thing listening at this point in Serve — no
+// browser tab has connected yet, and setup can take a while (an npm
+// install especially) — so this prints there directly rather than relying
+// solely on the SSE hub, while still publishing to it for a tab that
+// happens to connect while setup is still running.
+func (server *Server) announce(text string) {
+	fmt.Println("[^_^] " + text)
+	server.hub.publish("chat", chatMessage{Role: "system", Text: text})
+}
+
+// lineStreamer turns a writer of arbitrary byte chunks (an exec.Cmd's
+// Stdout/Stderr, in particular) into a callback per complete line, so
+// long-running output like npm install's can be shown as it happens
+// instead of dumped all at once when the command finally exits.
+type lineStreamer struct {
+	onLine func(string)
+	buffer []byte
+}
+
+func (streamer *lineStreamer) Write(chunk []byte) (int, error) {
+	streamer.buffer = append(streamer.buffer, chunk...)
+	for {
+		index := bytes.IndexByte(streamer.buffer, '\n')
+		if index < 0 {
+			break
+		}
+		streamer.onLine(string(bytes.TrimRight(streamer.buffer[:index], "\r")))
+		streamer.buffer = streamer.buffer[index+1:]
+	}
+	return len(chunk), nil
+}
+
+// flush reports whatever's left unterminated once the command has
+// exited, so a final line without a trailing newline isn't dropped.
+func (streamer *lineStreamer) flush() {
+	if len(streamer.buffer) > 0 {
+		streamer.onLine(string(streamer.buffer))
+		streamer.buffer = nil
+	}
+}
+
 func (server *Server) npmInstall(ctx context.Context) error {
 	if _, err := os.Stat(filepath.Join(server.root, "package.json")); err != nil {
 		return nil
 	}
+	server.announce("Installing dependencies (npm install)...")
 	server.hub.publish("status", map[string]string{"text": "Installing dependencies (npm install)..."})
 	defer server.hub.publish("status", map[string]string{"text": ""})
+
+	streamer := &lineStreamer{onLine: func(line string) {
+		if line == "" {
+			return
+		}
+		fmt.Println("  " + line)
+		server.hub.publish("log", map[string]string{"text": line})
+	}}
 	command := exec.CommandContext(ctx, "npm", "install")
 	command.Dir = server.root
-	output, err := command.CombinedOutput()
-	for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
-		if line != "" {
-			server.hub.publish("log", map[string]string{"text": line})
-		}
-	}
+	command.Stdout = streamer
+	command.Stderr = streamer
+	err := command.Run()
+	streamer.flush()
 	if err != nil {
-		return fmt.Errorf("%w", err)
+		return err
 	}
+	server.announce("Dependencies installed.")
 	return nil
 }
 

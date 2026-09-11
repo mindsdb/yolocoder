@@ -60,6 +60,9 @@ type Server struct {
 // server down cleanly. initialTask, if non-empty, is submitted as the
 // first chat message right away.
 func Serve(ctx context.Context, provider config.LLM, port int, initialTask string) error {
+	if err := ensureNode(); err != nil {
+		return err
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -112,11 +115,16 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	return httpServer.Shutdown(shutdownCtx)
 }
 
-// prepareProject makes sure there is something for the UI to run: a fresh
-// scaffold on an empty folder, or scripts/{start,restart,stop}.sh written
-// by the agent itself on an existing one.
+// prepareProject makes sure there is something for the UI to run. For
+// now, --web only knows how to work with two kinds of folder: an empty
+// one, which it scaffolds from scratch, or one it scaffolded earlier,
+// identified by yolocoder.json. Anything else is refused rather than
+// guessed at: finding an arbitrary existing project's dev command is a
+// judgment call an agent can get wrong, and this is exactly the wrong
+// place for that to surface as a confusing failure.
 func (server *Server) prepareProject(ctx context.Context) error {
-	if looksEmpty(server.root) {
+	switch {
+	case looksEmpty(server.root):
 		server.hub.publish("chat", chatMessage{Role: "system",
 			Text: "Empty folder: scaffolding a Node/React/Tailwind/Drizzle+SQLite starter."})
 		if err := scaffoldProject(server.root); err != nil {
@@ -126,15 +134,20 @@ func (server *Server) prepareProject(ctx context.Context) error {
 			server.hub.publish("chat", chatMessage{Role: "system", Text: "npm install failed: " + err.Error()})
 		}
 		return nil
-	}
-	if !scriptsExist(server.root) {
-		server.hub.publish("chat", chatMessage{Role: "system",
-			Text: "Writing scripts/start.sh, restart.sh and stop.sh for this project..."})
-		if _, err := server.runTask(ctx, existingProjectScriptsTask, "system"); err != nil {
-			return fmt.Errorf("write start/restart/stop scripts: %w", err)
+	case isYolocoderProject(server.root):
+		if !scriptsExist(server.root) {
+			server.hub.publish("chat", chatMessage{Role: "system",
+				Text: "Restoring scripts/start.sh, restart.sh and stop.sh."})
+			if err := restoreScripts(server.root); err != nil {
+				return fmt.Errorf("restore scripts: %w", err)
+			}
 		}
+		return nil
+	default:
+		return fmt.Errorf("this folder isn't empty and wasn't created by yolocoder --web\n\n" +
+			"For now, yolocoder --web only works in an empty folder (to scaffold a new project) or a " +
+			"folder yolocoder already scaffolded. Run it somewhere empty, or point it at a project it created.")
 	}
-	return nil
 }
 
 func (server *Server) npmInstall(ctx context.Context) error {
@@ -360,32 +373,3 @@ func listen(port int) (net.Listener, int, error) {
 	}
 	return listener, listener.Addr().(*net.TCPAddr).Port, nil
 }
-
-// existingProjectScriptsTask is fed through the normal agent loop, so the
-// scripts it writes land as a reviewable diff like any other change,
-// rather than through a special-cased file-writing path in this package.
-const existingProjectScriptsTask = `This project has no scripts/start.sh, scripts/restart.sh or ` +
-	`scripts/stop.sh yet. Inspect package.json (or this project's equivalent) to find its dev command, ` +
-	`then create all three so yolocoder --web can drive them. Follow this contract exactly:
-
-A ".yolocoder/web" directory holds the running dev server's state; create it if missing
-(mkdir -p .yolocoder/web).
-
-scripts/start.sh: if .yolocoder/web/server.pid names a process that is still running, do nothing.
-Otherwise launch the project's dev server backgrounded and detached so it outlives this script, for
-example:
-  mkdir -p .yolocoder/web
-  nohup npm run dev > .yolocoder/web/server.log 2>&1 &
-  echo $! > .yolocoder/web/server.pid
-Then write the port the dev server ends up listening on to .yolocoder/web/port, just the number. If
-the port is fixed by the project's own config, write it directly; if it's only known once the server
-has actually bound it, wait briefly and read it back out of server.log.
-
-scripts/stop.sh: read the pid from .yolocoder/web/server.pid, and if it names a running process,
-signal its process group (kill -TERM -$pid, falling back to kill $pid) so anything it spawned stops
-too, then remove server.pid. Do nothing if there is no pid file or the process is already gone.
-
-scripts/restart.sh: call stop.sh then start.sh.
-
-All three must be POSIX sh, marked executable, and safe to run more than once and by hand from a
-plain terminal, not only from this tool.`

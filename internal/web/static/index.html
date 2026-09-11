@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>YoloCoder</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header id="topbar">
+  <span id="brand">[^_^] YoloCoder</span>
+  <span id="process-state" class="pill pill-stopped">stopped</span>
+  <div id="process-controls">
+    <button id="btn-start" type="button">Start</button>
+    <button id="btn-restart" type="button">Restart</button>
+    <button id="btn-stop" type="button">Stop</button>
+  </div>
+</header>
+<main>
+  <section id="sidebar">
+    <div id="chat-log"></div>
+    <details id="console">
+      <summary>Console</summary>
+      <div id="console-log"></div>
+    </details>
+    <form id="chat-form">
+      <textarea id="chat-input" placeholder="Ask for a change..." rows="2"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+  <section id="preview">
+    <iframe id="app-frame" src="/app/" title="Your app"></iframe>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

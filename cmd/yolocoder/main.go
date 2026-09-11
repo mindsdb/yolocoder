@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/app"
@@ -16,6 +18,7 @@ import (
 	"github.com/mindsdb/yolocoder/internal/ui"
 	"github.com/mindsdb/yolocoder/internal/update"
 	"github.com/mindsdb/yolocoder/internal/version"
+	"github.com/mindsdb/yolocoder/internal/web"
 )
 
 func main() {
@@ -86,12 +89,29 @@ func main() {
 		args = args[1:]
 	}
 
+	useWeb, port, args, err := app.ParseWeb(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("\x1b[36m[^_^] YoloCoder %s\x1b[0m  \x1b[2m%s\x1b[0m\n", version.Display(), app.Folder())
 
 	provider, err := app.Provider(fromEnvironment)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	if useWeb {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		task := strings.TrimSpace(strings.Join(args, " "))
+		if err := web.Serve(ctx, provider, port, task); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Turns are recorded per folder so a later run can be told what has

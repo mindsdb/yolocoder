@@ -25,6 +25,34 @@ reads, the searches it runs, the plan, the patch, and the test result — so
 the finished session leaves a readable trail rather than a single status
 line that overwrites itself.
 
+## Web UI
+
+```sh
+yolocoder --web
+yolocoder --web "build a todo app"   # empty folder: scaffold, then run this first
+yolocoder --web --port 8080
+```
+
+Serves a local page with chat on one side and a live preview of the app in
+an iframe on the other, backed by the same agent loop the terminal uses.
+
+On an empty folder, it scaffolds a small starter (Vite + React + Tailwind on
+the frontend, Express + Drizzle + SQLite on the backend) before opening the
+UI. On an existing project without them yet, it asks the agent to write
+`scripts/start.sh`, `scripts/restart.sh` and `scripts/stop.sh` — the same
+three commands the UI's own Start/Restart/Stop buttons call, and safe to run
+by hand from a terminal too. `start.sh` is expected to launch the dev
+server backgrounded and detached, and report its port and log through
+`.yolocoder/web/`.
+
+The preview is reverse-proxied rather than pointed straight at the dev
+server, so a small script can be injected into it that reports uncaught
+errors and unhandled promise rejections back to the chat. Combined with the
+dev server's own log, a server-side or browser-side error while the app is
+running is turned into a task and fixed automatically, then the dev server
+is restarted — up to two attempts per distinct error, after which it's left
+for you instead of retried forever.
+
 ## Debugging
 
 When a provider returns something unexpected, `/debug` in a session shows

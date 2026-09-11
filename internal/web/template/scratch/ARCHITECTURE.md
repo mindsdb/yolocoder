@@ -34,3 +34,10 @@ it.
 Both dev servers reload on their own when a file changes — Vite's HMR for
 `frontend/`, `tsx watch` restarting for `backend/`. Nothing here needs to
 be told to restart by hand for either.
+
+`npm test` runs `tsc --noEmit` — fast, no test files required, and real:
+yolocoder runs this after every change it makes, so it needs to exist and
+pass from the start rather than be invented mid-task. Replace it with a
+real test runner once there's something worth testing that a type check
+alone won't catch; just keep `npm test` meaning something, since every
+change is checked against it.

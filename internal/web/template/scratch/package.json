@@ -7,6 +7,7 @@
     "dev:client": "vite --config frontend/vite.config.ts --port 5173 --strictPort",
     "dev:server": "tsx watch backend/index.ts",
     "build": "vite build --config frontend/vite.config.ts",
+    "test": "tsc --noEmit",
     "db:push": "drizzle-kit push --config backend/drizzle.config.ts"
   },
   "dependencies": {

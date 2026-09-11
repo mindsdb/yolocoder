@@ -3,6 +3,7 @@ package web
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -60,7 +61,10 @@ func TestScaffoldProjectWritesTheScriptsExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode()&0o111 == 0 {
+	// NTFS has no POSIX executable bit, so os.FileMode on Windows never
+	// reflects what was passed to WriteFile; the check only means anything
+	// on a filesystem that tracks it.
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatal("start.sh should be executable")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {

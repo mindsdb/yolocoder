@@ -27,11 +27,15 @@ function addConsoleLine(text) {
   consoleLog.parentElement.scrollTop = consoleLog.parentElement.scrollHeight;
 }
 
-// Chat history so far, so a tab opened mid-session isn't staring at a
-// blank pane.
-fetch("/history")
+// The app being built is proxied on its own dedicated port, chosen fresh
+// each run, so it can't be hardcoded into the iframe's src up front.
+let appProxyOrigin = null;
+fetch("/config")
   .then((response) => response.json())
-  .then((messages) => (messages || []).forEach((m) => addMessage(m.role, m.text)))
+  .then((config) => {
+    appProxyOrigin = "http://localhost:" + config.appProxyPort;
+    appFrame.src = appProxyOrigin + "/";
+  })
   .catch(() => {});
 
 const events = new EventSource("/events");
@@ -57,10 +61,10 @@ events.addEventListener("process", (event) => {
   const data = JSON.parse(event.data);
   processState.textContent = data.state;
   processState.className = "pill pill-" + data.state;
-  if (data.state === "running") {
-    // A fresh dev server after a restart is still the same URL; force a
-    // reload so the iframe doesn't keep showing a torn-down page.
-    appFrame.src = "/app/?t=" + Date.now();
+  if (data.state === "running" && appProxyOrigin) {
+    // A fresh dev server after a restart is still the same proxy URL;
+    // force a reload so the iframe doesn't keep showing a torn-down page.
+    appFrame.src = appProxyOrigin + "/?t=" + Date.now();
   }
 });
 

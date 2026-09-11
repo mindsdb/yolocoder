@@ -2,10 +2,39 @@ package web
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestConfigReportsTheAppProxyPortAndHistoryIsGone(t *testing.T) {
+	server := &Server{root: t.TempDir(), hub: newHub(), appProxyPort: 54321}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	request := httptest.NewRequest(http.MethodGet, "/config", nil)
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("/config: got status %d", recorder.Code)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, "54321") {
+		t.Fatalf("/config should report the app proxy port, got %q", body)
+	}
+
+	// The chat pane no longer replays a folder's whole recorded backlog
+	// as a transcript (see the comment on handleConfig): there is nothing
+	// left at /history to serve it from.
+	request = httptest.NewRequest(http.MethodGet, "/history", nil)
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("/history should be gone, got status %d", recorder.Code)
+	}
+}
 
 func TestPrepareProjectRejectsAForeignExistingProject(t *testing.T) {
 	dir := t.TempDir()

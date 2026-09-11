@@ -50,6 +50,13 @@ type Server struct {
 	watcher *errorWatcher
 	guard   autoFixGuard
 
+	// appProxyPort is the app proxy's own listener port (see
+	// newAppProxy), set once before the HTTP servers start accepting
+	// connections and read-only after — the "go" statement that starts
+	// serving is itself the happens-before edge that makes this safe
+	// without a mutex.
+	appProxyPort int
+
 	// turnMutex serializes agent runs: Runner.Run patches and tests the
 	// working tree, which is not safe to do from two tasks at once (a
 	// chat message arriving mid auto-fix, for instance).
@@ -80,6 +87,17 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	if err := server.prepareProject(ctx); err != nil {
 		return err
 	}
+
+	// The app being built gets its own dedicated listener, on its own
+	// port chosen fresh each run: see the comment on newAppProxy for why
+	// it can't share a path prefix on the main UI's own server.
+	appListener, appPort, err := listenAny()
+	if err != nil {
+		return fmt.Errorf("listen (app proxy): %w", err)
+	}
+	server.appProxyPort = appPort
+	appProxyServer := &http.Server{Handler: newAppProxy(server.proc.Port)}
+	go appProxyServer.Serve(appListener)
 
 	listener, actualPort, err := listen(port)
 	if err != nil {
@@ -113,6 +131,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.proc.Stop(shutdownCtx)
+	_ = appProxyServer.Shutdown(shutdownCtx)
 	return httpServer.Shutdown(shutdownCtx)
 }
 
@@ -228,32 +247,28 @@ func (server *Server) routes(mux *http.ServeMux) {
 		panic(err) // embedded at build time; a missing "static" dir is a build-time bug
 	}
 	mux.Handle("/", http.FileServer(http.FS(staticRoot)))
-	mux.HandleFunc("/history", server.handleHistory)
+	mux.HandleFunc("/config", server.handleConfig)
 	mux.Handle("/events", server.hub)
 	mux.HandleFunc("/chat", server.handleChat)
 	mux.HandleFunc("/client-error", server.handleClientError)
 	mux.HandleFunc("/process/start", server.handleProcess("start"))
 	mux.HandleFunc("/process/restart", server.handleProcess("restart"))
 	mux.HandleFunc("/process/stop", server.handleProcess("stop"))
-	mux.Handle("/app/", newAppProxy(server.proc.Port))
 }
 
-// handleHistory replays what this folder was already asked, so a browser
-// tab opened after work has started still shows the conversation so far.
-// Live progress (the Status/Log trail of a run in flight) is not replayed;
-// only /events carries that, same trade-off as the terminal's own history.
-func (server *Server) handleHistory(response http.ResponseWriter, request *http.Request) {
-	turns, _ := session.Recent(server.root)
-	messages := make([]chatMessage, 0, len(turns)*2)
-	for _, turn := range turns {
-		if turn.Message != "" {
-			messages = append(messages, chatMessage{Role: "user", Text: turn.Message})
-		}
-		if turn.Summary != "" {
-			messages = append(messages, chatMessage{Role: "assistant", Text: turn.Summary})
-		}
-	}
-	writeJSON(response, messages)
+// handleConfig tells the page which port the app proxy ended up on, so
+// app.js can point the iframe at it — it's chosen fresh each run (see
+// listenAny), so it can't just be hardcoded into the static HTML.
+//
+// The chat pane deliberately does *not* replay this folder's whole
+// recorded history on load: session.Recent exists to give the agent
+// context to reason from, not to be replayed verbatim as a transcript,
+// and a folder used across many separate --web runs (or from the plain
+// terminal too) accumulates turns that read as a confusing, unrelated
+// backlog rather than one conversation. Each run starts its visible chat
+// pane fresh; only what happens in *this* run streams in over /events.
+func (server *Server) handleConfig(response http.ResponseWriter, request *http.Request) {
+	writeJSON(response, map[string]int{"appProxyPort": server.appProxyPort})
 }
 
 type chatRequest struct {
@@ -416,12 +431,18 @@ func listen(port int) (net.Listener, int, error) {
 	if port == 0 {
 		port = DefaultPort
 	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+		return listener, port, nil
+	}
+	return listenAny()
+}
+
+// listenAny always picks an OS-assigned free port, for a listener (the
+// app proxy's) that has no fixed default worth trying first.
+func listenAny() (net.Listener, int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, 0, err
-		}
+		return nil, 0, err
 	}
 	return listener, listener.Addr().(*net.TCPAddr).Port, nil
 }

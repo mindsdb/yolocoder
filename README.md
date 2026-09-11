@@ -51,12 +51,22 @@ those scripts ever go missing from a yolocoder project, `--web` restores
 just them, leaving the rest of the project untouched.
 
 The preview is reverse-proxied rather than pointed straight at the dev
-server, so a small script can be injected into it that reports uncaught
-errors and unhandled promise rejections back to the chat. Combined with the
-dev server's own log, a server-side or browser-side error while the app is
+server — on its own dedicated port, at the root of its own origin, since a
+dev server's own absolute asset paths (Vite's `/src/main.tsx`, for example)
+are written assuming they own the whole origin and resolve wrongly if
+mounted under a path prefix instead. Being proxied is also what lets a
+small script be injected into the page that reports uncaught errors and
+unhandled promise rejections back to the chat. Combined with the dev
+server's own log, a server-side or browser-side error while the app is
 running is turned into a task and fixed automatically, then the dev server
 is restarted — up to two attempts per distinct error, after which it's left
 for you instead of retried forever.
+
+Each run's chat pane starts fresh rather than replaying this folder's whole
+recorded history: that history exists to give the agent context to reason
+from, not to be shown verbatim as a transcript, and a folder used across
+many separate runs (or from the plain terminal too) accumulates turns that
+read as a confusing backlog rather than one conversation.
 
 ## Debugging
 

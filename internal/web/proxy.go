@@ -25,22 +25,25 @@ window.addEventListener("unhandledrejection", function(event){
 });
 })();</script>`
 
-// newAppProxy reverse-proxies /app/ onto the dev server's own port, which
-// port learns from portFn each request since a restart can change it. It
-// rewrites HTML responses to inject the shim above and otherwise passes
-// everything through untouched, including WebSocket upgrades: Vite's own
-// HMR socket needs to reach the real dev server for hot reload to work,
-// and httputil.ReverseProxy forwards a hijacked connection as-is.
+// newAppProxy reverse-proxies onto the dev server's own port, which it
+// learns from portFn each request since a restart can change it. It's
+// mounted at the root of its own dedicated listener (see appProxyPort in
+// server.go) rather than under a path prefix like /app/ on the main UI's
+// server: a dev server's own absolute asset paths (Vite's /src/main.tsx,
+// /@vite/client, and so on) are written assuming they own the whole
+// origin, and resolve against the wrong place — the main UI's origin, not
+// the proxy's — if loaded from under a sub-path instead.
+//
+// It rewrites HTML responses to inject the shim above and otherwise
+// passes everything through untouched, including WebSocket upgrades:
+// Vite's own HMR socket needs to reach the real dev server for hot reload
+// to work, and httputil.ReverseProxy forwards a hijacked connection as-is.
 func newAppProxy(portFn func() int) http.Handler {
 	proxy := &httputil.ReverseProxy{
 		Director: func(request *http.Request) {
 			port := portFn()
 			request.URL.Scheme = "http"
 			request.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
-			request.URL.Path = strings.TrimPrefix(request.URL.Path, "/app")
-			if request.URL.Path == "" {
-				request.URL.Path = "/"
-			}
 			// The proxy rewrites the body of an HTML response, so it must
 			// arrive uncompressed to rewrite; a real client's own
 			// Accept-Encoding would otherwise get a gzip stream back.

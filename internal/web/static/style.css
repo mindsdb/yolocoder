@@ -1,0 +1,121 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1a1a1a;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e3e3e3;
+  flex: 0 0 auto;
+}
+#brand { font-weight: 600; }
+#process-controls { margin-left: auto; display: flex; gap: 6px; }
+#process-controls button {
+  border: 1px solid #d6d6d6;
+  background: #fafafa;
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+#process-controls button:hover { background: #f0f0f0; }
+
+.pill {
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  text-transform: capitalize;
+}
+.pill-stopped { background: #eee; color: #555; }
+.pill-starting { background: #fff3cd; color: #8a6500; }
+.pill-running { background: #d9f2e3; color: #1a7a41; }
+.pill-error { background: #fbdada; color: #a3241c; }
+
+main { flex: 1 1 auto; display: flex; min-height: 0; }
+
+#sidebar {
+  width: 380px;
+  flex: 0 0 380px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #e3e3e3;
+  min-height: 0;
+}
+
+#chat-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg {
+  padding: 8px 10px;
+  border-radius: 8px;
+  max-width: 92%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg-user { align-self: flex-end; background: #1a1a1a; color: #fff; }
+.msg-assistant { align-self: flex-start; background: #f1f1f1; }
+.msg-system { align-self: stretch; background: #fff7e0; color: #6b5300; font-size: 13px; }
+.msg-auto-fix { align-self: stretch; background: #fde8e8; color: #7a1f1f; font-size: 13px; }
+
+#console {
+  flex: 0 0 auto;
+  border-top: 1px solid #e3e3e3;
+  max-height: 160px;
+  overflow-y: auto;
+}
+#console summary {
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #666;
+}
+#console-log {
+  padding: 0 12px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #444;
+  white-space: pre-wrap;
+}
+
+#chat-form {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid #e3e3e3;
+}
+#chat-input {
+  flex: 1;
+  resize: none;
+  border: 1px solid #d6d6d6;
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+}
+#chat-form button {
+  border: none;
+  background: #1a1a1a;
+  color: #fff;
+  border-radius: 6px;
+  padding: 0 16px;
+  cursor: pointer;
+  font: inherit;
+}
+
+#preview { flex: 1 1 auto; min-width: 0; }
+#app-frame { width: 100%; height: 100%; border: 0; background: #fff; }

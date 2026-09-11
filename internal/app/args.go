@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/agent"
@@ -78,6 +79,38 @@ func appendNote(notes []string, note string) []string {
 		return notes
 	}
 	return append(notes, note)
+}
+
+const webFlag = "--web"
+const portFlag = "--port"
+
+// ParseWeb pulls --web and --port out of args, wherever they appear, and
+// returns whatever remains. Unlike --context, order doesn't carry meaning
+// here, so both are recognized anywhere rather than only at args[0]. port
+// is 0 when --port wasn't given, meaning "use the default."
+func ParseWeb(args []string) (useWeb bool, port int, rest []string, err error) {
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case argument == webFlag:
+			useWeb = true
+		case argument == portFlag:
+			if index+1 >= len(args) {
+				return false, 0, nil, fmt.Errorf("%s needs a value", portFlag)
+			}
+			index++
+			if port, err = strconv.Atoi(args[index]); err != nil {
+				return false, 0, nil, fmt.Errorf("%s must be a number: %w", portFlag, err)
+			}
+		case strings.HasPrefix(argument, portFlag+"="):
+			if port, err = strconv.Atoi(strings.TrimPrefix(argument, portFlag+"=")); err != nil {
+				return false, 0, nil, fmt.Errorf("%s must be a number: %w", portFlag, err)
+			}
+		default:
+			rest = append(rest, argument)
+		}
+	}
+	return useWeb, port, rest, nil
 }
 
 // Notes turns --context values into what the agent takes. They carry no

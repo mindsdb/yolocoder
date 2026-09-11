@@ -26,6 +26,10 @@ Usage:
                                   what an interactive session would recall.
   yolocoder --llm-from-env-vars <task>
                                   use OPENAI_* environment variables
+  yolocoder --web [<task>]        serve a web UI: chat beside a live preview
+                                  of the app, with server and browser errors
+                                  fed back to the agent automatically
+  yolocoder --web --port <n>      use a specific port for the web UI
   yolocoder config show           show the saved provider
   yolocoder config connect        replace the saved provider
   yolocoder config reset          remove the saved provider

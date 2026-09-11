@@ -2,18 +2,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
+// This file lives in frontend/, and "root" is set to that same directory
+// (not left to default to wherever the command is invoked from) so Vite
+// finds frontend/index.html regardless of what directory start.sh runs
+// it from.
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
-// The dev port is fixed rather than left to Vite to pick, since
-// scripts/start.sh writes it straight to .yolocoder/web/port without
-// having to parse it back out of Vite's own startup banner.
-//
-// The "@" alias also needs to be declared here, not just in
-// tsconfig.json: the tsconfig path only satisfies the type checker, but
-// Vite resolves imports at runtime through its own config.
 export default defineConfig({
-  plugins: [react()],
+  root: rootDir,
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(rootDir, "src"),

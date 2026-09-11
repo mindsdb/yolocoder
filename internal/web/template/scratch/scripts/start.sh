@@ -16,10 +16,10 @@ fi
 
 : > .yolocoder/web/server.log
 
-nohup node_modules/.bin/tsx watch server/index.ts >> .yolocoder/web/server.log 2>&1 &
+nohup node_modules/.bin/tsx watch backend/index.ts >> .yolocoder/web/server.log 2>&1 &
 api_pid=$!
 
-nohup node_modules/.bin/vite --port 5173 --strictPort >> .yolocoder/web/server.log 2>&1 &
+nohup node_modules/.bin/vite --config frontend/vite.config.ts --port 5173 --strictPort >> .yolocoder/web/server.log 2>&1 &
 web_pid=$!
 
 printf '%s\n%s\n' "$web_pid" "$api_pid" > .yolocoder/web/server.pid

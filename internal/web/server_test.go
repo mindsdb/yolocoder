@@ -136,7 +136,7 @@ func TestPrepareProjectLeavesAnIntactYolocoderProjectAlone(t *testing.T) {
 	if err := scaffoldProject(dir); err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(dir, "src", "App.tsx")
+	marker := filepath.Join(dir, "frontend", "src", "App.tsx")
 	original, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,5 @@
 import express from "express";
-import { db } from "./db/client";
-import { notes } from "./db/schema";
+import { db, notes } from "./db";
 
 const app = express();
 app.use(express.json());

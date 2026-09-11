@@ -68,7 +68,7 @@ func TestRestoreScriptsOnlyTouchesScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate the user's own edit to the app surviving a script repair.
-	appPath := filepath.Join(dir, "src", "App.tsx")
+	appPath := filepath.Join(dir, "frontend", "src", "App.tsx")
 	if err := os.WriteFile(appPath, []byte("// edited by the user"), 0o644); err != nil {
 		t.Fatal(err)
 	}

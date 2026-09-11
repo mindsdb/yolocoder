@@ -39,16 +39,22 @@ It needs Node.js; if it isn't on your PATH, you're offered an install
 before anything else runs.
 
 For now, `--web` only works in two kinds of folder: an empty one, which it
-scaffolds a small starter into (Vite + React + Tailwind on the frontend,
-Express + Drizzle + SQLite on the backend), or one it already scaffolded
-(marked by a `yolocoder.json` at its root). Anything else is refused
-rather than guessed at. The scaffold's `scripts/start.sh`,
-`scripts/restart.sh` and `scripts/stop.sh` are safe to run by hand from a
-terminal; `start.sh` launches the dev server backgrounded and detached
-(it starts automatically when `--web` does), and reports its port and log
-through `.yolocoder/web/`. If those scripts ever go missing from a
-yolocoder project, `--web` restores just them, leaving the rest of the
-project untouched. Type `exit` or `quit` into the terminal `--web` is
+scaffolds a small starter into, or one it already scaffolded (marked by a
+`yolocoder.json` at its root). Anything else is refused rather than
+guessed at. The starter is `frontend/` (Vite + React + Tailwind v4) and
+`backend/` (Express + Drizzle + better-sqlite3) as two dev servers in one
+`package.json` — see the scaffold's own `ARCHITECTURE.md` for the exact
+layout. It's shadcn-ready (`components.json`, the right path aliases, the
+theme already in `frontend/src/index.css`) but ships no UI primitives:
+`npx shadcn@latest add <component>` installs whatever a component needs
+the first time one is actually added, rather than a `Button` sitting
+unused in every fresh project. `scripts/start.sh`, `scripts/restart.sh`
+and `scripts/stop.sh` are safe to run by hand from a terminal; `start.sh`
+launches both dev servers backgrounded and detached (they start
+automatically when `--web` does), and reports the frontend's port and
+combined log through `.yolocoder/web/`. If those scripts ever go missing
+from a yolocoder project, `--web` restores just them, leaving the rest of
+the project untouched. Type `exit` or `quit` into the terminal `--web` is
 running in (or Ctrl+C) to stop it.
 
 The preview is reverse-proxied rather than pointed straight at the dev

@@ -1,5 +1,6 @@
 const chatLog = document.getElementById("chat-log");
-const consoleLog = document.getElementById("console-log");
+const agentConsoleLog = document.getElementById("agent-console-log");
+const serverConsoleLog = document.getElementById("server-console-log");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const chatSend = document.getElementById("chat-send");
@@ -8,6 +9,9 @@ const appFrame = document.getElementById("app-frame");
 const busyIndicator = document.getElementById("busy-indicator");
 const busyText = document.getElementById("busy-text");
 const reviewNote = document.getElementById("review-note");
+const sidebar = document.getElementById("sidebar");
+const btnCollapse = document.getElementById("btn-collapse");
+const btnExpand = document.getElementById("btn-expand");
 
 // The three-step loop this UI reflects: build (the agent works), load
 // (the iframe picks up what changed), review (the dev server's log is
@@ -29,6 +33,12 @@ function setBusy(isBusy) {
 
 function updateReviewNote() {
   reviewNote.hidden = busy || processState.textContent !== "running";
+}
+
+function setProcessState(state) {
+  processState.textContent = state;
+  processState.className = "pill pill-" + state;
+  updateReviewNote();
 }
 
 function addMessage(role, text) {
@@ -58,9 +68,9 @@ function firstLine(text) {
   return "(click to expand)";
 }
 
-function addConsoleLine(text) {
-  consoleLog.textContent += text + "\n";
-  consoleLog.parentElement.scrollTop = consoleLog.parentElement.scrollHeight;
+function addLine(container, text) {
+  container.textContent += text + "\n";
+  container.parentElement.scrollTop = container.parentElement.scrollHeight;
 }
 
 function reloadApp() {
@@ -79,7 +89,25 @@ fetch("/config")
   })
   .catch(() => {});
 
+// The ground truth behind busy/phase/process, fetched whenever the SSE
+// connection below (re)opens. A one-shot event a tab happens to miss —
+// a reconnect during a long build, a tab opened mid-task — would
+// otherwise leave the UI stuck showing whatever it last knew, forever;
+// this is what lets it catch up instead.
+function resyncState() {
+  fetch("/state")
+    .then((response) => response.json())
+    .then((state) => {
+      currentPhase = state.phase || null;
+      if (currentPhase) busyText.textContent = phaseLabels[currentPhase] || currentPhase;
+      setBusy(!!state.busy);
+      if (state.process) setProcessState(state.process);
+    })
+    .catch(() => {});
+}
+
 const events = new EventSource("/events");
+events.addEventListener("open", resyncState);
 events.addEventListener("chat", (event) => {
   const data = JSON.parse(event.data);
   addMessage(data.role, data.text);
@@ -90,7 +118,7 @@ events.addEventListener("phase", (event) => {
 });
 events.addEventListener("status", (event) => {
   const data = JSON.parse(event.data);
-  if (data.text) addConsoleLine("… " + data.text);
+  if (data.text) addLine(agentConsoleLog, "… " + data.text);
   // The agent's own fine-grained status ("reading your message...",
   // "applying the patch...") is more informative than the coarse "build"
   // label while it's the one actually running.
@@ -100,10 +128,10 @@ events.addEventListener("busy", (event) => {
   setBusy(JSON.parse(event.data).busy);
 });
 events.addEventListener("log", (event) => {
-  addConsoleLine(JSON.parse(event.data).text);
+  addLine(agentConsoleLog, JSON.parse(event.data).text);
 });
 events.addEventListener("serverlog", (event) => {
-  addConsoleLine(JSON.parse(event.data).text);
+  addLine(serverConsoleLog, JSON.parse(event.data).text);
 });
 // Fired after any applied change, whatever's running the dev server on
 // its own (Vite HMR, tsx watch) can't be relied on to have visibly
@@ -111,9 +139,7 @@ events.addEventListener("serverlog", (event) => {
 events.addEventListener("reload", reloadApp);
 events.addEventListener("process", (event) => {
   const data = JSON.parse(event.data);
-  processState.textContent = data.state;
-  processState.className = "pill pill-" + data.state;
-  updateReviewNote();
+  setProcessState(data.state);
   if (data.state === "running") reloadApp();
 });
 
@@ -129,9 +155,14 @@ chatForm.addEventListener("submit", (event) => {
   });
 });
 
-document.getElementById("btn-start").addEventListener("click", () => fetch("/process/start", { method: "POST" }));
-document.getElementById("btn-restart").addEventListener("click", () => fetch("/process/restart", { method: "POST" }));
-document.getElementById("btn-stop").addEventListener("click", () => fetch("/process/stop", { method: "POST" }));
+btnCollapse.addEventListener("click", () => {
+  sidebar.classList.add("collapsed");
+  btnExpand.hidden = false;
+});
+btnExpand.addEventListener("click", () => {
+  sidebar.classList.remove("collapsed");
+  btnExpand.hidden = true;
+});
 
 // The shim injected into the proxied app reports crashes to us via
 // postMessage (it can't reach the yolocoder server directly: it doesn't

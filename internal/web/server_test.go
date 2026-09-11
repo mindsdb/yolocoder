@@ -64,6 +64,39 @@ func TestPrepareProjectRestoresScriptsForAnExistingYolocoderProject(t *testing.T
 	}
 }
 
+func TestStateReflectsSetBusyAndSetPhase(t *testing.T) {
+	dir := t.TempDir()
+	hub := newHub()
+	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	get := func() string {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/state", nil))
+		return recorder.Body.String()
+	}
+
+	if body := get(); !strings.Contains(body, `"busy":false`) {
+		t.Fatalf("expected busy:false initially, got %q", body)
+	}
+
+	server.setBusy(true)
+	server.setPhase("build")
+	body := get()
+	if !strings.Contains(body, `"busy":true`) {
+		t.Fatalf("expected busy:true after setBusy(true), got %q", body)
+	}
+	if !strings.Contains(body, `"phase":"build"`) {
+		t.Fatalf("expected phase:build after setPhase(\"build\"), got %q", body)
+	}
+
+	server.setBusy(false)
+	if body := get(); !strings.Contains(body, `"busy":false`) {
+		t.Fatalf("expected busy:false after setBusy(false), got %q", body)
+	}
+}
+
 func TestLineStreamerSplitsAcrossArbitraryChunkBoundaries(t *testing.T) {
 	var lines []string
 	streamer := &lineStreamer{onLine: func(line string) { lines = append(lines, line) }}

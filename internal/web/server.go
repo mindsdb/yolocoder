@@ -62,6 +62,17 @@ type Server struct {
 	// working tree, which is not safe to do from two tasks at once (a
 	// chat message arriving mid auto-fix, for instance).
 	turnMutex sync.Mutex
+
+	// stateMutex guards busy and phase, the ground truth behind the
+	// "busy"/"phase" SSE events (see setBusy/setPhase). A one-shot event
+	// is exactly that: a browser tab that misses one — a reconnect during
+	// a long build, a dropped event, a tab opened mid-task — has no way
+	// to catch up on its own. /state exposes this so the client can
+	// resync itself whenever its SSE connection (re)opens, rather than
+	// trusting every event to arrive exactly once.
+	stateMutex sync.Mutex
+	busy       bool
+	phase      string
 }
 
 // Serve starts the --web UI for the current folder and blocks until ctx is
@@ -275,6 +286,7 @@ func (server *Server) routes(mux *http.ServeMux) {
 	}
 	mux.Handle("/", http.FileServer(http.FS(staticRoot)))
 	mux.HandleFunc("/config", server.handleConfig)
+	mux.HandleFunc("/state", server.handleState)
 	mux.Handle("/events", server.hub)
 	mux.HandleFunc("/chat", server.handleChat)
 	mux.HandleFunc("/client-error", server.handleClientError)
@@ -296,6 +308,24 @@ func (server *Server) routes(mux *http.ServeMux) {
 // pane fresh; only what happens in *this* run streams in over /events.
 func (server *Server) handleConfig(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, map[string]int{"appProxyPort": server.appProxyPort})
+}
+
+// handleState is the ground truth behind the "busy"/"phase"/"process"
+// SSE events, so a client can resync itself instead of trusting every
+// one-shot event to arrive: an EventSource reconnect during a long build
+// (or a tab that simply missed one) would otherwise leave the UI showing
+// something stale forever, with nothing to correct it. The client fetches
+// this whenever its SSE connection (re)opens.
+func (server *Server) handleState(response http.ResponseWriter, request *http.Request) {
+	server.stateMutex.Lock()
+	busy, phase := server.busy, server.phase
+	server.stateMutex.Unlock()
+	writeJSON(response, map[string]any{
+		"busy":    busy,
+		"phase":   phase,
+		"process": server.proc.State(),
+		"port":    server.proc.Port(),
+	})
 }
 
 type chatRequest struct {
@@ -411,9 +441,9 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	// moment a message is sent, not just once Status/Log lines start
 	// arriving (routing a plain message costs one silent round trip before
 	// the first of those).
-	server.hub.publish("busy", map[string]bool{"busy": true})
-	server.hub.publish("phase", map[string]string{"phase": "build"})
-	defer server.hub.publish("busy", map[string]bool{"busy": false})
+	server.setBusy(true)
+	server.setPhase("build")
+	defer server.setBusy(false)
 
 	server.hub.publish("chat", chatMessage{Role: role, Text: task})
 
@@ -450,8 +480,25 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 // another build → load → review cycle — if the change just applied
 // broke something.
 func (server *Server) reload() {
-	server.hub.publish("phase", map[string]string{"phase": "load"})
+	server.setPhase("load")
 	server.hub.publish("reload", map[string]bool{"reload": true})
+}
+
+// setBusy and setPhase are the only way busy/phase change: they update
+// the ground truth (read back by handleState) and publish the matching
+// SSE event in the same place, so the two can never drift apart.
+func (server *Server) setBusy(busy bool) {
+	server.stateMutex.Lock()
+	server.busy = busy
+	server.stateMutex.Unlock()
+	server.hub.publish("busy", map[string]bool{"busy": busy})
+}
+
+func (server *Server) setPhase(phase string) {
+	server.stateMutex.Lock()
+	server.phase = phase
+	server.stateMutex.Unlock()
+	server.hub.publish("phase", map[string]string{"phase": phase})
 }
 
 // recordTurn mirrors record in cmd/yolocoder/main.go, so a folder's

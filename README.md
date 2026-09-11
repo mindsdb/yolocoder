@@ -43,12 +43,13 @@ scaffolds a small starter into (Vite + React + Tailwind on the frontend,
 Express + Drizzle + SQLite on the backend), or one it already scaffolded
 (marked by a `yolocoder.json` at its root). Anything else is refused
 rather than guessed at. The scaffold's `scripts/start.sh`,
-`scripts/restart.sh` and `scripts/stop.sh` are the same three commands the
-UI's own Start/Restart/Stop buttons call, and safe to run by hand from a
-terminal too; `start.sh` launches the dev server backgrounded and
-detached, and reports its port and log through `.yolocoder/web/`. If
-those scripts ever go missing from a yolocoder project, `--web` restores
-just them, leaving the rest of the project untouched.
+`scripts/restart.sh` and `scripts/stop.sh` are safe to run by hand from a
+terminal; `start.sh` launches the dev server backgrounded and detached
+(it starts automatically when `--web` does), and reports its port and log
+through `.yolocoder/web/`. If those scripts ever go missing from a
+yolocoder project, `--web` restores just them, leaving the rest of the
+project untouched. Type `exit` or `quit` into the terminal `--web` is
+running in (or Ctrl+C) to stop it.
 
 The preview is reverse-proxied rather than pointed straight at the dev
 server — on its own dedicated port, at the root of its own origin, since a
@@ -77,7 +78,14 @@ itself, only makes sure the browser actually shows it; **review** is the
 error watcher, which runs continuously regardless of any one task and
 turns a server or browser error into another build → load → review cycle
 automatically. Long messages in chat (a stack trace, in particular)
-collapse behind a one-line summary — click to expand.
+collapse behind a one-line summary — click to expand. Below the chat log,
+"Agent activity" and "Backend logs" hold the same two things as separate,
+collapsed-by-default sections rather than one blended stream: the agent's
+own step-by-step trail, and the dev server's raw stdout/stderr.
+
+The chat panel — titled with the same `[^_^] YoloCoder` the terminal
+prints at startup — can be collapsed to give the preview the full window;
+a small button in its corner brings it back.
 
 ## Debugging
 

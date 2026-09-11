@@ -35,6 +35,40 @@ func TestPrepareProjectRestoresScriptsForAnExistingYolocoderProject(t *testing.T
 	}
 }
 
+func TestLineStreamerSplitsAcrossArbitraryChunkBoundaries(t *testing.T) {
+	var lines []string
+	streamer := &lineStreamer{onLine: func(line string) { lines = append(lines, line) }}
+
+	// Two lines delivered in three writes that don't line up with the
+	// newlines at all, the way a pipe's Write calls actually arrive.
+	streamer.Write([]byte("first li"))
+	streamer.Write([]byte("ne\r\nsecond"))
+	streamer.Write([]byte(" line\n"))
+
+	want := []string{"first line", "second line"}
+	if len(lines) != len(want) {
+		t.Fatalf("got %v, want %v", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("got %v, want %v", lines, want)
+		}
+	}
+}
+
+func TestLineStreamerFlushReportsATrailingPartialLine(t *testing.T) {
+	var lines []string
+	streamer := &lineStreamer{onLine: func(line string) { lines = append(lines, line) }}
+	streamer.Write([]byte("no trailing newline"))
+	if len(lines) != 0 {
+		t.Fatal("a line with no terminator yet shouldn't fire until flush")
+	}
+	streamer.flush()
+	if len(lines) != 1 || lines[0] != "no trailing newline" {
+		t.Fatalf("flush should report the buffered partial line, got %v", lines)
+	}
+}
+
 func TestPrepareProjectLeavesAnIntactYolocoderProjectAlone(t *testing.T) {
 	dir := t.TempDir()
 	if err := scaffoldProject(dir); err != nil {

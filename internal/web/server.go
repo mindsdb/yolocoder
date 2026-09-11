@@ -385,6 +385,7 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	// arriving (routing a plain message costs one silent round trip before
 	// the first of those).
 	server.hub.publish("busy", map[string]bool{"busy": true})
+	server.hub.publish("phase", map[string]string{"phase": "build"})
 	defer server.hub.publish("busy", map[string]bool{"busy": false})
 
 	server.hub.publish("chat", chatMessage{Role: role, Text: task})
@@ -401,7 +402,29 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 		reply = "Done."
 	}
 	server.hub.publish("chat", chatMessage{Role: "assistant", Text: reply})
+	if outcome.Applied {
+		server.reload()
+	}
 	return outcome, nil
+}
+
+// reload is the "load" step of build → load → review. The dev server
+// already picks up filesystem changes on its own the moment the patch
+// lands — Vite's HMR for the frontend, tsx watch's own restart for the
+// backend — so this doesn't restart anything itself; restarting the
+// whole process on every edit would be slower and would throw away
+// exactly the state HMR exists to preserve. It just tells the page to
+// reload the iframe, as the fastest way to guarantee a change that HMR
+// can't patch in place (an edit to index.html, a newly added dependency,
+// a full-reload signal Vite already decided to send) actually shows up
+// rather than silently waiting on it. "Review" isn't a step this
+// function waits on: the error watcher tails server.log continuously
+// regardless of any particular task, and fires its own auto-fix run —
+// another build → load → review cycle — if the change just applied
+// broke something.
+func (server *Server) reload() {
+	server.hub.publish("phase", map[string]string{"phase": "load"})
+	server.hub.publish("reload", map[string]bool{"reload": true})
 }
 
 // recordTurn mirrors record in cmd/yolocoder/main.go, so a folder's

@@ -72,6 +72,18 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
 .msg-system { align-self: stretch; background: #fff7e0; color: #6b5300; font-size: 13px; }
 .msg-auto-fix { align-self: stretch; background: #fde8e8; color: #7a1f1f; font-size: 13px; }
 
+.msg details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.msg details pre {
+  margin: 6px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 #console {
   flex: 0 0 auto;
   border-top: 1px solid #e3e3e3;
@@ -112,6 +124,13 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+#review-note {
+  flex: 0 0 auto;
+  padding: 6px 12px 0;
+  font-size: 12px;
+  color: #888;
 }
 
 #chat-form {

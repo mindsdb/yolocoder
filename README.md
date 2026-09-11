@@ -68,6 +68,17 @@ from, not to be shown verbatim as a transcript, and a folder used across
 many separate runs (or from the plain terminal too) accumulates turns that
 read as a confusing backlog rather than one conversation.
 
+Every chat message goes through the same build → load → review loop:
+**build** is the agent making the change, streamed live to the chat and
+console; **load** just tells the iframe to reload once a change is
+applied — the dev server has already picked it up on its own by then
+(Vite's HMR, `tsx watch`'s own restart), so this never restarts a process
+itself, only makes sure the browser actually shows it; **review** is the
+error watcher, which runs continuously regardless of any one task and
+turns a server or browser error into another build → load → review cycle
+automatically. Long messages in chat (a stack trace, in particular)
+collapse behind a one-line summary — click to expand.
+
 ## Debugging
 
 When a provider returns something unexpected, `/debug` in a session shows

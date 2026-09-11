@@ -14,6 +14,16 @@ import (
 
 const maxToolRounds = 8
 
+// Timeouts for the model calls the agent loop makes. Both are generous
+// on purpose: a reasoning model that thinks before answering, or a
+// slower or more heavily loaded endpoint, can easily take longer than a
+// quick request would, and a request that's merely slow (not actually
+// stuck) failing partway through a build is worse than it taking longer.
+const (
+	routeTimeout   = 60 * time.Second
+	produceTimeout = 5 * time.Minute
+)
+
 // Change is one attempt at the whole job: what the model means to do,
 // which files it touches, and the diff that does it.
 //
@@ -405,7 +415,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 // which is the only arrangement a provider's prefix cache can reuse.
 // Putting the new message first would defeat it entirely.
 func (runner *Runner) route(ctx context.Context, task string, history []Recollection) (routeDecision, error) {
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, routeTimeout)
 	defer cancel()
 
 	notes, turns := split(history)
@@ -478,7 +488,7 @@ func (session *changeSession) report(evidence string) {
 // produce runs tool rounds until the model returns a change.
 func (session *changeSession) produce(ctx context.Context, progress Progress) (Change, error) {
 	for round := 0; round < maxToolRounds; round++ {
-		callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
 		response, err := session.runner.client.create(callCtx, responseRequest{
 			Instructions: changeInstructions,
 			Input:        session.transcript,
@@ -521,7 +531,7 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 // would apply.
 func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence string) (Rewrite, error) {
 	input := fmt.Sprintf("TASK:\n%s\n\nFILE TO REWRITE:\n%s\n\nITS CURRENT CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, path, current, evidence)
-	callCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
 	defer cancel()
 	response, err := runner.client.create(callCtx, responseRequest{
 		Instructions: rewriteInstructions,

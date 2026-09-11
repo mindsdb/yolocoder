@@ -92,6 +92,28 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
   white-space: pre-wrap;
 }
 
+#busy-indicator {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #555;
+  border-top: 1px solid #e3e3e3;
+}
+.spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #d6d6d6;
+  border-top-color: #555;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 #chat-form {
   flex: 0 0 auto;
   display: flex;

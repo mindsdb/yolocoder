@@ -23,9 +23,10 @@
       <summary>Console</summary>
       <div id="console-log"></div>
     </details>
+    <div id="busy-indicator" hidden><span class="spinner"></span><span id="busy-text">Working...</span></div>
     <form id="chat-form">
       <textarea id="chat-input" placeholder="Ask for a change..." rows="2"></textarea>
-      <button type="submit">Send</button>
+      <button id="chat-send" type="submit">Send</button>
     </form>
   </section>
   <section id="preview">

@@ -2,8 +2,17 @@ const chatLog = document.getElementById("chat-log");
 const consoleLog = document.getElementById("console-log");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
+const chatSend = document.getElementById("chat-send");
 const processState = document.getElementById("process-state");
 const appFrame = document.getElementById("app-frame");
+const busyIndicator = document.getElementById("busy-indicator");
+const busyText = document.getElementById("busy-text");
+
+function setBusy(busy) {
+  busyIndicator.hidden = !busy;
+  chatSend.disabled = busy;
+  if (busy) busyText.textContent = "Working...";
+}
 
 function addMessage(role, text) {
   const div = document.createElement("div");
@@ -33,6 +42,10 @@ events.addEventListener("chat", (event) => {
 events.addEventListener("status", (event) => {
   const data = JSON.parse(event.data);
   if (data.text) addConsoleLine("… " + data.text);
+  if (data.text && !busyIndicator.hidden) busyText.textContent = data.text;
+});
+events.addEventListener("busy", (event) => {
+  setBusy(JSON.parse(event.data).busy);
 });
 events.addEventListener("log", (event) => {
   addConsoleLine(JSON.parse(event.data).text);

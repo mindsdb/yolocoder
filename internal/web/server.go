@@ -300,6 +300,13 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	server.turnMutex.Lock()
 	defer server.turnMutex.Unlock()
 
+	// busy brackets the turn so the UI can show something is happening the
+	// moment a message is sent, not just once Status/Log lines start
+	// arriving (routing a plain message costs one silent round trip before
+	// the first of those).
+	server.hub.publish("busy", map[string]bool{"busy": true})
+	defer server.hub.publish("busy", map[string]bool{"busy": false})
+
 	server.hub.publish("chat", chatMessage{Role: role, Text: task})
 
 	turns, _ := session.Recent(server.root)

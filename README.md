@@ -35,15 +35,20 @@ yolocoder --web --port 8080
 
 Serves a local page with chat on one side and a live preview of the app in
 an iframe on the other, backed by the same agent loop the terminal uses.
+It needs Node.js; if it isn't on your PATH, you're offered an install
+before anything else runs.
 
-On an empty folder, it scaffolds a small starter (Vite + React + Tailwind on
-the frontend, Express + Drizzle + SQLite on the backend) before opening the
-UI. On an existing project without them yet, it asks the agent to write
-`scripts/start.sh`, `scripts/restart.sh` and `scripts/stop.sh` — the same
-three commands the UI's own Start/Restart/Stop buttons call, and safe to run
-by hand from a terminal too. `start.sh` is expected to launch the dev
-server backgrounded and detached, and report its port and log through
-`.yolocoder/web/`.
+For now, `--web` only works in two kinds of folder: an empty one, which it
+scaffolds a small starter into (Vite + React + Tailwind on the frontend,
+Express + Drizzle + SQLite on the backend), or one it already scaffolded
+(marked by a `yolocoder.json` at its root). Anything else is refused
+rather than guessed at. The scaffold's `scripts/start.sh`,
+`scripts/restart.sh` and `scripts/stop.sh` are the same three commands the
+UI's own Start/Restart/Stop buttons call, and safe to run by hand from a
+terminal too; `start.sh` launches the dev server backgrounded and
+detached, and reports its port and log through `.yolocoder/web/`. If
+those scripts ever go missing from a yolocoder project, `--web` restores
+just them, leaving the rest of the project untouched.
 
 The preview is reverse-proxied rather than pointed straight at the dev
 server, so a small script can be injected into it that reports uncaught

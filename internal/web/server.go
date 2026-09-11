@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"embed"
@@ -71,6 +72,13 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	if err := ensureNode(); err != nil {
 		return err
 	}
+	// A child context so typing "exit" can stop the run the same way the
+	// caller cancelling ctx (Ctrl+C) already does, without either needing
+	// to know about the other.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go watchForExit(stop)
+
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -108,6 +116,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	httpServer := &http.Server{Handler: mux}
 
 	fmt.Printf("\x1b[36m[^_^] YoloCoder web\x1b[0m listening on \x1b[1mhttp://localhost:%d\x1b[0m\n", actualPort)
+	fmt.Println("\x1b[2mType exit here, or Ctrl+C, to stop.\x1b[0m")
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpServer.Serve(listener) }()
@@ -128,11 +137,29 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 		}
 	}
 
+	fmt.Println("[^_^] Bye.")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.proc.Stop(shutdownCtx)
 	_ = appProxyServer.Shutdown(shutdownCtx)
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// watchForExit lets a person still type "exit" or "quit" into the
+// terminal --web was launched from to stop it, the same words the
+// interactive terminal session already accepts, rather than needing to
+// remember Ctrl+C works here too. On a non-interactive stdin (piped,
+// redirected, /dev/null) Scan simply hits EOF right away and this
+// goroutine ends without ever calling stop.
+func watchForExit(stop context.CancelFunc) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+		case "exit", "quit", "/exit", "/quit":
+			stop()
+			return
+		}
+	}
 }
 
 // prepareProject makes sure there is something for the UI to run. For

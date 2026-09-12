@@ -46,6 +46,13 @@ type Turn struct {
 	Summary string   `json:"summary,omitempty"`
 	Files   []string `json:"files,omitempty"`
 	Applied bool     `json:"applied,omitempty"`
+	// Attempts is how many plan/patch/test passes a coding turn took (1
+	// if it applied and passed first try), and Rewrote reports whether
+	// it fell back to writing whole files because no diff would apply at
+	// all. Recorded so a later look at this folder's log can tell how
+	// often patches needed a repair without debug logging having been on.
+	Attempts int  `json:"attempts,omitempty"`
+	Rewrote  bool `json:"rewrote,omitempty"`
 }
 
 // header is the first line of a session file.

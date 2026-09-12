@@ -235,14 +235,65 @@ func locate(lines, block []string) (int, error) {
 			return strings.TrimSpace(a) == strings.TrimSpace(b)
 		})
 	}
+	if len(matches) == 0 {
+		// The instructions warn the model that an HTML entity spelled out
+		// is a common way to get this wrong; recovering from it here means
+		// the warning doesn't have to work every time.
+		matches = findAll(lines, block, func(a, b string) bool {
+			return normalizeEntities(a) == normalizeEntities(b)
+		})
+	}
 	switch {
 	case len(matches) == 0:
-		return 0, fmt.Errorf("could not find this hunk's lines in the file:\n%s", preview(block))
+		return 0, fmt.Errorf("could not find this hunk's lines in the file:\n%s%s", preview(block), nearMiss(lines, block))
 	case len(matches) > 1 && len(block) < 3:
 		return 0, fmt.Errorf("this hunk's lines appear %d times, too ambiguous to place:\n%s", len(matches), preview(block))
 	default:
 		return matches[0], nil
 	}
+}
+
+var entityReplacer = strings.NewReplacer(
+	"&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'", "&apos;", "'",
+)
+
+func normalizeEntities(line string) string {
+	return entityReplacer.Replace(strings.TrimSpace(line))
+}
+
+// nearMiss looks for the window in lines that matches block the most
+// (ignoring whitespace), and reports the first line where it actually
+// differs. A block that doesn't exist anywhere close gets nothing added:
+// a low-quality guess would be worse than no guess. This turns "could not
+// find this hunk" from a dead end into something the model can act on
+// directly, rather than having it reproduce the same failing diff again.
+func nearMiss(lines, block []string) string {
+	bestStart, bestScore := -1, 0
+	for start := 0; start+len(block) <= len(lines); start++ {
+		score := 0
+		for offset, want := range block {
+			if strings.TrimSpace(lines[start+offset]) == strings.TrimSpace(want) {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestStart, bestScore = start, score
+		}
+	}
+	// Require at least half the block to already line up, or this is
+	// pointing at an unrelated part of the file rather than a near miss.
+	if bestStart == -1 || bestScore*2 < len(block) {
+		return ""
+	}
+	for offset, want := range block {
+		got := lines[bestStart+offset]
+		if got != want {
+			return fmt.Sprintf(
+				"\n\nthe closest match is at line %d, where it differs:\n  expected: %q\n  in file:  %q",
+				bestStart+offset+1, want, got)
+		}
+	}
+	return ""
 }
 
 func findAll(lines, block []string, equal func(string, string) bool) []int {

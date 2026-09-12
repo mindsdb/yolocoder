@@ -339,10 +339,12 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 		kind = "code"
 	}
 	_ = history.Append(session.Turn{
-		Message: task,
-		Kind:    kind,
-		Summary: outcome.Reply,
-		Files:   outcome.Files,
-		Applied: outcome.Applied,
+		Message:  task,
+		Kind:     kind,
+		Summary:  outcome.Reply,
+		Files:    outcome.Files,
+		Applied:  outcome.Applied,
+		Attempts: outcome.Attempts,
+		Rewrote:  outcome.Rewrote,
 	})
 }

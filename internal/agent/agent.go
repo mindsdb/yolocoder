@@ -84,6 +84,14 @@ type Outcome struct {
 	Coding  bool
 	Files   []string
 	Applied bool
+	// Attempts is how many plan/patch/test passes the change took (1 if
+	// it applied and passed on the first try). Recorded so a folder's
+	// session log can answer "how often does this need a repair?" later
+	// without needing full debug logging turned on to find out.
+	Attempts int
+	// Rewrote reports whether no diff would apply at all and the change
+	// fell back to writing whole files instead.
+	Rewrote bool
 }
 
 // Recollection is one earlier turn in this folder, as the agent sees it.
@@ -352,7 +360,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			} else {
 				progress.Log("  tests passed")
 			}
-			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true}, nil
+			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1}, nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
@@ -399,7 +407,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			if summary == "" {
 				summary = "Rewrote " + strings.Join(targets, ", ")
 			}
-			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true}, nil
+			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true}, nil
 		}
 		return Outcome{}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}

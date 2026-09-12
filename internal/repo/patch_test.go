@@ -141,6 +141,75 @@ func TestApplyLeavesFilesAloneWhenAHunkCannotBePlaced(t *testing.T) {
 	}
 }
 
+func TestApplyRecoversFromASpelledOutHTMLEntity(t *testing.T) {
+	// The instructions warn the model that this is a common way to get a
+	// hunk wrong; this is that exact case recovering without a retry.
+	root := t.TempDir()
+	writeFile(t, root, "index.html", "<p>Salt &amp; pepper</p>\n<p>unrelated</p>\n")
+	repository := &Repository{Root: root}
+	patch := "--- a/index.html\n+++ b/index.html\n@@ -1,1 +1,1 @@\n" +
+		"-<p>Salt & pepper</p>\n" +
+		"+<p>Salt & vinegar</p>\n"
+	if err := repository.Apply(patch); err != nil {
+		t.Fatalf("Apply() = %v, want the entity difference to be recovered from", err)
+	}
+	content, _ := os.ReadFile(filepath.Join(root, "index.html"))
+	if !strings.Contains(string(content), "Salt & vinegar") {
+		t.Fatalf("index.html = %q", content)
+	}
+	if !strings.Contains(string(content), "unrelated") {
+		t.Fatal("the rest of the file must survive")
+	}
+}
+
+func TestApplyFailureReportsTheClosestMatchingLine(t *testing.T) {
+	// One line differs from the real file by a single character; the
+	// error should point at exactly that line rather than just repeating
+	// the whole block the model already wrote.
+	patch := "--- a/index.html\n+++ b/index.html\n@@ -1,1 +1,1 @@\n" +
+		"   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n" +
+		"-  <title>Tec-Tac-Tris!</title>\n" +
+		"+  <title>New Title</title>\n"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+	err := repository.Apply(patch)
+	if err == nil {
+		t.Fatal("expected the trailing ! to make this hunk unplaceable")
+	}
+	if !strings.Contains(err.Error(), "closest match is at line") {
+		t.Fatalf("err = %v, want it to name the closest matching line", err)
+	}
+	if !strings.Contains(err.Error(), `"  <title>Tec-Tac-Tris!</title>"`) {
+		t.Fatalf("err = %v, want it to show what the model wrote", err)
+	}
+	if !strings.Contains(err.Error(), `"  <title>Tec-Tac-Tris</title>"`) {
+		t.Fatalf("err = %v, want it to show the file's real line", err)
+	}
+}
+
+func TestApplyFailureOmitsNearMissWhenNothingIsClose(t *testing.T) {
+	// A block that doesn't resemble anything in the file shouldn't get a
+	// misleading "closest match" pointed at some unrelated line.
+	patch := "--- a/index.html\n+++ b/index.html\n@@ -1,1 +1,1 @@\n" +
+		"-totally unrelated content that appears nowhere in the file at all\n" +
+		"+replacement\n"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+	err := repository.Apply(patch)
+	if err == nil {
+		t.Fatal("expected this hunk to fail to place")
+	}
+	if strings.Contains(err.Error(), "closest match") {
+		t.Fatalf("err = %v, want no near-miss guess when nothing is actually close", err)
+	}
+}
+
 func TestParsePatchReadsPathsAndHunks(t *testing.T) {
 	patches, err := parsePatch("diff --git a/x.go b/x.go\nindex 111..222 100644\n--- a/x.go\n+++ b/x.go\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n")
 	if err != nil {

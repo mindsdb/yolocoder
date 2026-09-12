@@ -345,11 +345,18 @@ func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	if _, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{}); err != nil {
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if changes != 2 {
 		t.Fatalf("change requests = %d, want 2 (the corrected retry should land)", changes)
+	}
+	if outcome.Attempts != 2 {
+		t.Fatalf("Attempts = %d, want 2 (recorded so a session log can tell a repair was needed)", outcome.Attempts)
+	}
+	if outcome.Rewrote {
+		t.Fatal("Rewrote should be false: this succeeded as a diff, not a whole-file fallback")
 	}
 	content, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil || !strings.Contains(string(content), "TICTACTRIS") {

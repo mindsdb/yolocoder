@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,24 @@ const stateDir = ".yolocoder/web"
 
 const portTimeout = 30 * time.Second
 
+// Health-check tuning: how often to check, how long a single dial may
+// take, and how many checks in a row must fail before treating the dev
+// server as actually dead rather than just briefly slow to answer.
+const (
+	healthCheckInterval          = 3 * time.Second
+	healthCheckDialTimeout       = 2 * time.Second
+	maxConsecutiveHealthFailures = 2
+)
+
+// maxAutoRecoverAttempts bounds how many times a crash is restarted from
+// within recoveryWindow of the last one, so a dev server that can't stay
+// up at all doesn't get restarted forever; a crash isolated by more than
+// that resets the count, since it's not part of the same loop.
+const (
+	maxAutoRecoverAttempts = 3
+	recoveryWindow         = 2 * time.Minute
+)
+
 // process owns the dev server's lifecycle. It never runs the dev command
 // itself: it runs scripts/{start,restart,stop}.sh, the same scripts the
 // UI's buttons call and a person could run by hand from a terminal, and
@@ -40,14 +59,50 @@ type process struct {
 	hub     *hub
 	watcher *errorWatcher
 
-	mutex      sync.Mutex
-	state      string
-	port       int
-	cancelTail context.CancelFunc
+	// execMutex serializes actual script runs: Start/Restart/Stop calls
+	// arriving from an HTTP handler, and now also a health check
+	// recovering from a crash on its own, must not overlap the same
+	// scripts/pidfile/log at once.
+	execMutex sync.Mutex
+
+	mutex        sync.Mutex
+	state        string
+	port         int
+	cancelTail   context.CancelFunc
+	cancelHealth context.CancelFunc
+
+	recoverAttempts int
+	lastRecoveryAt  time.Time
+
+	// Overridable so tests can run the health-check loop and the crash-
+	// loop budget on a timescale of milliseconds instead of minutes,
+	// rather than either skipping this logic entirely or making the
+	// suite slow.
+	healthCheckInterval    time.Duration
+	healthCheckDialTimeout time.Duration
+	maxHealthFailures      int
+	maxRecoverAttempts     int
+	recoveryWindow         time.Duration
+
+	// onCrash runs when the health check gives up on a port ever
+	// answering again; defaults to recoverFromCrash, and is a plain
+	// field so a test can replace the actual restart with something
+	// that doesn't need real scripts to observe the detection logic in
+	// isolation.
+	onCrash func()
 }
 
 func newProcess(root string, hub *hub, watcher *errorWatcher) *process {
-	return &process{root: root, hub: hub, watcher: watcher, state: stateStopped}
+	proc := &process{
+		root: root, hub: hub, watcher: watcher, state: stateStopped,
+		healthCheckInterval:    healthCheckInterval,
+		healthCheckDialTimeout: healthCheckDialTimeout,
+		maxHealthFailures:      maxConsecutiveHealthFailures,
+		maxRecoverAttempts:     maxAutoRecoverAttempts,
+		recoveryWindow:         recoveryWindow,
+	}
+	proc.onCrash = proc.recoverFromCrash
+	return proc
 }
 
 func (proc *process) Port() int {
@@ -66,13 +121,18 @@ func (proc *process) Start(ctx context.Context) error   { return proc.run(ctx, "
 func (proc *process) Restart(ctx context.Context) error { return proc.run(ctx, "restart.sh") }
 
 func (proc *process) Stop(ctx context.Context) error {
+	proc.execMutex.Lock()
+	defer proc.execMutex.Unlock()
 	err := proc.runScript(ctx, "stop.sh")
 	proc.stopTail()
+	proc.stopHealthCheck()
 	proc.setState(stateStopped, 0)
 	return err
 }
 
 func (proc *process) run(ctx context.Context, script string) error {
+	proc.execMutex.Lock()
+	defer proc.execMutex.Unlock()
 	proc.setState(stateStarting, 0)
 	if err := proc.runScript(ctx, script); err != nil {
 		proc.setState(stateError, 0)
@@ -85,6 +145,8 @@ func (proc *process) run(ctx context.Context, script string) error {
 	}
 	proc.stopTail()
 	proc.startTail()
+	proc.stopHealthCheck()
+	proc.startHealthCheck(port)
 	proc.setState(stateRunning, port)
 	return nil
 }
@@ -139,6 +201,93 @@ func (proc *process) stopTail() {
 	if proc.cancelTail != nil {
 		proc.cancelTail()
 		proc.cancelTail = nil
+	}
+}
+
+// startHealthCheck watches for the dev server dying on its own — a
+// crash, an OS resource limit, anything that isn't a chat task's doing —
+// which nothing else here would ever notice: the error watcher only sees
+// text that reaches server.log, and a process that simply stops
+// answering doesn't necessarily write anything on its way out.
+func (proc *process) startHealthCheck(port int) {
+	healthCtx, cancel := context.WithCancel(context.Background())
+	proc.cancelHealth = cancel
+	go proc.watchHealth(healthCtx, port)
+}
+
+func (proc *process) stopHealthCheck() {
+	if proc.cancelHealth != nil {
+		proc.cancelHealth()
+		proc.cancelHealth = nil
+	}
+}
+
+func (proc *process) watchHealth(ctx context.Context, port int) {
+	ticker := time.NewTicker(proc.healthCheckInterval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), proc.healthCheckDialTimeout)
+		if err == nil {
+			conn.Close()
+			failures = 0
+			continue
+		}
+		failures++
+		if failures < proc.maxHealthFailures {
+			continue
+		}
+		// It's stopped answering for several checks running rather than
+		// having a bad moment; recover on its own account instead of
+		// leaving the iframe on "not reachable" until someone notices.
+		// This goroutine's job ends here either way: a successful
+		// recovery starts a fresh one for the new instance, and a
+		// recovery that gives up has nothing left to watch.
+		proc.onCrash()
+		return
+	}
+}
+
+// nextRecoveryAttempt records one crash-recovery attempt and reports
+// whether it's still within budget, resetting the count first if it's
+// been long enough since the last one that this isn't part of the same
+// crash loop. Kept separate from recoverFromCrash so the counting and
+// resetting can be tested without needing a real process to restart.
+func (proc *process) nextRecoveryAttempt() (attempt int, withinBudget bool) {
+	proc.mutex.Lock()
+	defer proc.mutex.Unlock()
+	if time.Since(proc.lastRecoveryAt) > proc.recoveryWindow {
+		proc.recoverAttempts = 0
+	}
+	proc.recoverAttempts++
+	proc.lastRecoveryAt = time.Now()
+	return proc.recoverAttempts, proc.recoverAttempts <= proc.maxRecoverAttempts
+}
+
+// recoverFromCrash restarts the dev server after it stops responding
+// unasked, bounded by nextRecoveryAttempt so a dev server that can't
+// stay up at all doesn't get restarted forever.
+func (proc *process) recoverFromCrash() {
+	attempt, withinBudget := proc.nextRecoveryAttempt()
+	if !withinBudget {
+		proc.hub.publish("chat", chatMessage{Role: "system", Text: fmt.Sprintf(
+			"The dev server keeps crashing (%d times in the last %s) and yolocoder has stopped "+
+				"restarting it automatically. Check .yolocoder/web/server.log for why, then use "+
+				"POST /process/restart or the Restart button once it's fixed.",
+			attempt-1, proc.recoveryWindow)})
+		proc.setState(stateError, 0)
+		return
+	}
+	proc.hub.publish("chat", chatMessage{Role: "system", Text: "The dev server stopped responding; restarting it automatically."})
+	ctx, cancel := context.WithTimeout(context.Background(), portTimeout+10*time.Second)
+	defer cancel()
+	if err := proc.run(ctx, "restart.sh"); err != nil {
+		proc.hub.publish("chat", chatMessage{Role: "system", Text: "Automatic restart failed: " + err.Error()})
 	}
 }
 

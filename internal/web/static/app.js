@@ -2,11 +2,12 @@ const chatLog = document.getElementById("chat-log");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const chatSend = document.getElementById("chat-send");
-const processState = document.getElementById("process-state");
+const folderIndicator = document.getElementById("folder-indicator");
 const appFrame = document.getElementById("app-frame");
 const sidebar = document.getElementById("sidebar");
 const btnCollapse = document.getElementById("btn-collapse");
 const btnExpand = document.getElementById("btn-expand");
+const btnRecover = document.getElementById("btn-recover");
 const modelSelect = document.getElementById("model-select");
 
 // Each turn (a user message or an auto-fix) gets its own collapsible
@@ -27,9 +28,12 @@ function setBusy(isBusy) {
   chatSend.disabled = busy;
 }
 
+// There's no visible process-state pill: the dev server starts and
+// recovers on its own, so ordinary "starting"/"running" states aren't
+// shown. The one exception is btnRecover, offered only once automatic
+// recovery has actually given up (see recoverFromCrash server-side).
 function setProcessState(state) {
-  processState.textContent = state;
-  processState.className = "pill pill-" + state;
+  btnRecover.hidden = state !== "error";
 }
 
 function addMessage(role, text) {
@@ -107,6 +111,10 @@ fetch("/config")
   .then((config) => {
     appProxyOrigin = "http://localhost:" + config.appProxyPort;
     appFrame.src = appProxyOrigin + "/";
+    if (config.folder) {
+      folderIndicator.textContent = config.folder;
+      folderIndicator.title = config.folder;
+    }
   })
   .catch(() => {});
 
@@ -226,6 +234,7 @@ btnExpand.addEventListener("click", () => {
   sidebar.classList.remove("collapsed");
   btnExpand.hidden = true;
 });
+btnRecover.addEventListener("click", () => fetch("/process/restart", { method: "POST" }));
 
 // The shim injected into the proxied app reports crashes to us via
 // postMessage (it can't reach the yolocoder server directly: it doesn't

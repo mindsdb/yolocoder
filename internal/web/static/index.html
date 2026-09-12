@@ -10,9 +10,11 @@
 <main>
   <section id="sidebar">
     <header id="chat-header">
-      <span id="brand">[^_^] YoloCoder</span>
-      <select id="model-select" title="Model"></select>
-      <span id="process-state" class="pill pill-stopped">stopped</span>
+      <div id="brand-block">
+        <span id="brand">[^_^] YoloCoder</span>
+        <div id="folder-indicator"></div>
+      </div>
+      <button id="btn-recover" type="button" hidden>Restart</button>
       <button id="btn-collapse" type="button" title="Collapse chat">&laquo;</button>
     </header>
     <div id="chat-log"></div>
@@ -20,6 +22,9 @@
       <textarea id="chat-input" placeholder="Ask for a change..." rows="2"></textarea>
       <button id="chat-send" type="submit">Send</button>
     </form>
+    <div id="input-footer">
+      <select id="model-select" title="Model"></select>
+    </div>
   </section>
   <button id="btn-expand" type="button" title="Show chat" hidden>[^_^]</button>
   <section id="preview">

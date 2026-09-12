@@ -319,7 +319,7 @@ func (server *Server) routes(mux *http.ServeMux) {
 // backlog rather than one conversation. Each run starts its visible chat
 // pane fresh; only what happens in *this* run streams in over /events.
 func (server *Server) handleConfig(response http.ResponseWriter, request *http.Request) {
-	writeJSON(response, map[string]int{"appProxyPort": server.appProxyPort})
+	writeJSON(response, map[string]any{"appProxyPort": server.appProxyPort, "folder": app.Folder()})
 }
 
 // handleState is the ground truth behind the "busy"/"phase"/"process"

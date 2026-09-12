@@ -49,6 +49,16 @@ func newAppProxy(portFn func() int) http.Handler {
 			// Accept-Encoding would otherwise get a gzip stream back.
 			request.Header.Del("Accept-Encoding")
 		},
+		// The dev server this points at can restart (a new process on the
+		// same port) or crash entirely at any moment, which a pooled
+		// keep-alive connection has no way to know about: it looks alive
+		// right up until it's used again and gets back a stray response
+		// or a reset, logged by net/http's transport as an "Unsolicited
+		// response ... 400 Bad Request" that has nothing to do with an
+		// actual HTTP 400 anywhere. A dial per request costs nothing
+		// meaningful over loopback and avoids that whole class of stale
+		// connection confusingly reported.
+		Transport:      &http.Transport{DisableKeepAlives: true},
 		ModifyResponse: injectShim,
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
 			http.Error(response, "dev server is not reachable yet: "+err.Error(), http.StatusBadGateway)
@@ -58,7 +68,7 @@ func newAppProxy(portFn func() int) http.Handler {
 		if portFn() == 0 {
 			response.Header().Set("Content-Type", "text/html; charset=utf-8")
 			response.WriteHeader(http.StatusServiceUnavailable)
-			io.WriteString(response, "<p>The dev server isn't running. Use Start in the sidebar.</p>")
+			io.WriteString(response, "<p>The dev server isn't running yet.</p>")
 			return
 		}
 		proxy.ServeHTTP(response, request)

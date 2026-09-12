@@ -91,13 +91,21 @@ open and live while it runs, collapsing once the reply lands — rather
 than one shared console for the whole conversation.
 
 The chat panel — titled with the same `[^_^] YoloCoder` the terminal
-prints at startup — can be collapsed to give the preview the full window;
-a small button in its corner brings it back. A model picker sits in that
-same header: it lists what the endpoint's `/v1/models` offers, the same
-way `yolocoder model` does on the terminal, and switching it there takes
+prints at startup, with the folder it's running in shown just below —
+can be collapsed to give the preview the full window; a small button in
+its header brings it back. A model picker sits under the message input:
+it lists what the endpoint's `/v1/models` offers, the same way
+`yolocoder model` does on the terminal, and switching it there takes
 effect immediately and is saved, unless the provider came from
 `--llm-from-env-vars`, which — like the terminal's `/model` — it can't
 change.
+
+The dev server is watched for actually being alive, not just for error
+text reaching its log: if it stops answering on its own (a crash, an OS
+resource limit) it's restarted automatically, without any task involved,
+up to a few attempts within a couple of minutes before giving up and
+showing a Restart button — the only control surface `--web` has, and only
+once automatic recovery has actually stopped trying.
 
 ## Debugging
 

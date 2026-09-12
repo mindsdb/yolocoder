@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mindsdb/yolocoder/internal/config"
 )
 
 func TestConfigReportsTheAppProxyPortAndHistoryIsGone(t *testing.T) {
@@ -61,6 +63,70 @@ func TestPrepareProjectRestoresScriptsForAnExistingYolocoderProject(t *testing.T
 	}
 	if !scriptsExist(dir) {
 		t.Fatal("prepareProject should have restored the missing scripts")
+	}
+}
+
+func TestModelsListsAndReportsTheCurrentOne(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":"model-b"},{"id":"model-a"}]}`))
+	}))
+	defer provider.Close()
+
+	server := &Server{root: t.TempDir(), hub: newHub(), provider: config.LLM{BaseURL: provider.URL, Model: "model-a"}}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/models", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{`"model-a"`, `"model-b"`, `"current":"model-a"`, `"locked":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/models body = %s, want it to contain %q", body, want)
+		}
+	}
+}
+
+func TestModelChangeUpdatesTheRunningProviderAndPersists(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	server := &Server{root: t.TempDir(), hub: newHub(), provider: config.LLM{Provider: "openai-compatible", BaseURL: "http://example.invalid", APIKey: "k", Model: "old-model"}}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	request := httptest.NewRequest(http.MethodPost, "/model", strings.NewReader(`{"model":"new-model"}`))
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("/model: got status %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	if got := server.currentProvider().Model; got != "new-model" {
+		t.Fatalf("currentProvider().Model = %q, want %q", got, "new-model")
+	}
+
+	saved, configured, err := config.Load()
+	if err != nil || !configured {
+		t.Fatalf("config.Load() = %v, %v, %v", saved, configured, err)
+	}
+	if saved.Model != "new-model" {
+		t.Fatalf("saved model = %q, want the change to persist", saved.Model)
+	}
+}
+
+func TestModelChangeIsRefusedForAnEnvironmentProvider(t *testing.T) {
+	server := &Server{root: t.TempDir(), hub: newHub(), fromEnvironment: true, provider: config.LLM{Provider: "environment", Model: "old-model"}}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	request := httptest.NewRequest(http.MethodPost, "/model", strings.NewReader(`{"model":"new-model"}`))
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code == http.StatusAccepted {
+		t.Fatal("an environment-sourced provider's model should not be changeable from the UI")
+	}
+	if got := server.currentProvider().Model; got != "old-model" {
+		t.Fatalf("currentProvider().Model = %q, want it unchanged", got)
 	}
 }
 

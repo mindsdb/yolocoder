@@ -11,20 +11,11 @@
   <section id="sidebar">
     <header id="chat-header">
       <span id="brand">[^_^] YoloCoder</span>
+      <select id="model-select" title="Model"></select>
       <span id="process-state" class="pill pill-stopped">stopped</span>
       <button id="btn-collapse" type="button" title="Collapse chat">&laquo;</button>
     </header>
     <div id="chat-log"></div>
-    <details id="agent-console">
-      <summary>Agent activity</summary>
-      <div id="agent-console-log"></div>
-    </details>
-    <details id="server-console">
-      <summary>Backend logs</summary>
-      <div id="server-console-log"></div>
-    </details>
-    <div id="busy-indicator" hidden><span class="spinner"></span><span id="busy-text">Working...</span></div>
-    <div id="review-note" hidden>Watching for errors...</div>
     <form id="chat-form">
       <textarea id="chat-input" placeholder="Ask for a change..." rows="2"></textarea>
       <button id="chat-send" type="submit">Send</button>

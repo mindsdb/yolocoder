@@ -84,14 +84,20 @@ itself, only makes sure the browser actually shows it; **review** is the
 error watcher, which runs continuously regardless of any one task and
 turns a server or browser error into another build → load → review cycle
 automatically. Long messages in chat (a stack trace, in particular)
-collapse behind a one-line summary — click to expand. Below the chat log,
-"Agent activity" and "Backend logs" hold the same two things as separate,
-collapsed-by-default sections rather than one blended stream: the agent's
-own step-by-step trail, and the dev server's raw stdout/stderr.
+collapse behind a one-line summary — click to expand. Each message that
+starts a turn gets its own "Agent activity" section right under it —
+the agent's step-by-step trail and the dev server's log for that turn,
+open and live while it runs, collapsing once the reply lands — rather
+than one shared console for the whole conversation.
 
 The chat panel — titled with the same `[^_^] YoloCoder` the terminal
 prints at startup — can be collapsed to give the preview the full window;
-a small button in its corner brings it back.
+a small button in its corner brings it back. A model picker sits in that
+same header: it lists what the endpoint's `/v1/models` offers, the same
+way `yolocoder model` does on the terminal, and switching it there takes
+effect immediately and is saved, unless the provider came from
+`--llm-from-env-vars`, which — like the terminal's `/model` — it can't
+change.
 
 ## Debugging
 

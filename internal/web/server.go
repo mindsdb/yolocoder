@@ -42,14 +42,24 @@ type chatMessage struct {
 // driving, the agent loop it shares with the terminal, the SSE hub
 // connected browser tabs listen on, and the dev server it supervises.
 type Server struct {
-	root     string
-	provider config.LLM
-	history  *session.Log
+	root    string
+	history *session.Log
+
+	// fromEnvironment marks a provider sourced from OPENAI_* environment
+	// variables, which --model (like the terminal's /model) can't change:
+	// there is nothing on disk for it to save to, and it's meant to be
+	// fixed by whatever set those variables, not switched mid-session.
+	fromEnvironment bool
 
 	hub     *hub
 	proc    *process
 	watcher *errorWatcher
 	guard   autoFixGuard
+
+	// providerMutex guards provider: read by every runTask call, written
+	// by a model change from the UI while one may be in flight.
+	providerMutex sync.Mutex
+	provider      config.LLM
 
 	// appProxyPort is the app proxy's own listener port (see
 	// newAppProxy), set once before the HTTP servers start accepting
@@ -79,7 +89,7 @@ type Server struct {
 // cancelled, at which point it stops the dev server and shuts the HTTP
 // server down cleanly. initialTask, if non-empty, is submitted as the
 // first chat message right away.
-func Serve(ctx context.Context, provider config.LLM, port int, initialTask string) error {
+func Serve(ctx context.Context, provider config.LLM, port int, initialTask string, fromEnvironment bool) error {
 	if err := ensureNode(); err != nil {
 		return err
 	}
@@ -99,7 +109,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 		fmt.Fprintln(os.Stderr, "session log:", historyErr)
 	}
 
-	server := &Server{root: root, provider: provider, history: history, hub: newHub()}
+	server := &Server{root: root, provider: provider, fromEnvironment: fromEnvironment, history: history, hub: newHub()}
 	server.watcher = newErrorWatcher(func(text string) { server.onError("server", text) })
 	server.proc = newProcess(root, server.hub, server.watcher)
 
@@ -287,6 +297,8 @@ func (server *Server) routes(mux *http.ServeMux) {
 	mux.Handle("/", http.FileServer(http.FS(staticRoot)))
 	mux.HandleFunc("/config", server.handleConfig)
 	mux.HandleFunc("/state", server.handleState)
+	mux.HandleFunc("/models", server.handleModels)
+	mux.HandleFunc("/model", server.handleModel)
 	mux.Handle("/events", server.hub)
 	mux.HandleFunc("/chat", server.handleChat)
 	mux.HandleFunc("/client-error", server.handleClientError)
@@ -326,6 +338,53 @@ func (server *Server) handleState(response http.ResponseWriter, request *http.Re
 		"process": server.proc.State(),
 		"port":    server.proc.Port(),
 	})
+}
+
+const listModelsTimeout = 10 * time.Second
+
+// handleModels lists what the endpoint's /v1/models offers, the same way
+// the terminal's `yolocoder model` does, plus the one currently in use —
+// best-effort: an endpoint that doesn't support listing still gets a
+// usable response, just with an empty list and only its current model.
+func (server *Server) handleModels(response http.ResponseWriter, request *http.Request) {
+	provider := server.currentProvider()
+	ctx, cancel := context.WithTimeout(request.Context(), listModelsTimeout)
+	defer cancel()
+	models, _ := agent.ListModels(ctx, provider.BaseURL, provider.APIKey)
+	writeJSON(response, map[string]any{
+		"models":  models,
+		"current": provider.Model,
+		"locked":  server.fromEnvironment,
+	})
+}
+
+type modelRequest struct {
+	Model string `json:"model"`
+}
+
+// handleModel changes the model in use from here on, exactly like the
+// terminal's /model.
+func (server *Server) handleModel(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(response, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if server.fromEnvironment {
+		http.Error(response, "can't change an OPENAI_* environment provider; restart with a different OPENAI_MODEL", http.StatusBadRequest)
+		return
+	}
+	var body modelRequest
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(response, err.Error(), http.StatusBadRequest)
+		return
+	}
+	model := strings.TrimSpace(body.Model)
+	if model == "" {
+		http.Error(response, "model is required", http.StatusBadRequest)
+		return
+	}
+	server.setModel(model)
+	response.WriteHeader(http.StatusAccepted)
 }
 
 type chatRequest struct {
@@ -448,7 +507,7 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	server.hub.publish("chat", chatMessage{Role: role, Text: task})
 
 	turns, _ := session.Recent(server.root)
-	outcome, err := app.RunTask(ctx, task, server.provider, app.Recollections(turns), hubProgress{server.hub})
+	outcome, err := app.RunTask(ctx, task, server.currentProvider(), app.Recollections(turns), hubProgress{server.hub})
 	if err != nil {
 		server.hub.publish("chat", chatMessage{Role: "system", Text: "Error: " + err.Error()})
 		return outcome, err
@@ -499,6 +558,29 @@ func (server *Server) setPhase(phase string) {
 	server.phase = phase
 	server.stateMutex.Unlock()
 	server.hub.publish("phase", map[string]string{"phase": phase})
+}
+
+// currentProvider is what every task actually runs against; read through
+// this rather than the field directly, since a model change from the UI
+// can land between one task and the next.
+func (server *Server) currentProvider() config.LLM {
+	server.providerMutex.Lock()
+	defer server.providerMutex.Unlock()
+	return server.provider
+}
+
+// setModel changes the model in use from here on and saves it, exactly
+// like the terminal's /model — except an environment-sourced provider,
+// which the caller must not pass here (there is nothing on disk for it
+// to save to; see handleModel).
+func (server *Server) setModel(model string) {
+	server.providerMutex.Lock()
+	server.provider.Model = model
+	provider := server.provider
+	server.providerMutex.Unlock()
+	if err := config.Save(provider); err != nil {
+		server.hub.publish("chat", chatMessage{Role: "system", Text: "Could not save the model choice: " + err.Error()})
+	}
 }
 
 // recordTurn mirrors record in cmd/yolocoder/main.go, so a folder's

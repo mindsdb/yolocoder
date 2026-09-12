@@ -1,44 +1,35 @@
 const chatLog = document.getElementById("chat-log");
-const agentConsoleLog = document.getElementById("agent-console-log");
-const serverConsoleLog = document.getElementById("server-console-log");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const chatSend = document.getElementById("chat-send");
 const processState = document.getElementById("process-state");
 const appFrame = document.getElementById("app-frame");
-const busyIndicator = document.getElementById("busy-indicator");
-const busyText = document.getElementById("busy-text");
-const reviewNote = document.getElementById("review-note");
 const sidebar = document.getElementById("sidebar");
 const btnCollapse = document.getElementById("btn-collapse");
 const btnExpand = document.getElementById("btn-expand");
+const modelSelect = document.getElementById("model-select");
 
-// The three-step loop this UI reflects: build (the agent works), load
-// (the iframe picks up what changed), review (the dev server's log is
-// watched for anything the change broke, which either ends the loop or
-// starts it again as an auto-fix). Only "build" and "load" are phases a
-// single task moves through and reports here; "review" has no end of its
-// own — the error watcher runs for as long as the dev server does — so
-// it's shown as a standing note rather than a step in the spinner.
-const phaseLabels = { build: "Building...", load: "Loading..." };
+// Each turn (a user message or an auto-fix) gets its own collapsible
+// "Agent activity" block, open and live while it runs, collapsed once
+// the reply lands — there is no longer one shared console for the whole
+// conversation. currentActivity is that turn's block while one is open,
+// and null between turns; status/log/serverlog lines go wherever it
+// points, or nowhere if nothing is running (ambient dev-server chatter
+// with no turn attached to it isn't shown).
+let currentActivity = null;
 let currentPhase = null;
 let busy = false;
 
+const phaseLabels = { build: "Building...", load: "Loading..." };
+
 function setBusy(isBusy) {
   busy = isBusy;
-  busyIndicator.hidden = !busy;
   chatSend.disabled = busy;
-  updateReviewNote();
-}
-
-function updateReviewNote() {
-  reviewNote.hidden = busy || processState.textContent !== "running";
 }
 
 function setProcessState(state) {
   processState.textContent = state;
   processState.className = "pill pill-" + state;
-  updateReviewNote();
 }
 
 function addMessage(role, text) {
@@ -60,6 +51,7 @@ function addMessage(role, text) {
   }
   chatLog.appendChild(wrapper);
   chatLog.scrollTop = chatLog.scrollHeight;
+  return wrapper;
 }
 
 function firstLine(text) {
@@ -68,9 +60,38 @@ function firstLine(text) {
   return "(click to expand)";
 }
 
-function addLine(container, text) {
-  container.textContent += text + "\n";
-  container.parentElement.scrollTop = container.parentElement.scrollHeight;
+// openActivity starts this turn's own activity block, open and marked
+// running, right after its message bubble.
+function openActivity() {
+  const details = document.createElement("details");
+  details.className = "activity running";
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = phaseLabels[currentPhase] || "Agent activity";
+  const log = document.createElement("div");
+  log.className = "activity-log";
+  details.append(summary, log);
+  chatLog.appendChild(details);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  currentActivity = details;
+}
+
+// closeActivity collapses the current turn's activity block once its
+// reply has landed, so the block a viewer lands on is the reply, not a
+// wall of steps that already finished.
+function closeActivity() {
+  if (!currentActivity) return;
+  currentActivity.classList.remove("running");
+  currentActivity.querySelector("summary").textContent = "Agent activity";
+  currentActivity.open = false;
+  currentActivity = null;
+}
+
+function addActivityLine(text) {
+  if (!currentActivity) return;
+  const log = currentActivity.querySelector(".activity-log");
+  log.textContent += text + "\n";
+  log.scrollTop = log.scrollHeight;
 }
 
 function reloadApp() {
@@ -89,6 +110,39 @@ fetch("/config")
   })
   .catch(() => {});
 
+// The model list comes from the endpoint's own /v1/models, the same way
+// `yolocoder model` on the terminal picks one — best-effort, since not
+// every provider supports listing.
+fetch("/models")
+  .then((response) => response.json())
+  .then((data) => {
+    const models = data.models || [];
+    if (data.current && !models.includes(data.current)) models.unshift(data.current);
+    modelSelect.innerHTML = "";
+    for (const name of models) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      modelSelect.appendChild(option);
+    }
+    if (data.current) modelSelect.value = data.current;
+    modelSelect.disabled = !!data.locked || models.length <= 1;
+    modelSelect.title = data.locked
+      ? "Set by OPENAI_MODEL; restart to change it"
+      : "Model";
+  })
+  .catch(() => {
+    modelSelect.hidden = true;
+  });
+
+modelSelect.addEventListener("change", () => {
+  fetch("/model", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: modelSelect.value }),
+  });
+});
+
 // The ground truth behind busy/phase/process, fetched whenever the SSE
 // connection below (re)opens. A one-shot event a tab happens to miss —
 // a reconnect during a long build, a tab opened mid-task — would
@@ -99,7 +153,6 @@ function resyncState() {
     .then((response) => response.json())
     .then((state) => {
       currentPhase = state.phase || null;
-      if (currentPhase) busyText.textContent = phaseLabels[currentPhase] || currentPhase;
       setBusy(!!state.busy);
       if (state.process) setProcessState(state.process);
     })
@@ -110,28 +163,38 @@ const events = new EventSource("/events");
 events.addEventListener("open", resyncState);
 events.addEventListener("chat", (event) => {
   const data = JSON.parse(event.data);
-  addMessage(data.role, data.text);
+  if (data.role === "user" || data.role === "auto-fix") {
+    addMessage(data.role, data.text);
+    openActivity();
+  } else {
+    addMessage(data.role, data.text);
+  }
 });
 events.addEventListener("phase", (event) => {
   currentPhase = JSON.parse(event.data).phase;
-  busyText.textContent = phaseLabels[currentPhase] || currentPhase;
+  if (currentActivity) {
+    currentActivity.querySelector("summary").textContent = phaseLabels[currentPhase] || "Agent activity";
+  }
 });
 events.addEventListener("status", (event) => {
   const data = JSON.parse(event.data);
-  if (data.text) addLine(agentConsoleLog, "… " + data.text);
-  // The agent's own fine-grained status ("reading your message...",
-  // "applying the patch...") is more informative than the coarse "build"
-  // label while it's the one actually running.
-  if (data.text && busy && currentPhase === "build") busyText.textContent = data.text;
+  if (data.text) addActivityLine("… " + data.text);
 });
 events.addEventListener("busy", (event) => {
-  setBusy(JSON.parse(event.data).busy);
+  const isBusy = JSON.parse(event.data).busy;
+  setBusy(isBusy);
+  // Tied to busy rather than the assistant's reply arriving: a task
+  // that errors out (the model call itself failing, say) never sends
+  // one, and the activity block would otherwise spin forever. busy
+  // going false covers every path, success or not, since it's set with
+  // a defer server-side.
+  if (!isBusy) closeActivity();
 });
 events.addEventListener("log", (event) => {
-  addLine(agentConsoleLog, JSON.parse(event.data).text);
+  addActivityLine(JSON.parse(event.data).text);
 });
 events.addEventListener("serverlog", (event) => {
-  addLine(serverConsoleLog, JSON.parse(event.data).text);
+  addActivityLine(JSON.parse(event.data).text);
 });
 // Fired after any applied change, whatever's running the dev server on
 // its own (Vite HMR, tsx watch) can't be relied on to have visibly

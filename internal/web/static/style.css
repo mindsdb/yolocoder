@@ -1,9 +1,9 @@
 * { box-sizing: border-box; }
-/* An element's own #id/.class rule (like #busy-indicator's "display:
-   flex") wins over the browser's default [hidden]{display:none} on
-   specificity alone, so setting el.hidden=true silently did nothing
-   for it. This makes [hidden] win unconditionally, for every element,
-   rather than fixing it one ID at a time. */
+/* An element's own #id/.class rule (like a "display: flex") wins over
+   the browser's default [hidden]{display:none} on specificity alone, so
+   setting el.hidden=true can silently do nothing. This makes [hidden]
+   win unconditionally, for every element, rather than fixing it one ID
+   at a time. */
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -41,19 +41,30 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 #chat-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid #e3e3e3;
   flex: 0 0 auto;
 }
-#brand { font-weight: 600; }
+#brand { font-weight: 600; white-space: nowrap; }
 #chat-header .pill { margin-left: auto; }
+#model-select {
+  border: none;
+  background: transparent;
+  color: #666;
+  font: inherit;
+  font-size: 12px;
+  max-width: 120px;
+  cursor: pointer;
+}
+#model-select:disabled { cursor: default; opacity: 0.6; }
 #btn-collapse {
   border: 1px solid #d6d6d6;
   background: #fafafa;
   border-radius: 6px;
   width: 26px;
   height: 26px;
+  flex: 0 0 auto;
   cursor: pointer;
   font: inherit;
 }
@@ -107,53 +118,51 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   word-break: break-word;
 }
 
-#agent-console, #server-console {
-  flex: 0 0 auto;
-  border-top: 1px solid #e3e3e3;
-  max-height: 140px;
-  overflow-y: auto;
-}
-#agent-console summary, #server-console summary {
-  cursor: pointer;
-  padding: 6px 12px;
+/* Each turn's own activity/log trail: open (and live) while it runs,
+   collapsed once the reply lands — a standing global console is gone in
+   favor of this. */
+.activity {
+  align-self: stretch;
+  border: 1px solid #eee;
+  border-radius: 8px;
   font-size: 12px;
   color: #666;
 }
-#agent-console-log, #server-console-log {
-  padding: 0 12px 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: #444;
-  white-space: pre-wrap;
-}
-
-#busy-indicator {
-  flex: 0 0 auto;
+.activity summary {
+  cursor: pointer;
+  padding: 6px 10px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  font-size: 13px;
-  color: #555;
-  border-top: 1px solid #e3e3e3;
+  gap: 6px;
+  list-style: none;
 }
-.spinner {
-  width: 12px;
-  height: 12px;
+.activity summary::-webkit-details-marker { display: none; }
+.activity summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: #999;
+}
+.activity[open] summary::before { content: "▾"; }
+.activity.running summary::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  margin-left: 2px;
   border-radius: 50%;
   border: 2px solid #d6d6d6;
-  border-top-color: #555;
+  border-top-color: #888;
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
-
-#review-note {
-  flex: 0 0 auto;
-  padding: 6px 12px 0;
-  font-size: 12px;
-  color: #888;
+.activity-log {
+  padding: 0 10px 8px 24px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 #chat-form {
@@ -180,6 +189,7 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   cursor: pointer;
   font: inherit;
 }
+#chat-form button:disabled { opacity: 0.5; cursor: default; }
 
 #preview { flex: 1 1 auto; min-width: 0; }
 #app-frame { width: 100%; height: 100%; border: 0; background: #fff; }

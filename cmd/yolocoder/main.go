@@ -107,7 +107,7 @@ func main() {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		task := strings.TrimSpace(strings.Join(args, " "))
-		if err := web.Serve(ctx, provider, port, task); err != nil {
+		if err := web.Serve(ctx, provider, port, task, fromEnvironment); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

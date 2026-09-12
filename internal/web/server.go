@@ -460,9 +460,23 @@ func (server *Server) onError(source, text string) {
 	}
 	task := fmt.Sprintf("A %s error occurred while the app was running:\n\n%s\n\nDiagnose and fix it.", source, text)
 	outcome, err := server.runTask(context.Background(), task, "auto-fix")
-	if err == nil && outcome.Applied {
+	if err == nil && shouldRestartAfterAutoFix(source, outcome.Applied) {
 		_ = server.proc.Restart(context.Background())
 	}
+}
+
+// shouldRestartAfterAutoFix reports whether an applied auto-fix should
+// also restart the dev server process. Only true for a server-sourced
+// error: a browser-side one can't have touched the dev server processes
+// at all — they're a separate process from the tab that threw it — so
+// HMR/tsx watch have already picked up the fix on their own by the time
+// the task returns, the same as any other applied change (see reload).
+// Restarting anyway would just be an unnecessary few seconds of
+// "connection refused" for no benefit. A server-side error might mean
+// the process itself is in a bad state (or actually dead), which an
+// explicit restart is worth doing for.
+func shouldRestartAfterAutoFix(source string, applied bool) bool {
+	return applied && source == "server"
 }
 
 func (server *Server) handleProcess(action string) http.HandlerFunc {

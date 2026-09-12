@@ -130,6 +130,28 @@ func TestModelChangeIsRefusedForAnEnvironmentProvider(t *testing.T) {
 	}
 }
 
+func TestShouldRestartAfterAutoFix(t *testing.T) {
+	cases := []struct {
+		source  string
+		applied bool
+		want    bool
+	}{
+		// A server-side error might mean the process itself is in a bad
+		// state, worth an explicit restart once it's fixed.
+		{"server", true, true},
+		{"server", false, false},
+		// A browser-side error can't touch the dev server processes at
+		// all; HMR/tsx watch already picked up the fix on their own.
+		{"browser", true, false},
+		{"browser", false, false},
+	}
+	for _, c := range cases {
+		if got := shouldRestartAfterAutoFix(c.source, c.applied); got != c.want {
+			t.Errorf("shouldRestartAfterAutoFix(%q, %v) = %v, want %v", c.source, c.applied, got, c.want)
+		}
+	}
+}
+
 func TestStateReflectsSetBusyAndSetPhase(t *testing.T) {
 	dir := t.TempDir()
 	hub := newHub()

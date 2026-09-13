@@ -53,24 +53,33 @@ function addMessage(role, text, usage) {
   } else {
     wrapper.textContent = text;
   }
-  chatLog.appendChild(wrapper);
   // Only ever set on an assistant reply that actually cost something the
-  // provider reported (see newUsageInfo server-side) — a quiet caption
-  // under that one reply, not part of the bubble itself.
+  // provider reported (see newUsageInfo server-side). Grouped with the
+  // bubble in its own tight little column, rather than as another child
+  // of #chat-log's own flex gap, so it reads as that one reply's footer
+  // and not a separate line in the conversation.
   if (usage) {
+    const group = document.createElement("div");
+    group.className = "msg-group";
     const caption = document.createElement("div");
     caption.className = "usage-note";
     caption.textContent = formatUsage(usage);
-    chatLog.appendChild(caption);
+    group.append(wrapper, caption);
+    chatLog.appendChild(group);
+  } else {
+    chatLog.appendChild(wrapper);
   }
   chatLog.scrollTop = chatLog.scrollHeight;
   return wrapper;
 }
 
+// Cached-token counts only ever apply to input: every provider that
+// tracks it caches (part of) the prompt, never the output, since output
+// is generated fresh every time — so there's no "out (cached)" to show.
 function formatUsage(usage) {
-  let text = `${usage.total.toLocaleString()} tokens · ${usage.input.toLocaleString()} in`;
+  let text = `in: ${usage.input.toLocaleString()}`;
   if (usage.cached) text += ` (${usage.cached.toLocaleString()} cached)`;
-  text += ` · ${usage.output.toLocaleString()} out`;
+  text += ` | out: ${usage.output.toLocaleString()}`;
   return text;
 }
 

@@ -110,10 +110,23 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 .msg-system { align-self: stretch; background: #fff7e0; color: #6b5300; font-size: 13px; }
 .msg-auto-fix { align-self: stretch; background: #fde8e8; color: #7a1f1f; font-size: 13px; }
 
-.usage-note {
+/* Groups an assistant bubble with its usage footer into one tight
+   column, so the footer reads as part of that reply rather than as
+   another line in the conversation with #chat-log's own full gap above
+   and below it. */
+.msg-group {
+  display: flex;
+  flex-direction: column;
   align-self: flex-start;
+  gap: 3px;
+  max-width: 92%;
+}
+.msg-group .msg {
+  max-width: 100%;
+}
+.usage-note {
   font-size: 10px;
-  color: #c2c2c2;
+  color: #bbb;
   padding: 0 2px;
 }
 

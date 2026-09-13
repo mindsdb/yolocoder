@@ -97,9 +97,9 @@ starts a turn gets its own "Agent activity" section right under it —
 the agent's step-by-step trail and the dev server's log for that turn,
 open and live while it runs, collapsing once the reply lands — rather
 than one shared console for the whole conversation. A reply that cost
-something the provider reported gets a small, muted caption of its own
-underneath it — total tokens, input (cached, if reported), output —
-summed across every call the turn took; silent otherwise.
+something the provider reported gets a small, muted footer of its own
+underneath it — `in: 1,234 (120 cached) | out: 344` — summed across
+every call the turn took; silent otherwise.
 
 The chat panel — titled with the same `[^_^] YoloCoder` the terminal
 prints at startup, with the folder it's running in shown just below —

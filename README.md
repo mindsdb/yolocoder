@@ -1,4 +1,4 @@
-# YoloCoder
+# [^_^] YoloCoder
 
 A minimal boilerplate for the YoloCoder CLI.
 

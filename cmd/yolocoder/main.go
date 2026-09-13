@@ -305,6 +305,9 @@ func runTask(task string, provider config.LLM, history *session.Log, recalled []
 		reply = "Done."
 	}
 	fmt.Printf("[*_*] %s\n", reply)
+	if line := outcome.Usage.Summary(); line != "" {
+		fmt.Printf("\x1b[2m  %s\x1b[0m\n", line)
+	}
 	return nil
 }
 
@@ -344,12 +347,16 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 		kind = "code"
 	}
 	_ = history.Append(session.Turn{
-		Message:  task,
-		Kind:     kind,
-		Summary:  outcome.Reply,
-		Files:    outcome.Files,
-		Applied:  outcome.Applied,
-		Attempts: outcome.Attempts,
-		Rewrote:  outcome.Rewrote,
+		Message:      task,
+		Kind:         kind,
+		Summary:      outcome.Reply,
+		Files:        outcome.Files,
+		Applied:      outcome.Applied,
+		Attempts:     outcome.Attempts,
+		Rewrote:      outcome.Rewrote,
+		InputTokens:  outcome.Usage.InputTokens,
+		CachedTokens: outcome.Usage.CachedTokens,
+		OutputTokens: outcome.Usage.OutputTokens,
+		TotalTokens:  outcome.Usage.TotalTokens,
 	})
 }

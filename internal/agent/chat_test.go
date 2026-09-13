@@ -122,6 +122,22 @@ func TestFromChatReadsTextAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestFromChatConvertsUsageToTheCommonShape(t *testing.T) {
+	chat := chatEnvelope{Usage: &chatUsage{PromptTokens: 100, CompletionTokens: 40, TotalTokens: 140}}
+	chat.Usage.PromptTokensDetails.CachedTokens = 25
+	got := fromChat(chat).usage()
+	want := Usage{InputTokens: 100, CachedTokens: 25, OutputTokens: 40, TotalTokens: 140}
+	if got != want {
+		t.Fatalf("usage() = %+v, want %+v", got, want)
+	}
+
+	// No usage field at all (some providers omit it) must not panic and
+	// must read as genuinely empty, not a real zero-token call.
+	if got := fromChat(chatEnvelope{}).usage(); !got.Empty() {
+		t.Fatalf("usage() = %+v, want Empty()", got)
+	}
+}
+
 func TestDetectAPI(t *testing.T) {
 	// A Responses route that exists, even when it rejects the probe.
 	responses := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -72,10 +72,23 @@ type chatEnvelope struct {
 	ID      string       `json:"id"`
 	Choices []chatChoice `json:"choices"`
 	Error   *apiError    `json:"error,omitempty"`
+	Usage   *chatUsage   `json:"usage,omitempty"`
 }
 
 type chatChoice struct {
 	Message chatMessage `json:"message"`
+}
+
+// chatUsage is /v1/chat/completions' own token accounting shape,
+// converted into the Responses API's shape by fromChat below so
+// responseEnvelope.usage() is the one place that reads either.
+type chatUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 // toChat converts a Responses-style request into a chat completion.
@@ -228,6 +241,14 @@ func chatMessageFor(item any) ([]chatMessage, error) {
 // rest of the agent reads.
 func fromChat(envelope chatEnvelope) responseEnvelope {
 	converted := responseEnvelope{ID: envelope.ID, Error: envelope.Error}
+	if envelope.Usage != nil {
+		converted.Usage = &responseUsage{
+			InputTokens:  envelope.Usage.PromptTokens,
+			OutputTokens: envelope.Usage.CompletionTokens,
+			TotalTokens:  envelope.Usage.TotalTokens,
+		}
+		converted.Usage.InputTokensDetails.CachedTokens = envelope.Usage.PromptTokensDetails.CachedTokens
+	}
 	for _, choice := range envelope.Choices {
 		for _, call := range choice.Message.ToolCalls {
 			converted.Output = append(converted.Output, responseItem{

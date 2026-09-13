@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/config"
 )
 
@@ -127,6 +128,17 @@ func TestModelChangeIsRefusedForAnEnvironmentProvider(t *testing.T) {
 	}
 	if got := server.currentProvider().Model; got != "old-model" {
 		t.Fatalf("currentProvider().Model = %q, want it unchanged", got)
+	}
+}
+
+func TestNewUsageInfo(t *testing.T) {
+	if got := newUsageInfo(agent.Usage{}); got != nil {
+		t.Fatalf("newUsageInfo(empty) = %+v, want nil so it's omitted from the wire message entirely", got)
+	}
+	got := newUsageInfo(agent.Usage{InputTokens: 100, CachedTokens: 20, OutputTokens: 40, TotalTokens: 140})
+	want := &usageInfo{Input: 100, Cached: 20, Output: 40, Total: 140}
+	if got == nil || *got != *want {
+		t.Fatalf("newUsageInfo(...) = %+v, want %+v", got, want)
 	}
 }
 

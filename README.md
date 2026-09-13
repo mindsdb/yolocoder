@@ -23,7 +23,11 @@ separately).
 While it works, YoloCoder prints what it is actually doing — the files it
 reads, the searches it runs, the plan, the patch, and the test result — so
 the finished session leaves a readable trail rather than a single status
-line that overwrites itself.
+line that overwrites itself. Under the reply, a dim line reports what the
+turn cost — total tokens, input (and how much of that was served from
+cache, when the provider reports it), and output — summed across every
+call the turn took, not just the last one. Silent when the provider
+doesn't report usage at all.
 
 ## Web UI
 
@@ -88,7 +92,10 @@ collapse behind a one-line summary — click to expand. Each message that
 starts a turn gets its own "Agent activity" section right under it —
 the agent's step-by-step trail and the dev server's log for that turn,
 open and live while it runs, collapsing once the reply lands — rather
-than one shared console for the whole conversation.
+than one shared console for the whole conversation. A reply that cost
+something the provider reported gets a small, muted caption of its own
+underneath it — total tokens, input (cached, if reported), output —
+summed across every call the turn took; silent otherwise.
 
 The chat panel — titled with the same `[^_^] YoloCoder` the terminal
 prints at startup, with the folder it's running in shown just below —

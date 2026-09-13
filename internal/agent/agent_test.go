@@ -293,6 +293,48 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 	}
 }
 
+func TestRunnerAccumulatesUsageAcrossCalls(t *testing.T) {
+	// A turn can cost several calls (route, then produce, then possibly
+	// rewrite); what's worth reporting is all of them summed, not any
+	// one call's own count.
+	repository := integrationRepository(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}],`+
+				`"usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110,"input_tokens_details":{"cached_tokens":20}}}`)
+		case 2:
+			diff := "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n"
+			change, _ := json.Marshal(Change{Summary: "Update greeting", FilesToModify: []string{"hello.txt"}, Diff: diff})
+			envelope := map[string]any{
+				"id":     "c",
+				"output": []map[string]any{{"type": "message", "content": []map[string]any{{"type": "output_text", "text": string(change)}}}},
+				"usage": map[string]any{
+					"input_tokens": 200, "output_tokens": 50, "total_tokens": 250,
+					"input_tokens_details": map[string]any{"cached_tokens": 30},
+				},
+			}
+			_ = json.NewEncoder(writer).Encode(envelope)
+		default:
+			t.Fatalf("unexpected request %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Usage{InputTokens: 300, CachedTokens: 50, OutputTokens: 60, TotalTokens: 360}
+	if outcome.Usage != want {
+		t.Fatalf("Usage = %+v, want %+v", outcome.Usage, want)
+	}
+}
+
 func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 	// A retry is only useful if the model can see what it got wrong, and
 	// it should cost only the evidence: the file contents are already in

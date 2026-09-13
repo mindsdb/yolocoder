@@ -92,6 +92,9 @@ type Outcome struct {
 	// Rewrote reports whether no diff would apply at all and the change
 	// fell back to writing whole files instead.
 	Rewrote bool
+	// Usage is every call this turn made, summed. Zero when the provider
+	// never reported usage at all (see Usage.Empty).
+	Usage Usage
 }
 
 // Recollection is one earlier turn in this folder, as the agent sees it.
@@ -266,6 +269,11 @@ type Runner struct {
 	// the same unchanged file again costs a sentence instead of another
 	// copy of it in a transcript that is resent on every turn.
 	served map[string]string
+	// usage accumulates every call this Runner makes — route, each tool
+	// round, and any rewrite — since a Runner is created fresh per turn
+	// (see app.RunTask), so by the time Run returns this is the whole
+	// turn's cost, not any one call's.
+	usage Usage
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
@@ -282,7 +290,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 		return Outcome{}, err
 	}
 	if !decision.CodingTask {
-		return Outcome{Reply: decision.Reply}, nil
+		return Outcome{Reply: decision.Reply, Usage: runner.usage}, nil
 	}
 
 	carried := recall(history, decision.Relevant)
@@ -360,7 +368,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			} else {
 				progress.Log("  tests passed")
 			}
-			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1}, nil
+			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1, Usage: runner.usage}, nil
 		}
 		progress.Log("  tests failed, retrying")
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
@@ -407,7 +415,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 			if summary == "" {
 				summary = "Rewrote " + strings.Join(targets, ", ")
 			}
-			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true}, nil
+			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true, Usage: runner.usage}, nil
 		}
 		return Outcome{}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
@@ -453,6 +461,7 @@ func (runner *Runner) route(ctx context.Context, task string, history []Recollec
 	if err != nil {
 		return routeDecision{}, err
 	}
+	runner.usage = runner.usage.add(response.usage())
 	text, err := response.text()
 	if err != nil {
 		return routeDecision{}, err
@@ -508,6 +517,7 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 		if err != nil {
 			return Change{}, err
 		}
+		session.runner.usage = session.runner.usage.add(response.usage())
 		calls := response.calls()
 		if len(calls) == 0 {
 			text, err := response.text()
@@ -549,6 +559,7 @@ func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence
 	if err != nil {
 		return Rewrite{}, err
 	}
+	runner.usage = runner.usage.add(response.usage())
 	text, err := response.text()
 	if err != nil {
 		return Rewrite{}, err

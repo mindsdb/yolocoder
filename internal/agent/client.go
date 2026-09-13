@@ -65,6 +65,34 @@ type responseEnvelope struct {
 	ID     string         `json:"id"`
 	Output []responseItem `json:"output"`
 	Error  *apiError      `json:"error,omitempty"`
+	Usage  *responseUsage `json:"usage,omitempty"`
+}
+
+// responseUsage is the Responses API's own token accounting shape.
+// chat.go's fromChat converts the /v1/chat/completions shape into this
+// same one, so usage() below is the one place that reads it regardless
+// of which dialect the provider actually speaks.
+type responseUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+}
+
+// usage reads this response's token accounting, normalized regardless of
+// dialect. Zero when the provider didn't report it at all.
+func (response responseEnvelope) usage() Usage {
+	if response.Usage == nil {
+		return Usage{}
+	}
+	return Usage{
+		InputTokens:  response.Usage.InputTokens,
+		CachedTokens: response.Usage.InputTokensDetails.CachedTokens,
+		OutputTokens: response.Usage.OutputTokens,
+		TotalTokens:  response.Usage.TotalTokens,
+	}
 }
 
 type apiError struct {

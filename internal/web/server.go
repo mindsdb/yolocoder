@@ -48,6 +48,27 @@ var httpErrorLog = log.New(os.Stderr, "[http] ", log.LstdFlags)
 type chatMessage struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
+	// Usage is set only on an assistant reply that actually cost
+	// something the provider reported, for the client to show subtly
+	// under that one reply — never on the user/auto-fix/system messages
+	// either side of it.
+	Usage *usageInfo `json:"usage,omitempty"`
+}
+
+// usageInfo is agent.Usage's wire shape: short field names, since this
+// rides along on every assistant chat message that has one.
+type usageInfo struct {
+	Input  int `json:"input"`
+	Cached int `json:"cached"`
+	Output int `json:"output"`
+	Total  int `json:"total"`
+}
+
+func newUsageInfo(usage agent.Usage) *usageInfo {
+	if usage.Empty() {
+		return nil
+	}
+	return &usageInfo{Input: usage.InputTokens, Cached: usage.CachedTokens, Output: usage.OutputTokens, Total: usage.TotalTokens}
 }
 
 // Server holds everything one --web session needs: the project it's
@@ -547,7 +568,7 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	if reply == "" {
 		reply = "Done."
 	}
-	server.hub.publish("chat", chatMessage{Role: "assistant", Text: reply})
+	server.hub.publish("chat", chatMessage{Role: "assistant", Text: reply, Usage: newUsageInfo(outcome.Usage)})
 	if outcome.Applied {
 		server.reload()
 	}
@@ -627,6 +648,8 @@ func recordTurn(history *session.Log, task string, outcome agent.Outcome) {
 	_ = history.Append(session.Turn{
 		Message: task, Kind: kind, Summary: outcome.Reply, Files: outcome.Files, Applied: outcome.Applied,
 		Attempts: outcome.Attempts, Rewrote: outcome.Rewrote,
+		InputTokens: outcome.Usage.InputTokens, CachedTokens: outcome.Usage.CachedTokens,
+		OutputTokens: outcome.Usage.OutputTokens, TotalTokens: outcome.Usage.TotalTokens,
 	})
 }
 

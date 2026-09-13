@@ -36,7 +36,7 @@ function setProcessState(state) {
   btnRecover.hidden = state !== "error";
 }
 
-function addMessage(role, text) {
+function addMessage(role, text, usage) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-" + role;
   // Long messages (a stack trace, a wall of npm output relayed as an
@@ -54,8 +54,24 @@ function addMessage(role, text) {
     wrapper.textContent = text;
   }
   chatLog.appendChild(wrapper);
+  // Only ever set on an assistant reply that actually cost something the
+  // provider reported (see newUsageInfo server-side) — a quiet caption
+  // under that one reply, not part of the bubble itself.
+  if (usage) {
+    const caption = document.createElement("div");
+    caption.className = "usage-note";
+    caption.textContent = formatUsage(usage);
+    chatLog.appendChild(caption);
+  }
   chatLog.scrollTop = chatLog.scrollHeight;
   return wrapper;
+}
+
+function formatUsage(usage) {
+  let text = `${usage.total.toLocaleString()} tokens · ${usage.input.toLocaleString()} in`;
+  if (usage.cached) text += ` (${usage.cached.toLocaleString()} cached)`;
+  text += ` · ${usage.output.toLocaleString()} out`;
+  return text;
 }
 
 function firstLine(text) {
@@ -175,7 +191,7 @@ events.addEventListener("chat", (event) => {
     addMessage(data.role, data.text);
     openActivity();
   } else {
-    addMessage(data.role, data.text);
+    addMessage(data.role, data.text, data.usage);
   }
 });
 events.addEventListener("phase", (event) => {

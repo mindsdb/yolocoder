@@ -53,6 +53,13 @@ type Turn struct {
 	// often patches needed a repair without debug logging having been on.
 	Attempts int  `json:"attempts,omitempty"`
 	Rewrote  bool `json:"rewrote,omitempty"`
+	// Token accounting for the whole turn (every call it took, summed),
+	// when the provider reported it. Zero across all four means it
+	// wasn't reported at all, not that the turn was free.
+	InputTokens  int `json:"input_tokens,omitempty"`
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	TotalTokens  int `json:"total_tokens,omitempty"`
 }
 
 // header is the first line of a session file.

@@ -63,6 +63,13 @@ func newAppProxy(portFn func() int) http.Handler {
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
 			http.Error(response, "dev server is not reachable yet: "+err.Error(), http.StatusBadGateway)
 		},
+		// ErrorHandler above only runs for a failure before any response
+		// has gone out; one that happens partway through streaming a
+		// response body (the dev server dying or restarting mid-request)
+		// can't be turned into an HTTP error anymore, so ReverseProxy
+		// logs it directly instead — through this rather than an
+		// unlabeled log.Default() straight to stderr.
+		ErrorLog: httpErrorLog,
 	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if portFn() == 0 {

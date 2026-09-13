@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,17 @@ var staticFiles embed.FS
 // DefaultPort is used when no --port is given and it isn't already taken;
 // otherwise the OS picks a free one.
 const DefaultPort = 8420
+
+// httpErrorLog labels net/http's own internal diagnostics — a body copy
+// that fails mid-stream because the dev server just restarted, a
+// panic recovered from a handler, and the like — which bypass every
+// error path yolocoder defines and print straight to stderr through
+// log.Default() otherwise (an "Unsolicited response ... 400 Bad
+// Request", a bare "context deadline exceeded", once each already seen
+// in practice). Neither ends the run; both looked like a crash next to
+// yolocoder's own unprefixed banner lines without something marking
+// whose message this actually is.
+var httpErrorLog = log.New(os.Stderr, "[http] ", log.LstdFlags)
 
 // chatMessage is one line in the chat pane. Role is "user" for what was
 // typed (or an auto-detected error, tagged "auto-fix"), "assistant" for
@@ -125,7 +137,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 		return fmt.Errorf("listen (app proxy): %w", err)
 	}
 	server.appProxyPort = appPort
-	appProxyServer := &http.Server{Handler: newAppProxy(server.proc.Port)}
+	appProxyServer := &http.Server{Handler: newAppProxy(server.proc.Port), ErrorLog: httpErrorLog}
 	go appProxyServer.Serve(appListener)
 
 	listener, actualPort, err := listen(port)
@@ -134,7 +146,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	}
 	mux := http.NewServeMux()
 	server.routes(mux)
-	httpServer := &http.Server{Handler: mux}
+	httpServer := &http.Server{Handler: mux, ErrorLog: httpErrorLog}
 
 	fmt.Printf("\x1b[36m[^_^] YoloCoder web\x1b[0m listening on \x1b[1mhttp://localhost:%d\x1b[0m\n", actualPort)
 	fmt.Println("\x1b[2mType exit here, or Ctrl+C, to stop.\x1b[0m")

@@ -316,9 +316,22 @@ func modelsEndpoint(baseURL string) string {
 	return baseURL + "/v1/models"
 }
 
+// ModelInfo is one entry from an endpoint's GET /v1/models listing.
+// OwnedBy is the OpenAI-compatible spec's own field for who owns the
+// model; a multi-vendor gateway (Groq, Together, Fireworks and similar)
+// typically fills it in with the real upstream vendor ("meta", "google",
+// "mistralai"...), which is what lets a model picker group entries by
+// provider. A single-vendor endpoint (MindsHub included) usually leaves
+// it empty, in which case there is nothing to group by.
+type ModelInfo struct {
+	ID      string
+	OwnedBy string
+}
+
 // ListModels queries an endpoint's OpenAI-compatible GET /v1/models listing
-// and returns the sorted model IDs it offers.
-func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+// and returns what it offers, sorted by OwnedBy then ID so entries that
+// share a provider already sit together.
+func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsEndpoint(baseURL), nil)
 	if err != nil {
 		return nil, err
@@ -339,19 +352,25 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
 	}
 	var envelope struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, fmt.Errorf("decode models list: %w", err)
 	}
-	models := make([]string, 0, len(envelope.Data))
+	models := make([]ModelInfo, 0, len(envelope.Data))
 	for _, item := range envelope.Data {
 		if item.ID != "" {
-			models = append(models, item.ID)
+			models = append(models, ModelInfo{ID: item.ID, OwnedBy: strings.TrimSpace(item.OwnedBy)})
 		}
 	}
-	sort.Strings(models)
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].OwnedBy != models[j].OwnedBy {
+			return models[i].OwnedBy < models[j].OwnedBy
+		}
+		return models[i].ID < models[j].ID
+	})
 	return models, nil
 }
 

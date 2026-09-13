@@ -104,12 +104,16 @@ every call the turn took; silent otherwise.
 The chat panel — titled with the same `[^_^] YoloCoder` the terminal
 prints at startup, with the folder it's running in shown just below —
 can be collapsed to give the preview the full window; a small button in
-its header brings it back. A model picker sits under the message input:
-it lists what the endpoint's `/v1/models` offers, the same way
-`yolocoder model` does on the terminal, and switching it there takes
-effect immediately and is saved, unless the provider came from
-`--llm-from-env-vars`, which — like the terminal's `/model` — it can't
-change.
+its header brings it back. Enter sends the message; Shift+Enter starts a
+new line instead, noted in a small hint on the other side of the input
+footer. A model picker sits there too: it lists what the endpoint's
+`/v1/models` offers, the same way `yolocoder model` does on the
+terminal, grouped by provider when the endpoint's own listing says who
+owns each model (a multi-vendor gateway like Groq or Together, typically)
+and left flat when it doesn't (MindsHub included, whose own models have
+nothing to group by). Switching it takes effect immediately and is
+saved, unless the provider came from `--llm-from-env-vars`, which — like
+the terminal's `/model` — it can't change.
 
 Pasting a screenshot into the message box attaches it to that turn — a
 small thumbnail appears above the input, click its × to drop it before

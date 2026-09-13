@@ -267,6 +267,9 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   flex: 0 0 auto;
   padding: 0 10px 8px;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 #model-select {
   border: none;
@@ -278,6 +281,11 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   cursor: pointer;
 }
 #model-select:disabled { cursor: default; opacity: 0.6; }
+#composer-hint {
+  color: #bbb;
+  font-size: 11px;
+  white-space: nowrap;
+}
 
 #preview { flex: 1 1 auto; min-width: 0; }
 #app-frame { width: 100%; height: 100%; border: 0; background: #fff; }

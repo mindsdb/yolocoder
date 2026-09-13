@@ -233,18 +233,32 @@ fetch("/config")
 
 // The model list comes from the endpoint's own /v1/models, the same way
 // `yolocoder model` on the terminal picks one — best-effort, since not
-// every provider supports listing.
+// every provider supports listing. Each entry is {id, provider}; provider
+// is only ever set when the endpoint's own listing reports one (see
+// modelOption server-side) — a single-vendor endpoint (MindsHub included)
+// usually leaves it empty, in which case there is nothing to group by and
+// this falls back to exactly the flat list it showed before.
 fetch("/models")
   .then((response) => response.json())
   .then((data) => {
     const models = data.models || [];
-    if (data.current && !models.includes(data.current)) models.unshift(data.current);
+    if (data.current && !models.some((model) => model.id === data.current)) {
+      models.unshift({ id: data.current, provider: "" });
+    }
     modelSelect.innerHTML = "";
-    for (const name of models) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      modelSelect.appendChild(option);
+    const distinctProviders = new Set(models.map((model) => model.provider).filter(Boolean));
+    if (distinctProviders.size > 1) {
+      const groups = new Map();
+      for (const model of models) {
+        const key = model.provider || "Other";
+        if (!groups.has(key)) groups.set(key, document.createElement("optgroup"));
+        const group = groups.get(key);
+        group.label = key;
+        group.appendChild(modelOptionEl(model));
+      }
+      for (const group of groups.values()) modelSelect.appendChild(group);
+    } else {
+      for (const model of models) modelSelect.appendChild(modelOptionEl(model));
     }
     if (data.current) modelSelect.value = data.current;
     modelSelect.disabled = !!data.locked || models.length <= 1;
@@ -255,6 +269,13 @@ fetch("/models")
   .catch(() => {
     modelSelect.hidden = true;
   });
+
+function modelOptionEl(model) {
+  const option = document.createElement("option");
+  option.value = model.id;
+  option.textContent = model.id;
+  return option;
+}
 
 modelSelect.addEventListener("change", () => {
   fetch("/model", {
@@ -325,6 +346,17 @@ events.addEventListener("process", (event) => {
   const data = JSON.parse(event.data);
   setProcessState(data.state);
   if (data.state === "running") reloadApp();
+});
+
+// Enter sends, Shift+Enter inserts a newline (the ordinary textarea
+// behavior, kept available for anyone who wants to draft a longer,
+// multi-line message before sending it). isComposing skips this while an
+// IME is still resolving a character, so committing that character
+// doesn't also send the message early.
+chatInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  chatForm.requestSubmit();
 });
 
 chatForm.addEventListener("submit", (event) => {

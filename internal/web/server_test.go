@@ -88,6 +88,27 @@ func TestModelsListsAndReportsTheCurrentOne(t *testing.T) {
 	}
 }
 
+func TestModelsReportsProviderWhenTheEndpointOffersIt(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":"llama-3-70b","owned_by":"meta"},{"id":"gpt-oss-120b","owned_by":"openai"}]}`))
+	}))
+	defer provider.Close()
+
+	server := &Server{root: t.TempDir(), hub: newHub(), provider: config.LLM{BaseURL: provider.URL, Model: "llama-3-70b"}}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/models", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{`"id":"llama-3-70b"`, `"provider":"meta"`, `"id":"gpt-oss-120b"`, `"provider":"openai"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/models body = %s, want it to contain %q", body, want)
+		}
+	}
+}
+
 func TestModelChangeUpdatesTheRunningProviderAndPersists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())

@@ -186,8 +186,12 @@ func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (s
 	choices := make([]terminal.Choice, len(models))
 	initial := 0
 	for index, model := range models {
-		choices[index] = terminal.Choice{Label: model}
-		if model == provider.Model {
+		label := model.ID
+		if model.OwnedBy != "" {
+			label = model.ID + " (" + model.OwnedBy + ")"
+		}
+		choices[index] = terminal.Choice{Label: label}
+		if model.ID == provider.Model {
 			initial = index
 		}
 	}
@@ -197,7 +201,7 @@ func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (s
 	if err != nil {
 		return "", err
 	}
-	return models[selected], nil
+	return models[selected].ID, nil
 }
 
 func connect(input *os.File, output *os.File) (config.LLM, error) {

@@ -52,9 +52,35 @@ func TestListModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mindshub_air", "mindshub_pro"}
+	want := []ModelInfo{{ID: "mindshub_air"}, {ID: "mindshub_pro"}}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("ListModels() = %v, want %v", models, want)
+	}
+}
+
+func TestListModelsCapturesOwnedByAndGroupsByIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"data":[
+			{"id":"llama-3-70b","owned_by":"meta"},
+			{"id":"gpt-oss-120b","owned_by":"openai"},
+			{"id":"mixtral-8x7b","owned_by":"mistralai"}
+		]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListModels(context.Background(), server.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted by OwnedBy first, so entries sharing a provider sit together.
+	want := []ModelInfo{
+		{ID: "llama-3-70b", OwnedBy: "meta"},
+		{ID: "mixtral-8x7b", OwnedBy: "mistralai"},
+		{ID: "gpt-oss-120b", OwnedBy: "openai"},
+	}
+	if !reflect.DeepEqual(models, want) {
+		t.Fatalf("ListModels() = %+v, want %+v", models, want)
 	}
 }
 

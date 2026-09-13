@@ -387,13 +387,27 @@ const listModelsTimeout = 10 * time.Second
 // the terminal's `yolocoder model` does, plus the one currently in use —
 // best-effort: an endpoint that doesn't support listing still gets a
 // usable response, just with an empty list and only its current model.
+// modelOption is a model's wire shape for the picker: id plus, when the
+// endpoint's own /v1/models reported one, the provider that owns it (see
+// agent.ModelInfo) — empty when the endpoint doesn't populate that field,
+// which app.js takes as its cue to fall back to a flat list instead of
+// grouping by an empty string.
+type modelOption struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider,omitempty"`
+}
+
 func (server *Server) handleModels(response http.ResponseWriter, request *http.Request) {
 	provider := server.currentProvider()
 	ctx, cancel := context.WithTimeout(request.Context(), listModelsTimeout)
 	defer cancel()
 	models, _ := agent.ListModels(ctx, provider.BaseURL, provider.APIKey)
+	options := make([]modelOption, len(models))
+	for index, model := range models {
+		options[index] = modelOption{ID: model.ID, Provider: model.OwnedBy}
+	}
 	writeJSON(response, map[string]any{
-		"models":  models,
+		"models":  options,
 		"current": provider.Model,
 		"locked":  server.fromEnvironment,
 	})

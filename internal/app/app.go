@@ -30,6 +30,9 @@ Usage:
                                   of the app, with server and browser errors
                                   fed back to the agent automatically
   yolocoder --web --port <n>      use a specific port for the web UI
+  yolocoder --web --debug         also print every request/reply to this
+                                  terminal (never the browser); works with
+                                  plain yolocoder too
   yolocoder config show           show the saved provider
   yolocoder config connect        replace the saved provider
   yolocoder config reset          remove the saved provider

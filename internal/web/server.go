@@ -100,10 +100,14 @@ type Server struct {
 // Serve starts the --web UI for the current folder and blocks until ctx is
 // cancelled, at which point it stops the dev server and shuts the HTTP
 // server down cleanly. initialTask, if non-empty, is submitted as the
-// first chat message right away.
-func Serve(ctx context.Context, provider config.LLM, port int, initialTask string, fromEnvironment bool) error {
+// first chat message right away. debugOn prints every request/reply to
+// the terminal (see enableDebugToTerminal); it never reaches the browser.
+func Serve(ctx context.Context, provider config.LLM, port int, initialTask string, fromEnvironment, debugOn bool) error {
 	if err := ensureNode(); err != nil {
 		return err
+	}
+	if debugOn {
+		enableDebugToTerminal()
 	}
 	// A child context so typing "exit" can stop the run the same way the
 	// caller cancelling ctx (Ctrl+C) already does, without either needing

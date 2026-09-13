@@ -5,6 +5,65 @@ import (
 	"testing"
 )
 
+func TestParseWebRecognizesEachFlagAnywhereInArgs(t *testing.T) {
+	useWeb, port, debugOn, rest, err := ParseWeb([]string{"build", "--web", "me", "--debug", "a", "game"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !useWeb || !debugOn {
+		t.Fatalf("useWeb=%v debugOn=%v, want both true", useWeb, debugOn)
+	}
+	if port != 0 {
+		t.Fatalf("port = %d, want 0 (not given)", port)
+	}
+	if strings.Join(rest, " ") != "build me a game" {
+		t.Fatalf("rest = %q", rest)
+	}
+}
+
+func TestParseWebPortBothSpellings(t *testing.T) {
+	for _, args := range [][]string{
+		{"--web", "--port", "9000"},
+		{"--web", "--port=9000"},
+	} {
+		useWeb, port, _, rest, err := ParseWeb(args)
+		if err != nil {
+			t.Fatalf("ParseWeb(%v) = %v", args, err)
+		}
+		if !useWeb || port != 9000 {
+			t.Fatalf("ParseWeb(%v) = useWeb=%v port=%d, want true, 9000", args, useWeb, port)
+		}
+		if len(rest) != 0 {
+			t.Fatalf("ParseWeb(%v) rest = %v, want none left over", args, rest)
+		}
+	}
+}
+
+func TestParseWebWithoutAnyFlags(t *testing.T) {
+	useWeb, port, debugOn, rest, err := ParseWeb([]string{"fix", "the", "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if useWeb || debugOn || port != 0 {
+		t.Fatalf("useWeb=%v debugOn=%v port=%d, want all false/zero", useWeb, debugOn, port)
+	}
+	if strings.Join(rest, " ") != "fix the build" {
+		t.Fatalf("rest = %q", rest)
+	}
+}
+
+func TestParseWebRefusesAMissingPortValue(t *testing.T) {
+	if _, _, _, _, err := ParseWeb([]string{"--web", "--port"}); err == nil {
+		t.Fatal("expected an error for --port with no value")
+	}
+}
+
+func TestParseWebRefusesANonNumericPort(t *testing.T) {
+	if _, _, _, _, err := ParseWeb([]string{"--web", "--port", "abc"}); err == nil {
+		t.Fatal("expected an error for a non-numeric --port")
+	}
+}
+
 func TestParseContextTakesBothSpellings(t *testing.T) {
 	notes, rest, err := ParseContext([]string{"--context", "one", "--context=two", "fix", "the", "build"}, nil)
 	if err != nil {

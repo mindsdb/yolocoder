@@ -110,8 +110,11 @@ once automatic recovery has actually stopped trying.
 ## Debugging
 
 When a provider returns something unexpected, `/debug` in a session shows
-every request and reply as they happen. For a full untruncated trace on
-disk, including each patch and what Git said about it:
+every request and reply as they happen. `--debug` does the same from the
+command line — `yolocoder --web --debug` in particular, since there's no
+`/debug` command in the browser: the trace always prints to the terminal
+`--web` was launched from, never to the web UI itself. For a full
+untruncated trace on disk, including each patch and what Git said about it:
 
 ```sh
 YOLOCODER_DEBUG_LOG=1 yolocoder          # ~/.config/yolocoder/debug.log

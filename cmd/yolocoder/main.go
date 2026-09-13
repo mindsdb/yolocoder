@@ -89,7 +89,7 @@ func main() {
 		args = args[1:]
 	}
 
-	useWeb, port, args, err := app.ParseWeb(args)
+	useWeb, port, debugOn, args, err := app.ParseWeb(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -107,11 +107,16 @@ func main() {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		task := strings.TrimSpace(strings.Join(args, " "))
-		if err := web.Serve(ctx, provider, port, task, fromEnvironment); err != nil {
+		if err := web.Serve(ctx, provider, port, task, fromEnvironment, debugOn); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
+	}
+
+	if debugOn {
+		toggleDebug()
+		fmt.Println()
 	}
 
 	// Turns are recorded per folder so a later run can be told what has

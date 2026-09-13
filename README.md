@@ -71,7 +71,11 @@ unhandled promise rejections back to the chat. Combined with the dev
 server's own log, a server-side or browser-side error while the app is
 running is turned into a task and fixed automatically, then the dev server
 is restarted — up to two attempts per distinct error, after which it's left
-for you instead of retried forever.
+for you instead of retried forever. Whenever the dev server can't be
+reached at all — starting up, restarting, or the health check catching an
+actual crash — the preview shows a small page that polls itself and
+reloads the moment it's back, so the iframe recovers on its own instead of
+sitting on a stale error until the browser is refreshed by hand.
 
 Each run's chat pane starts fresh rather than replaying this folder's whole
 recorded history: that history exists to give the agent context to reason

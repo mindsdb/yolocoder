@@ -25,6 +25,36 @@ window.addEventListener("unhandledrejection", function(event){
 });
 })();</script>`
 
+// selfHealingPage is served in place of the app whenever the dev server
+// can't be reached at all — before recovery even has a chance to run, or
+// while it's in progress. It polls its own URL every couple of seconds
+// and reloads the moment that comes back with a real response, so the
+// iframe recovers on its own the instant the dev server does, rather
+// than sitting on a stale error until someone manually refreshes the
+// browser. Same-origin (it's fetching itself, through this same proxy),
+// so none of this trips over CORS the way probing from the parent page
+// would.
+const selfHealingPage = `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Reconnecting…</title></head>
+<body style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#666;background:#fff;padding:2rem;line-height:1.6">
+<p>%s</p>
+<p style="color:#999;font-size:0.85em">Checking again every couple of seconds — this reloads on its own once it's back.</p>
+<script>(function poll(){
+fetch(location.href,{cache:"no-store"}).then(function(response){
+  if(response.ok){location.reload();return;}
+  setTimeout(poll,2000);
+},function(){setTimeout(poll,2000);});
+})();</script>
+</body>
+</html>`
+
+func writeSelfHealingPage(response http.ResponseWriter, status int, message string) {
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	response.WriteHeader(status)
+	fmt.Fprintf(response, selfHealingPage, message)
+}
+
 // newAppProxy reverse-proxies onto the dev server's own port, which it
 // learns from portFn each request since a restart can change it. It's
 // mounted at the root of its own dedicated listener (see appProxyPort in
@@ -61,7 +91,7 @@ func newAppProxy(portFn func() int) http.Handler {
 		Transport:      &http.Transport{DisableKeepAlives: true},
 		ModifyResponse: injectShim,
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
-			http.Error(response, "dev server is not reachable yet: "+err.Error(), http.StatusBadGateway)
+			writeSelfHealingPage(response, http.StatusBadGateway, "dev server is not reachable yet: "+err.Error())
 		},
 		// ErrorHandler above only runs for a failure before any response
 		// has gone out; one that happens partway through streaming a
@@ -73,9 +103,7 @@ func newAppProxy(portFn func() int) http.Handler {
 	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if portFn() == 0 {
-			response.Header().Set("Content-Type", "text/html; charset=utf-8")
-			response.WriteHeader(http.StatusServiceUnavailable)
-			io.WriteString(response, "<p>The dev server isn't running yet.</p>")
+			writeSelfHealingPage(response, http.StatusServiceUnavailable, "The dev server isn't running yet.")
 			return
 		}
 		proxy.ServeHTTP(response, request)

@@ -2,6 +2,8 @@ package web
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -26,5 +28,39 @@ func TestInsertShimWithoutHeadPrependsIt(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "fragment, no head tag") {
 		t.Fatal("insertion should not drop the original content")
+	}
+}
+
+func TestAppProxyServesASelfHealingPageWhenNothingIsRunning(t *testing.T) {
+	proxy := newAppProxy(func() int { return 0 })
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "isn't running yet") {
+		t.Fatalf("body = %s, want it to say the dev server isn't running", body)
+	}
+	// The whole point: it has to poll and reload itself, or a viewer is
+	// stuck on this page until they refresh the browser by hand.
+	if !strings.Contains(body, "fetch(location.href") || !strings.Contains(body, "location.reload()") {
+		t.Fatalf("body = %s, want a self-polling reload script", body)
+	}
+}
+
+func TestWriteSelfHealingPageSubstitutesTheMessage(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeSelfHealingPage(recorder, http.StatusBadGateway, "dev server is not reachable yet: dial tcp refused")
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "dial tcp refused") {
+		t.Fatalf("body = %s, want the specific error message included", body)
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", got)
 	}
 }

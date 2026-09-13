@@ -293,7 +293,7 @@ func runTask(task string, provider config.LLM, history *session.Log, recalled []
 	reporter := ui.NewSession(os.Stdout)
 	reporter.Start("Thinking...")
 	activeSession = reporter
-	outcome, err := app.RunTask(context.Background(), task, provider, recalled, reporter)
+	outcome, err := app.RunTask(context.Background(), task, nil, provider, recalled, reporter)
 	activeSession = nil
 	reporter.Stop()
 	if err != nil {

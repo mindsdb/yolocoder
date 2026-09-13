@@ -27,9 +27,13 @@ type chatRequest struct {
 	ResponseFormat *chatFormat   `json:"response_format,omitempty"`
 }
 
+// Content is `any` rather than `string`: plain text marshals as a bare
+// string exactly as before, but a message carrying images marshals as the
+// array-of-parts shape chat-completions multimodal input expects (see
+// chatMessageFor), and json.Marshal handles either transparently.
 type chatMessage struct {
 	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
+	Content    any            `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
@@ -215,7 +219,19 @@ func chatMessages(input any) ([]chatMessage, error) {
 func chatMessageFor(item any) ([]chatMessage, error) {
 	switch value := item.(type) {
 	case inputMessage:
-		return []chatMessage{{Role: value.Role, Content: value.Content}}, nil
+		if len(value.Images) == 0 {
+			return []chatMessage{{Role: value.Role, Content: value.Content}}, nil
+		}
+		// chat-completions' own multimodal shape: an array of typed parts
+		// instead of a bare string, one entry per image plus the text.
+		var parts []map[string]any
+		if value.Content != "" {
+			parts = append(parts, map[string]any{"type": "text", "text": value.Content})
+		}
+		for _, image := range value.Images {
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": image}})
+		}
+		return []chatMessage{{Role: value.Role, Content: parts}}, nil
 	case responseItem:
 		if value.Type != "function_call" {
 			return nil, nil
@@ -258,10 +274,13 @@ func fromChat(envelope chatEnvelope) responseEnvelope {
 				Arguments: call.Function.Arguments,
 			})
 		}
-		if strings.TrimSpace(choice.Message.Content) != "" {
+		// The model's own reply is always plain text, never the
+		// multimodal shape chatMessage.Content can carry on the way out.
+		text, _ := choice.Message.Content.(string)
+		if strings.TrimSpace(text) != "" {
 			converted.Output = append(converted.Output, responseItem{
 				Type:    "message",
-				Content: []contentItem{{Type: "output_text", Text: choice.Message.Content}},
+				Content: []contentItem{{Type: "output_text", Text: text}},
 			})
 		}
 	}

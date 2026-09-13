@@ -202,8 +202,9 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 			if last.Role != "tool" || last.ToolCallID != "call_1" {
 				t.Fatalf("last message = %+v, want the tool result", last)
 			}
-			if !strings.Contains(last.Content, "<title>Old</title>") {
-				t.Fatalf("tool result did not carry the file: %q", last.Content)
+			content, _ := last.Content.(string)
+			if !strings.Contains(content, "<title>Old</title>") {
+				t.Fatalf("tool result did not carry the file: %q", content)
 			}
 			diff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>Old</title>\n+<title>New</title>\n </html>\n"
 			payload, _ := json.Marshal(Change{Summary: "Retitle", FilesToModify: []string{"index.html"}, Diff: diff})
@@ -219,7 +220,7 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,7 @@ func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 	if len(converted.Tools) == 0 {
 		t.Fatal("tools must survive; they are what the schema was dropped for")
 	}
-	system := converted.Messages[0].Content
+	system, _ := converted.Messages[0].Content.(string)
 	if !strings.Contains(system, "be brief") {
 		t.Fatalf("system message lost the instructions: %q", system)
 	}

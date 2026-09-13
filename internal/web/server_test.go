@@ -253,3 +253,39 @@ func TestPrepareProjectLeavesAnIntactYolocoderProjectAlone(t *testing.T) {
 		t.Fatal("prepareProject should not touch an existing yolocoder project's own files")
 	}
 }
+
+func TestSanitizeImagesAcceptsOrdinaryDataURLs(t *testing.T) {
+	images, err := sanitizeImages([]string{"data:image/png;base64,AAAA", "data:image/jpeg;base64,BBBB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 2 {
+		t.Fatalf("images = %v, want both to pass through", images)
+	}
+}
+
+func TestSanitizeImagesRejectsTooMany(t *testing.T) {
+	var images []string
+	for i := 0; i <= maxImagesPerMessage; i++ {
+		images = append(images, "data:image/png;base64,AAAA")
+	}
+	if _, err := sanitizeImages(images); err == nil {
+		t.Fatal("expected an error for exceeding the per-message image limit")
+	}
+}
+
+func TestSanitizeImagesRejectsNonImageDataURLs(t *testing.T) {
+	if _, err := sanitizeImages([]string{"not-a-data-url"}); err == nil {
+		t.Fatal("expected an error for something that isn't an image data URL")
+	}
+	if _, err := sanitizeImages([]string{"data:text/plain;base64,AAAA"}); err == nil {
+		t.Fatal("expected an error for a non-image data URL")
+	}
+}
+
+func TestSanitizeImagesRejectsOversizedImages(t *testing.T) {
+	huge := "data:image/png;base64," + strings.Repeat("A", maxImageDataURLBytes)
+	if _, err := sanitizeImages([]string{huge}); err == nil {
+		t.Fatal("expected an error for an image over the size limit")
+	}
+}

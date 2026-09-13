@@ -63,8 +63,10 @@ func PrintCommands() {
 
 // RunTask reports what the run amounted to: the reply to show, whether
 // it was a coding task, and what it touched, which is what the caller
-// needs to record the turn.
-func RunTask(ctx context.Context, task string, provider config.LLM, history []agent.Recollection, progress agent.Progress) (agent.Outcome, error) {
+// needs to record the turn. images are data URLs (screenshots pasted into
+// the web UI) attached to task, nil from the terminal, which has no way
+// to paste one in.
+func RunTask(ctx context.Context, task string, images []string, provider config.LLM, history []agent.Recollection, progress agent.Progress) (agent.Outcome, error) {
 	repository, err := repo.Open(".")
 	if err != nil {
 		return agent.Outcome{}, err
@@ -73,7 +75,7 @@ func RunTask(ctx context.Context, task string, provider config.LLM, history []ag
 	if err != nil {
 		return agent.Outcome{}, err
 	}
-	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, history, progress)
+	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, images, history, progress)
 	rememberDialect(provider, client)
 	return outcome, runErr
 }

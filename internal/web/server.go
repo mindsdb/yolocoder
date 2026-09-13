@@ -53,6 +53,10 @@ type chatMessage struct {
 	// under that one reply — never on the user/auto-fix/system messages
 	// either side of it.
 	Usage *usageInfo `json:"usage,omitempty"`
+	// Images are data URLs pasted into the composer, echoed back only on
+	// the "user" message that sent them so the sender sees their own
+	// screenshot inline in the bubble it went out in.
+	Images []string `json:"images,omitempty"`
 }
 
 // usageInfo is agent.Usage's wire shape: short field names, since this
@@ -184,7 +188,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	}
 
 	if task := strings.TrimSpace(initialTask); task != "" {
-		go server.runTask(context.Background(), task, "user")
+		go server.runTask(context.Background(), task, nil, "user")
 	}
 
 	select {
@@ -424,8 +428,21 @@ func (server *Server) handleModel(response http.ResponseWriter, request *http.Re
 	response.WriteHeader(http.StatusAccepted)
 }
 
+// maxImagesPerMessage and maxImageDataURLBytes bound what a pasted
+// screenshot can cost: the client already downscales before encoding (see
+// app.js), so a message hitting either limit is not an ordinary paste.
+const (
+	maxImagesPerMessage  = 6
+	maxImageDataURLBytes = 8 << 20
+)
+
 type chatRequest struct {
 	Message string `json:"message"`
+	// Images are data URLs (data:image/...;base64,...) pasted into the
+	// composer. Most models the terminal talks to aren't multimodal at
+	// all, so these are only ever present from the web UI, and only when
+	// the connected model can actually see them.
+	Images []string `json:"images,omitempty"`
 }
 
 func (server *Server) handleChat(response http.ResponseWriter, request *http.Request) {
@@ -439,15 +456,41 @@ func (server *Server) handleChat(response http.ResponseWriter, request *http.Req
 		return
 	}
 	message := strings.TrimSpace(body.Message)
-	if message == "" {
+	images, err := sanitizeImages(body.Images)
+	if err != nil {
+		http.Error(response, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if message == "" && len(images) == 0 {
 		http.Error(response, "message is required", http.StatusBadRequest)
 		return
 	}
 	// A person sending a message of their own is a sign they're driving
 	// again, so the next auto-detected error earns a fresh set of attempts.
 	server.guard.reset()
-	go server.runTask(context.Background(), message, "user")
+	go server.runTask(context.Background(), message, images, "user")
 	response.WriteHeader(http.StatusAccepted)
+}
+
+// sanitizeImages rejects a request that abuses the composer's image
+// paste rather than silently truncating it, so a runaway client finds out
+// immediately instead of wondering later why only some images arrived.
+func sanitizeImages(images []string) ([]string, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	if len(images) > maxImagesPerMessage {
+		return nil, fmt.Errorf("too many images (%d), the limit is %d", len(images), maxImagesPerMessage)
+	}
+	for _, image := range images {
+		if !strings.HasPrefix(image, "data:image/") {
+			return nil, fmt.Errorf("images must be data URLs")
+		}
+		if len(image) > maxImageDataURLBytes {
+			return nil, fmt.Errorf("image is too large")
+		}
+	}
+	return images, nil
 }
 
 type clientErrorReport struct {
@@ -496,7 +539,7 @@ func (server *Server) onError(source, text string) {
 		return
 	}
 	task := fmt.Sprintf("A %s error occurred while the app was running:\n\n%s\n\nDiagnose and fix it.", source, text)
-	outcome, err := server.runTask(context.Background(), task, "auto-fix")
+	outcome, err := server.runTask(context.Background(), task, nil, "auto-fix")
 	if err == nil && shouldRestartAfterAutoFix(source, outcome.Applied) {
 		_ = server.proc.Restart(context.Background())
 	}
@@ -543,7 +586,7 @@ func (server *Server) handleProcess(action string) http.HandlerFunc {
 // user's chat message, the one-off "write me start/restart/stop scripts"
 // task, or an auto-fix. It is exactly what runTask in cmd/yolocoder does
 // for the terminal, aimed at the SSE hub instead of the robot line.
-func (server *Server) runTask(ctx context.Context, task, role string) (agent.Outcome, error) {
+func (server *Server) runTask(ctx context.Context, task string, images []string, role string) (agent.Outcome, error) {
 	server.turnMutex.Lock()
 	defer server.turnMutex.Unlock()
 
@@ -555,10 +598,10 @@ func (server *Server) runTask(ctx context.Context, task, role string) (agent.Out
 	server.setPhase("build")
 	defer server.setBusy(false)
 
-	server.hub.publish("chat", chatMessage{Role: role, Text: task})
+	server.hub.publish("chat", chatMessage{Role: role, Text: task, Images: images})
 
 	turns, _ := session.Recent(server.root)
-	outcome, err := app.RunTask(ctx, task, server.currentProvider(), app.Recollections(turns), hubProgress{server.hub})
+	outcome, err := app.RunTask(ctx, task, images, server.currentProvider(), app.Recollections(turns), hubProgress{server.hub})
 	if err != nil {
 		server.hub.publish("chat", chatMessage{Role: "system", Text: "Error: " + err.Error()})
 		return outcome, err

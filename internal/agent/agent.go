@@ -166,9 +166,39 @@ type toolArguments struct {
 	Query string   `json:"query"`
 }
 
+// inputMessage is one message sent to the model. Images (data URLs pasted
+// into the web UI) ride alongside Content rather than replacing it; when
+// there are none, it marshals as the plain {role, content} shape every
+// provider expects for a text-only message. MarshalJSON is what makes that
+// switch, since a message can be dropped into responseRequest.Input as a
+// bare value or inside a []any slice — either way, encoding/json reaches
+// this method regardless of which position it sits in.
 type inputMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string
+	Content string
+	Images  []string
+}
+
+func (message inputMessage) MarshalJSON() ([]byte, error) {
+	if len(message.Images) == 0 {
+		return json.Marshal(struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{message.Role, message.Content})
+	}
+	// The Responses API's multimodal shape: content becomes a list of
+	// typed parts instead of a bare string.
+	var parts []map[string]any
+	if message.Content != "" {
+		parts = append(parts, map[string]any{"type": "input_text", "text": message.Content})
+	}
+	for _, image := range message.Images {
+		parts = append(parts, map[string]any{"type": "input_image", "image_url": image})
+	}
+	return json.Marshal(struct {
+		Role    string           `json:"role"`
+		Content []map[string]any `json:"content"`
+	}{message.Role, parts})
 }
 
 // decodeJSON unmarshals text into target, falling back to the first
@@ -282,10 +312,13 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 
 // Run routes the message first: a plain conversational message gets the
 // model's direct reply with the repository never touched, and only an
-// actual coding task goes through the map/plan/patch/test loop.
-func (runner *Runner) Run(ctx context.Context, task string, history []Recollection, progress Progress) (Outcome, error) {
+// actual coding task goes through the map/plan/patch/test loop. images are
+// data URLs (screenshots pasted into the web UI) attached to the message,
+// nil when there are none — most models the terminal talks to aren't
+// multimodal at all, so this is never required.
+func (runner *Runner) Run(ctx context.Context, task string, images []string, history []Recollection, progress Progress) (Outcome, error) {
 	progress.Status("Reading your message...")
-	decision, err := runner.route(ctx, task, history)
+	decision, err := runner.route(ctx, task, images, history)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -307,7 +340,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
 
 	progress.Status("Working out the change...")
-	session := runner.newChangeSession(task, repoMap, background(decision.Context, carried))
+	session := runner.newChangeSession(task, repoMap, background(decision.Context, carried), images)
 
 	var evidence string
 	var change Change
@@ -387,7 +420,7 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 		summary := ""
 		for _, path := range targets {
 			current, _ := runner.repository.ReadFile(path)
-			rewrite, err := runner.rewrite(ctx, task, path, current, evidence)
+			rewrite, err := runner.rewrite(ctx, task, path, current, evidence, images)
 			if err != nil {
 				return Outcome{}, err
 			}
@@ -430,13 +463,19 @@ func (runner *Runner) Run(ctx context.Context, task string, history []Recollecti
 // each turn's prompt is the previous turn's prompt plus a little more,
 // which is the only arrangement a provider's prefix cache can reuse.
 // Putting the new message first would defeat it entirely.
-func (runner *Runner) route(ctx context.Context, task string, history []Recollection) (routeDecision, error) {
+func (runner *Runner) route(ctx context.Context, task string, images []string, history []Recollection) (routeDecision, error) {
 	callCtx, cancel := context.WithTimeout(ctx, routeTimeout)
 	defer cancel()
 
 	notes, turns := split(history)
 	instructions, schema := routingInstructions, routeSchema()
 	input := any(task)
+	if len(images) > 0 {
+		// A bare string can't carry images, and the chat-completions
+		// dialect only knows how to convert a []any of messages (see
+		// chatMessages), so this always wraps even with no history.
+		input = []any{inputMessage{Role: "user", Content: task, Images: images}}
+	}
 	if len(history) > 0 {
 		// Asking for relevance selection costs schema and instructions,
 		// so it is only asked for when there is something to select from.
@@ -451,7 +490,7 @@ func (runner *Runner) route(ctx context.Context, task string, history []Recollec
 		if len(turns) > 0 {
 			messages = append(messages, inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + renderHistory(turns)})
 		}
-		input = append(messages, inputMessage{Role: "user", Content: "MESSAGE:\n" + task})
+		input = append(messages, inputMessage{Role: "user", Content: "MESSAGE:\n" + task, Images: images})
 	}
 	response, err := runner.client.create(callCtx, responseRequest{
 		Instructions: instructions,
@@ -488,11 +527,11 @@ type changeSession struct {
 	readPaths  []string
 }
 
-func (runner *Runner) newChangeSession(task, repoMap, earlier string) *changeSession {
+func (runner *Runner) newChangeSession(task, repoMap, earlier string, images []string) *changeSession {
 	opening := earlier + fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
 	return &changeSession{
 		runner:     runner,
-		transcript: []any{inputMessage{Role: "user", Content: opening}},
+		transcript: []any{inputMessage{Role: "user", Content: opening, Images: images}},
 	}
 }
 
@@ -547,8 +586,12 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 
 // rewrite asks for one file's complete new contents, used when no diff
 // would apply.
-func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence string) (Rewrite, error) {
-	input := fmt.Sprintf("TASK:\n%s\n\nFILE TO REWRITE:\n%s\n\nITS CURRENT CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, path, current, evidence)
+func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence string, images []string) (Rewrite, error) {
+	prompt := fmt.Sprintf("TASK:\n%s\n\nFILE TO REWRITE:\n%s\n\nITS CURRENT CONTENTS:\n%s\n\nWHY THE DIFF FAILED:\n%s", task, path, current, evidence)
+	input := any(prompt)
+	if len(images) > 0 {
+		input = []any{inputMessage{Role: "user", Content: prompt, Images: images}}
+	}
 	callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
 	defer cancel()
 	response, err := runner.client.create(callCtx, responseRequest{

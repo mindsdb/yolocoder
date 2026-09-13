@@ -48,7 +48,7 @@ func TestRouteAsksForRelevanceOnlyWhenThereIsHistory(t *testing.T) {
 
 	// With no history the call stays exactly as cheap as it was: the
 	// message goes as a bare string and nothing asks for selection.
-	if _, err := runner.route(context.Background(), "hi", nil); err != nil {
+	if _, err := runner.route(context.Background(), "hi", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if text, ok := inputs[0].(string); !ok || text != "hi" {
@@ -56,7 +56,7 @@ func TestRouteAsksForRelevanceOnlyWhenThereIsHistory(t *testing.T) {
 	}
 
 	// With history it asks for the selection too.
-	if _, err := runner.route(context.Background(), "and now?", pastTurns); err != nil {
+	if _, err := runner.route(context.Background(), "and now?", nil, pastTurns); err != nil {
 		t.Fatal(err)
 	}
 	parts, ok := inputs[1].([]any)
@@ -81,11 +81,11 @@ func TestRouteputsHistoryBeforeTheMessageForTheCache(t *testing.T) {
 	defer server.Close()
 	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
 
-	if _, err := runner.route(context.Background(), "first", pastTurns[:2]); err != nil {
+	if _, err := runner.route(context.Background(), "first", nil, pastTurns[:2]); err != nil {
 		t.Fatal(err)
 	}
 	// One more turn recorded, and a different message.
-	if _, err := runner.route(context.Background(), "second", pastTurns); err != nil {
+	if _, err := runner.route(context.Background(), "second", nil, pastTurns); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +163,7 @@ func TestRunGivesTheWorkOnlyTheChosenHistory(t *testing.T) {
 
 	progress := &recordingProgress{}
 	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
-	if _, err := NewRunner(client, repository).Run(context.Background(), "keep going", pastTurns, progress); err != nil {
+	if _, err := NewRunner(client, repository).Run(context.Background(), "keep going", nil, pastTurns, progress); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(changeInput, "Continuing the layout work.") {
@@ -212,7 +212,7 @@ func TestNotesGoAheadOfHistoryInTheRequest(t *testing.T) {
 	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
 
 	supplied := append([]Recollection{{Message: "this is a Django project", Note: true}}, pastTurns...)
-	if _, err := runner.route(context.Background(), "and now?", supplied); err != nil {
+	if _, err := runner.route(context.Background(), "and now?", nil, supplied); err != nil {
 		t.Fatal(err)
 	}
 	parts, ok := inputs[0].([]any)

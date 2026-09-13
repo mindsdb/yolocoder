@@ -111,6 +111,15 @@ effect immediately and is saved, unless the provider came from
 `--llm-from-env-vars`, which — like the terminal's `/model` — it can't
 change.
 
+Pasting a screenshot into the message box attaches it to that turn — a
+small thumbnail appears above the input, click its × to drop it before
+sending. It's downscaled in the browser first, so a retina screenshot
+doesn't turn into an oversized request. Sent images show up inline in
+that message's own bubble. This only actually helps when the connected
+model is multimodal; most aren't, and there's no detection of that up
+front — an attached screenshot a model can't see is simply ignored the
+way any other vision content would be.
+
 The dev server is watched for actually being alive, not just for error
 text reaching its log: if it stops answering on its own (a crash, an OS
 resource limit) it's restarted automatically, without any task involved,

@@ -9,6 +9,7 @@ const btnCollapse = document.getElementById("btn-collapse");
 const btnExpand = document.getElementById("btn-expand");
 const btnRecover = document.getElementById("btn-recover");
 const modelSelect = document.getElementById("model-select");
+const pendingImagesEl = document.getElementById("pending-images");
 
 // Each turn (a user message or an auto-fix) gets its own collapsible
 // "Agent activity" block, open and live while it runs, collapsed once
@@ -36,7 +37,7 @@ function setProcessState(state) {
   btnRecover.hidden = state !== "error";
 }
 
-function addMessage(role, text, usage) {
+function addMessage(role, text, usage, images) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-" + role;
   // Long messages (a stack trace, a wall of npm output relayed as an
@@ -52,6 +53,20 @@ function addMessage(role, text, usage) {
     wrapper.appendChild(details);
   } else {
     wrapper.textContent = text;
+  }
+  // Screenshots the message was sent with, echoed back on the same
+  // "user" chat event that carried the text (see chatMessage.Images
+  // server-side) — appended after the text above, which replaces
+  // wrapper's children wholesale when it runs.
+  if (images && images.length) {
+    const gallery = document.createElement("div");
+    gallery.className = "msg-images";
+    for (const src of images) {
+      const image = document.createElement("img");
+      image.src = src;
+      gallery.appendChild(image);
+    }
+    wrapper.appendChild(gallery);
   }
   // Only ever set on an assistant reply that actually cost something the
   // provider reported (see newUsageInfo server-side). Grouped with the
@@ -81,6 +96,79 @@ function formatUsage(usage) {
   if (usage.cached) text += ` (${usage.cached.toLocaleString()} cached)`;
   text += ` | out: ${usage.output.toLocaleString()}`;
   return text;
+}
+
+// Screenshot paste: most models the terminal talks to aren't multimodal
+// at all, so this is a web-UI-only, best-effort affordance — a model
+// that can't see images simply gets an ordinary text turn instead, same
+// as if nothing had been pasted.
+const MAX_PENDING_IMAGES = 6;
+const MAX_IMAGE_DIMENSION = 1600;
+let pendingImages = []; // data URLs, already downscaled, queued to send
+
+chatInput.addEventListener("paste", (event) => {
+  const items = event.clipboardData && event.clipboardData.items;
+  if (!items) return;
+  let pastedImage = false;
+  for (const item of items) {
+    if (!item.type || !item.type.startsWith("image/")) continue;
+    pastedImage = true;
+    const file = item.getAsFile();
+    if (file) queuePastedImage(file);
+  }
+  // Only swallow the paste when it was actually an image: an ordinary
+  // text paste (which also shows up as a clipboard item) must still land
+  // in the textarea normally.
+  if (pastedImage) event.preventDefault();
+});
+
+function queuePastedImage(file) {
+  if (pendingImages.length >= MAX_PENDING_IMAGES) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const image = new Image();
+    image.onload = () => {
+      pendingImages.push(downscale(image));
+      renderPendingImages();
+    };
+    image.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+// A retina screenshot can be several megapixels; shrinking it in the
+// browser before it's ever sent keeps both the request payload and
+// whatever the provider bills for vision tokens reasonable, without
+// visibly softening the text a bug report screenshot needs to stay
+// legible at ordinary display sizes.
+function downscale(image) {
+  const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(image.width, image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(image.width * scale) || 1;
+  canvas.height = Math.round(image.height * scale) || 1;
+  canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
+function renderPendingImages() {
+  pendingImagesEl.innerHTML = "";
+  pendingImagesEl.hidden = pendingImages.length === 0;
+  pendingImages.forEach((dataURL, index) => {
+    const chip = document.createElement("div");
+    chip.className = "pending-thumb";
+    const image = document.createElement("img");
+    image.src = dataURL;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.title = "Remove";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      pendingImages.splice(index, 1);
+      renderPendingImages();
+    });
+    chip.append(image, remove);
+    pendingImagesEl.appendChild(chip);
+  });
 }
 
 function firstLine(text) {
@@ -197,7 +285,7 @@ events.addEventListener("open", resyncState);
 events.addEventListener("chat", (event) => {
   const data = JSON.parse(event.data);
   if (data.role === "user" || data.role === "auto-fix") {
-    addMessage(data.role, data.text);
+    addMessage(data.role, data.text, null, data.images);
     openActivity();
   } else {
     addMessage(data.role, data.text, data.usage);
@@ -242,12 +330,15 @@ events.addEventListener("process", (event) => {
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const message = chatInput.value.trim();
-  if (!message) return;
+  if (!message && pendingImages.length === 0) return;
   chatInput.value = "";
+  const images = pendingImages;
+  pendingImages = [];
+  renderPendingImages();
   fetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, images }),
   });
 });
 

@@ -15,6 +15,66 @@ import (
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
+func TestInputMessageMarshalsAsPlainStringWithoutImages(t *testing.T) {
+	payload, err := json.Marshal(inputMessage{Role: "user", Content: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(payload); got != `{"role":"user","content":"hello"}` {
+		t.Fatalf("payload = %s, want the plain {role, content} shape", got)
+	}
+}
+
+func TestInputMessageMarshalsContentPartsWithImages(t *testing.T) {
+	payload, err := json.Marshal(inputMessage{Role: "user", Content: "look at this", Images: []string{"data:image/png;base64,AAAA"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL string `json:"image_url"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("payload %s did not decode as content parts: %v", payload, err)
+	}
+	if len(decoded.Content) != 2 {
+		t.Fatalf("content parts = %d, want 2 (text + image): %s", len(decoded.Content), payload)
+	}
+	if decoded.Content[0].Type != "input_text" || decoded.Content[0].Text != "look at this" {
+		t.Fatalf("first part = %+v, want the text", decoded.Content[0])
+	}
+	if decoded.Content[1].Type != "input_image" || decoded.Content[1].ImageURL != "data:image/png;base64,AAAA" {
+		t.Fatalf("second part = %+v, want the image", decoded.Content[1])
+	}
+}
+
+func TestChatMessageForBuildsMultimodalPartsForImages(t *testing.T) {
+	messages, err := chatMessageFor(inputMessage{Role: "user", Content: "look", Images: []string{"data:image/png;base64,AAAA", "data:image/png;base64,BBBB"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(messages))
+	}
+	parts, ok := messages[0].Content.([]map[string]any)
+	if !ok {
+		t.Fatalf("content = %#v, want the content-parts shape", messages[0].Content)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3 (text + 2 images): %#v", len(parts), parts)
+	}
+	if parts[0]["type"] != "text" || parts[0]["text"] != "look" {
+		t.Fatalf("first part = %#v, want the text", parts[0])
+	}
+	if parts[1]["type"] != "image_url" {
+		t.Fatalf("second part = %#v, want an image_url part", parts[1])
+	}
+}
+
 // schemaName is the structured-output schema a request asked for, which
 // is what distinguishes the routing, change and rewrite calls.
 func schemaName(body map[string]any) string {
@@ -266,7 +326,7 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +385,7 @@ func TestRunnerAccumulatesUsageAcrossCalls(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, &recordingProgress{})
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "Change old to new", nil, nil, &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +447,7 @@ func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{})
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, nil, &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +512,7 @@ func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, progress)
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +561,7 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	_, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, &recordingProgress{})
+	_, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, nil, &recordingProgress{})
 	if err == nil || !strings.Contains(err.Error(), "refusing to empty") {
 		t.Fatalf("err = %v, want a refusal to empty the file", err)
 	}
@@ -522,7 +582,7 @@ func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
 	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", nil, &recordingProgress{})
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", nil, nil, &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +807,7 @@ func TestRunnerRetriesWhenPromisedFilesAreNotCreated(t *testing.T) {
 
 	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
 	progress := &recordingProgress{}
-	if _, err := NewRunner(client, repository).Run(context.Background(), "add a server", nil, progress); err != nil {
+	if _, err := NewRunner(client, repository).Run(context.Background(), "add a server", nil, nil, progress); err != nil {
 		t.Fatal(err)
 	}
 	if changes != 2 {

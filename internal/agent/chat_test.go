@@ -406,6 +406,36 @@ func TestClientDropsTheResponsesSchemaWhenRejectedAlongsideTools(t *testing.T) {
 	}
 }
 
+func TestForceSchemaWithToolsSkipsTheWorkaround(t *testing.T) {
+	// With the env var set, a rejection must surface exactly as it would
+	// with no workaround at all, so an inference-side fix for it can be
+	// verified directly instead of being smoothed over here.
+	t.Setenv("YOLOCODER_FORCE_SCHEMA_WITH_TOOLS", "1")
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(writer, `{"message":"\"tools\" is incompatible with \"response_format\"","type":"invalid_request_error","param":"tools","code":"wrong_api_format"}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m", API: config.APIResponses})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.create(context.Background(), responseRequest{
+		Instructions: "be brief",
+		Input:        "hi",
+		Tools:        repositoryTools(),
+		Text:         strictSchema("code_change", changeSchema()),
+	}); err == nil {
+		t.Fatal("expected the rejection to be reported, not worked around")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want no retry", requests)
+	}
+}
+
 func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 	// Without response_format there is no enforcement, so the shape has
 	// to be asked for in words or the reply comes back however the model

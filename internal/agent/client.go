@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
@@ -223,8 +224,10 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	// the instructions instead, and keep doing that for this run. Checked
 	// regardless of dialect (see dropSchema's own comment) — a genuine
 	// Responses-only endpoint's errors never mention response_format, so
-	// this never fires for one.
-	if !client.dropSchema && rejectsSchemaWithTools(replyBody) {
+	// this never fires for one. forceSchemaWithTools skips this entirely,
+	// for verifying an inference-side fix for the rejection directly
+	// rather than through this workaround.
+	if !client.dropSchema && !forceSchemaWithTools() && rejectsSchemaWithTools(replyBody) {
 		debug.Log("SCHEMA", "the provider rejects response_format alongside tools; describing the shape in the instructions instead")
 		client.dropSchema = true
 		return client.create(ctx, request)
@@ -238,6 +241,20 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w: %s", parseErr, snippet(string(replyBody)))
 	}
 	return envelope, nil
+}
+
+// forceSchemaWithTools disables the tools/schema-conflict workaround
+// entirely (see the check in create() and dropSchema's own comment) when
+// set. Tool calling and structured output being asked for together is
+// ordinary and other providers handle it fine, so a rejection is really
+// an inference-side gap rather than something a client is expected to
+// route around forever; this exists to verify a fix for that gap
+// directly — with it set, a request that's still rejected fails exactly
+// as it would with no workaround at all, instead of being silently
+// smoothed over.
+func forceSchemaWithTools() bool {
+	value := strings.TrimSpace(os.Getenv("YOLOCODER_FORCE_SCHEMA_WITH_TOOLS"))
+	return value == "1" || strings.EqualFold(value, "true")
 }
 
 // decode reads a reply in whichever dialect this client speaks, returning

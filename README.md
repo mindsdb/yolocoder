@@ -149,20 +149,6 @@ The trace holds the contents of the files being worked on, so it is written
 with user-only permissions. It never contains the API key, which travels in
 a header rather than the request body.
 
-Some endpoints reject a request that carries both tool definitions and a
-structured-output schema together (Cerebras is the one seen in practice,
-by name, in its own error text); YoloCoder works around it automatically
-by dropping the schema and describing the shape in the instructions
-instead. To verify a server-side fix for that rejection directly, rather
-than through the workaround smoothing it over:
-
-```sh
-YOLOCODER_FORCE_SCHEMA_WITH_TOOLS=1 yolocoder
-```
-
-With it set, a request that's still rejected fails exactly as it would
-with no workaround at all.
-
 ## Install
 
 macOS and Linux:

@@ -247,10 +247,31 @@ func locate(lines, block []string) (int, error) {
 	case len(matches) == 0:
 		return 0, fmt.Errorf("could not find this hunk's lines in the file:\n%s%s", preview(block), nearMiss(lines, block))
 	case len(matches) > 1 && len(block) < 3:
-		return 0, fmt.Errorf("this hunk's lines appear %d times, too ambiguous to place:\n%s", len(matches), preview(block))
+		return 0, fmt.Errorf("this hunk's lines appear %d times, too ambiguous to place:\n%s%s", len(matches), preview(block), disambiguate(lines, matches))
 	default:
 		return matches[0], nil
 	}
+}
+
+// disambiguate reports where each ambiguous match actually sits in the
+// file, plus the line immediately before it, so a repair attempt can add
+// that as distinguishing context and land on the right one directly —
+// without this, "appears twice" tells the model nothing it doesn't
+// already know from writing the hunk itself, and a repair is just as
+// likely to reproduce the same ambiguity as fix it (seen in practice: a
+// short call-site line repeated verbatim in two handlers took three
+// failed repair attempts before falling back to a whole-file rewrite).
+func disambiguate(lines []string, matches []int) string {
+	var text strings.Builder
+	text.WriteString("\n\nadd a line of context right before it to tell them apart:")
+	for _, index := range matches {
+		before := "(start of file)"
+		if index > 0 {
+			before = strings.TrimSpace(lines[index-1])
+		}
+		fmt.Fprintf(&text, "\n  line %d, preceded by: %q", index+1, before)
+	}
+	return text.String()
 }
 
 var entityReplacer = strings.NewReplacer(

@@ -123,6 +123,28 @@ func TestApplyIsRefusedWhenTheHunkIsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestAmbiguousHunkErrorPointsAtEachMatch(t *testing.T) {
+	// The whole point: a repair attempt needs to know where the matches
+	// actually are, not just that there's more than one, or it's just as
+	// likely to reproduce the same ambiguity as fix it.
+	root := t.TempDir()
+	original := "function a() {\n  setSession(x);\n}\nfunction b() {\n  setSession(x);\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-  setSession(x);\n+  setSession(y);\n"
+	err := repository.Apply(patch)
+	if err == nil {
+		t.Fatal("expected an ambiguous hunk to be refused")
+	}
+	for _, want := range []string{"line 2", "line 5", "preceded by: \"function a() {\"", "preceded by: \"function b() {\""} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+}
+
 func TestApplyLeavesFilesAloneWhenAHunkCannotBePlaced(t *testing.T) {
 	patch := "--- a/index.html\n+++ b/index.html\n@@ -1,1 +1,1 @@\n" +
 		"-  <title>Something Else Entirely</title>\n" +

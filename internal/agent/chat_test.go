@@ -244,65 +244,31 @@ func TestNewClientPicksTheEndpointForTheDialect(t *testing.T) {
 	if chat.endpoint != "https://api.cerebras.ai/v1/chat/completions" || !chat.chat {
 		t.Fatalf("chat client = %+v", chat)
 	}
-	responses, err := NewClient(config.LLM{BaseURL: "https://api.openai.com/v1", Model: "m", API: config.APIResponses})
+	// An unset dialect stays on the Responses API, as saved configs from
+	// before this existed expect.
+	responses, err := NewClient(config.LLM{BaseURL: "https://api.openai.com/v1", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if responses.endpoint != "https://api.openai.com/v1/responses" || responses.chat {
 		t.Fatalf("responses client = %+v", responses)
 	}
-	// An unset dialect defaults to chat completions: most OpenAI-compatible
-	// providers offer that and not the Responses API.
-	unset, err := NewClient(config.LLM{BaseURL: "https://api.example.com/v1", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unset.endpoint != "https://api.example.com/v1/chat/completions" || !unset.chat {
-		t.Fatalf("unset-dialect client = %+v", unset)
-	}
 }
 
-func TestClientDefaultsToChatWithoutProbingResponsesFirst(t *testing.T) {
-	// The common case for an unset dialect: chat completions just works,
-	// so there should be no wasted round trip against /responses first.
+func TestClientFallsBackToChatOnA404(t *testing.T) {
+	// A config saved before the dialect was recorded has no API set. The
+	// Responses route 404ing is then the answer, not a failure: it must
+	// switch and carry on without the user reconnecting anything.
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		paths = append(paths, request.URL.Path)
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(chatEnvelope{ID: "c", Choices: []chatChoice{{
-			Message: chatMessage{Role: "assistant", Content: `{"ok":true}`},
-		}}})
-	}))
-	defer server.Close()
-
-	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.create(context.Background(), responseRequest{Input: "hi"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/chat/completions") {
-		t.Fatalf("paths = %v, want a single chat completions request", paths)
-	}
-}
-
-func TestClientFallsBackToResponsesOnA404(t *testing.T) {
-	// A config saved before the dialect was recorded has no API set, so
-	// the default guess (chat completions) is tried first; a provider
-	// that only has the Responses API 404s on that, which is then the
-	// answer, not a failure: it must switch and carry on without the
-	// user reconnecting anything.
-	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		paths = append(paths, request.URL.Path)
-		if strings.HasSuffix(request.URL.Path, "/chat/completions") {
+		if strings.HasSuffix(request.URL.Path, "/responses") {
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(responseEnvelope{ID: "r", Output: []responseItem{{
-			Type: "message", Content: []contentItem{{Type: "output_text", Text: `{"ok":true}`}},
+		_ = json.NewEncoder(writer).Encode(chatEnvelope{ID: "c", Choices: []chatChoice{{
+			Message: chatMessage{Role: "assistant", Content: `{"ok":true}`},
 		}}})
 	}))
 	defer server.Close()
@@ -318,18 +284,18 @@ func TestClientFallsBackToResponsesOnA404(t *testing.T) {
 	if text, _ := response.text(); text != `{"ok":true}` {
 		t.Fatalf("text = %q", text)
 	}
-	if len(paths) != 2 || !strings.HasSuffix(paths[0], "/chat/completions") || !strings.HasSuffix(paths[1], "/responses") {
+	if len(paths) != 2 || !strings.HasSuffix(paths[0], "/responses") || !strings.HasSuffix(paths[1], "/chat/completions") {
 		t.Fatalf("paths = %v, want the 404 then the retry", paths)
 	}
-	if client.Dialect() != config.APIResponses {
-		t.Fatalf("Dialect() = %q, want responses so it can be saved", client.Dialect())
+	if client.Dialect() != config.APIChat {
+		t.Fatalf("Dialect() = %q, want chat so it can be saved", client.Dialect())
 	}
 
-	// Having learned it, the next call goes straight to the Responses API.
+	// Having learned it, the next call goes straight to chat completions.
 	if _, err := client.create(context.Background(), responseRequest{Input: "again"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 3 || !strings.HasSuffix(paths[2], "/responses") {
+	if len(paths) != 3 || !strings.HasSuffix(paths[2], "/chat/completions") {
 		t.Fatalf("paths = %v, want no second probe", paths)
 	}
 }

@@ -244,10 +244,7 @@ func connectMindsHub(output *os.File, reader *terminal.Reader) (config.LLM, erro
 			return config.LLM{}, err
 		}
 	}
-	// MindsHub is our own backend and speaks the Responses API; pinning it
-	// explicitly, rather than leaving API unset, keeps it correct
-	// regardless of whatever an unknown endpoint defaults to guessing.
-	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey, API: config.APIResponses}
+	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey}
 	model, err := pickModel(output, reader, provider)
 	if err != nil {
 		fmt.Fprintf(output, "Could not choose a model (%v); using the default.\n", err)
@@ -287,17 +284,16 @@ func connectOther(output *os.File, reader *terminal.Reader) (config.LLM, error) 
 
 // detectAPI works out which dialect an endpoint speaks and says so, since
 // "OpenAI-compatible" covers both the Responses API and the far more
-// common chat completions. Falling back to chat completions on a failed
-// probe matches that: it's the likelier guess for an endpoint that is
-// simply unreachable at connect time (a hiccup, a firewall) and turns out
-// to be wrong.
+// common chat completions. Falling back to Responses on a failed probe
+// keeps the previous behavior for an endpoint that is simply unreachable
+// at connect time.
 func detectAPI(output *os.File, provider config.LLM) string {
 	ctx, cancel := context.WithTimeout(context.Background(), detectAPITimeout)
 	defer cancel()
 	dialect, err := agent.DetectAPI(ctx, provider.BaseURL, provider.APIKey)
 	if err != nil {
-		fmt.Fprintf(output, "Could not check which API the endpoint offers (%v); assuming chat completions.\n", err)
-		return config.APIChat
+		fmt.Fprintf(output, "Could not check which API the endpoint offers (%v); assuming the Responses API.\n", err)
+		return config.APIResponses
 	}
 	if dialect == config.APIChat {
 		fmt.Fprintln(output, "This endpoint offers chat completions rather than the Responses API; using that.")

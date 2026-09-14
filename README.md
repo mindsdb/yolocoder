@@ -183,7 +183,10 @@ On first launch, YoloCoder asks you to connect either:
 Responses API, and the `/v1/chat/completions` that most providers (Cerebras,
 Groq, Together, Ollama, vLLM and others) offer instead. Connecting a custom
 endpoint checks which one it has and saves that alongside it, so there is
-nothing to configure by hand.
+nothing to configure by hand — and if that check can't reach the endpoint
+at connect time, it assumes chat completions, since that's the one most
+providers actually offer. MindsHub itself is pinned to the Responses API,
+which is what it speaks.
 
 The endpoint configuration is saved to `~/.config/yolocoder/config.json`.
 The API key is stored separately in `~/.config/yolocoder/credentials.json`

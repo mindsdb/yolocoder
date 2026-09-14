@@ -252,6 +252,29 @@ func TestParsePatchReadsPathsAndHunks(t *testing.T) {
 	}
 }
 
+func TestParsePatchAcceptsAMinusHeaderWithNoPlusHeader(t *testing.T) {
+	// Traced from a real session: the model wrote "--- path" and went
+	// straight to a bare "@@" with no "+++" line at all. Nothing else in
+	// the patch named the file, so this used to be unrecoverable and cost
+	// a full extra round trip to regenerate a diff the model had already
+	// named the file in correctly once.
+	patches, err := parsePatch("--- frontend/src/App.tsx\n@@\n-old\n+new\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(patches) != 1 || patches[0].path != "frontend/src/App.tsx" {
+		t.Fatalf("patches = %+v", patches)
+	}
+}
+
+func TestApplyRecoversWhenThePatchHasOnlyAMinusHeader(t *testing.T) {
+	patch := "--- index.html\n@@\n-  <title>Tec-Tac-Tris</title>\n+  <title>TeIC-TAC-TRoIS</title>\n"
+	got := patchedPage(t, patch)
+	if !strings.Contains(got, "<title>TeIC-TAC-TRoIS</title>") {
+		t.Fatalf("title not changed:\n%s", got)
+	}
+}
+
 func TestApplyStillPrefersGitWhenThePatchIsWellFormed(t *testing.T) {
 	// A correct patch must keep working exactly as before.
 	patch := "--- a/index.html\n+++ b/index.html\n" +

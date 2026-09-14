@@ -30,16 +30,30 @@ func parsePatch(patch string) ([]filePatch, error) {
 	var patches []filePatch
 	var current *filePatch
 	var active *hunk
+	// pendingPath is the file named by a "--- " line, kept in case the
+	// "+++ " line that would normally follow and take priority (it's the
+	// new-file side of the pair) never comes. Seen in practice: a model
+	// approximating the format rather than reproducing it exactly writes
+	// only "--- path" and goes straight to "@@", which used to be
+	// unrecoverable — nothing else in the patch named the file at all —
+	// and cost a full extra round trip to regenerate the whole diff for
+	// what the model had actually already said correctly once.
+	var pendingPath string
 
 	// Trailing blank lines are an artifact of the patch text ending in a
 	// newline, not empty context lines, and counting them as context would
 	// make every last hunk unmatchable.
 	for _, line := range strings.Split(strings.TrimRight(patch, "\n"), "\n") {
 		switch {
-		case strings.HasPrefix(line, "diff --git "), strings.HasPrefix(line, "--- "):
+		case strings.HasPrefix(line, "diff --git "):
 			active = nil
+			pendingPath = ""
+		case strings.HasPrefix(line, "--- "):
+			active = nil
+			pendingPath = patchPath(strings.TrimPrefix(line, "--- "))
 		case strings.HasPrefix(line, "+++ "):
 			active = nil
+			pendingPath = ""
 			path := patchPath(strings.TrimPrefix(line, "+++ "))
 			if path == "" {
 				current = nil
@@ -76,6 +90,11 @@ func parsePatch(patch string) ([]filePatch, error) {
 			return nil, fmt.Errorf("the patch deletes %s, which YoloCoder does not do", strings.TrimSpace(raw))
 
 		case strings.HasPrefix(line, "@@"):
+			if current == nil && pendingPath != "" {
+				patches = append(patches, filePatch{path: pendingPath})
+				current = &patches[len(patches)-1]
+			}
+			pendingPath = ""
 			if current == nil {
 				return nil, fmt.Errorf("hunk before any file header")
 			}

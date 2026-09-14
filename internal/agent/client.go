@@ -22,13 +22,8 @@ type Client struct {
 	// chat selects the /v1/chat/completions dialect, which most
 	// OpenAI-compatible providers implement instead of the Responses API.
 	chat bool
-	// dropSchema means this endpoint rejected a structured-output schema
-	// alongside tool definitions, so the shape is asked for in the
-	// instructions instead. Checked for both dialects: a Responses-API
-	// facade that actually proxies a model to a chat-completions backend
-	// (MindsHub does this for at least one model) can relay that backend's
-	// own "response_format"-flavored rejection back through the Responses
-	// shape, so this isn't only ever a chat-completions problem.
+	// dropSchema means this provider rejected response_format alongside
+	// tools, so the shape is asked for in the instructions instead.
 	dropSchema bool
 	// autoDialect means the saved provider didn't record which API the
 	// endpoint speaks, so a 404 on the dialect assumed by default is taken
@@ -162,15 +157,12 @@ func (client *Client) Dialect() string {
 func (client *Client) create(ctx context.Context, request responseRequest) (responseEnvelope, error) {
 	request.Model = client.model
 	body := any(request)
-	switch {
-	case client.chat:
+	if client.chat {
 		converted, err := toChat(request, client.dropSchema)
 		if err != nil {
 			return responseEnvelope{}, err
 		}
 		body = converted
-	case client.dropSchema:
-		body = dropResponsesSchema(request)
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -220,11 +212,8 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 
 	// Some providers won't take tool definitions and a JSON schema in the
 	// same request. Ask again without the schema, describing the shape in
-	// the instructions instead, and keep doing that for this run. Checked
-	// regardless of dialect (see dropSchema's own comment) — a genuine
-	// Responses-only endpoint's errors never mention response_format, so
-	// this never fires for one.
-	if !client.dropSchema && rejectsSchemaWithTools(replyBody) {
+	// the instructions instead, and keep doing that for this run.
+	if client.chat && !client.dropSchema && rejectsSchemaWithTools(replyBody) {
 		debug.Log("SCHEMA", "the provider rejects response_format alongside tools; describing the shape in the instructions instead")
 		client.dropSchema = true
 		return client.create(ctx, request)
@@ -253,20 +242,6 @@ func (client *Client) decode(body []byte) (responseEnvelope, error) {
 	var envelope responseEnvelope
 	err := json.Unmarshal(body, &envelope)
 	return envelope, err
-}
-
-// dropResponsesSchema mirrors toChat's own schema-dropping behavior (see
-// dropSchema) for the Responses dialect: Text is what carries the schema
-// there, so it's what has to come out, with the shape described in
-// Instructions instead so the reply is still readable as JSON.
-func dropResponsesSchema(request responseRequest) responseRequest {
-	if request.Text != nil {
-		if hint := schemaHint(request.Text.Format); hint != "" {
-			request.Instructions = strings.TrimSpace(request.Instructions + "\n" + hint)
-		}
-		request.Text = nil
-	}
-	return request
 }
 
 // rejectsSchemaWithTools recognizes a provider refusing a request that

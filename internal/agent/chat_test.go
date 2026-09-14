@@ -356,56 +356,6 @@ func TestClientDoesNotFallBackWhenTheDialectWasSaved(t *testing.T) {
 	}
 }
 
-func TestClientDropsTheResponsesSchemaWhenRejectedAlongsideTools(t *testing.T) {
-	// A Responses-API facade that actually proxies a model to a
-	// chat-completions backend (MindsHub does this for at least one
-	// model) can relay that backend's own "response_format" rejection
-	// straight back through the Responses shape. This must be treated
-	// the same as the chat-completions case: drop the schema and retry.
-	var bodies []map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(request.Body).Decode(&body)
-		bodies = append(bodies, body)
-		if len(bodies) == 1 {
-			writer.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(writer, `{"message":"\"tools\" is incompatible with \"response_format\"","type":"invalid_request_error","param":"tools","code":"wrong_api_format"}`)
-			return
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(responseEnvelope{ID: "r", Output: []responseItem{{
-			Type: "message", Content: []contentItem{{Type: "output_text", Text: `{"ok":true}`}},
-		}}})
-	}))
-	defer server.Close()
-
-	client, err := NewClient(config.LLM{BaseURL: server.URL, APIKey: "k", Model: "m", API: config.APIResponses})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := client.create(context.Background(), responseRequest{
-		Instructions: "be brief",
-		Input:        "hi",
-		Tools:        repositoryTools(),
-		Text:         strictSchema("code_change", changeSchema()),
-	})
-	if err != nil {
-		t.Fatalf("create() = %v, want the retry to succeed", err)
-	}
-	if text, _ := response.text(); text != `{"ok":true}` {
-		t.Fatalf("text = %q", text)
-	}
-	if len(bodies) != 2 {
-		t.Fatalf("requests = %d, want a retry", len(bodies))
-	}
-	if _, hasSchema := bodies[1]["text"]; hasSchema {
-		t.Fatalf("retry body = %+v, want the schema dropped", bodies[1])
-	}
-	if instructions, _ := bodies[1]["instructions"].(string); !strings.Contains(instructions, "summary") {
-		t.Fatalf("retry instructions = %q, want the shape described there instead", instructions)
-	}
-}
-
 func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 	// Without response_format there is no enforcement, so the shape has
 	// to be asked for in words or the reply comes back however the model

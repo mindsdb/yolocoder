@@ -538,8 +538,28 @@ func (server *Server) handleClientError(response http.ResponseWriter, request *h
 	if report.Error.Stack != "" {
 		fmt.Fprintln(&text, report.Error.Stack)
 	}
+	// A bug that's already being auto-fixed (or whose fix hasn't reached
+	// the still-open, not-yet-reloaded tab yet) keeps throwing until it
+	// does. Without this, every one of those repeats queued its own
+	// auto-fix task behind turnMutex — burning through the guard's
+	// attempt budget on duplicates of the same incident before the first
+	// fix even had a chance to land and reload the page. The server-log
+	// path already avoids this by coalescing a burst into one report (see
+	// errorWatcher); this is the browser-error path's equivalent.
+	if server.isBusy() {
+		response.WriteHeader(http.StatusAccepted)
+		return
+	}
 	go server.onError("browser", text.String())
 	response.WriteHeader(http.StatusAccepted)
+}
+
+// isBusy reports whether a task is currently running, so a browser error
+// that arrives mid-fix can be dropped instead of queuing a duplicate.
+func (server *Server) isBusy() bool {
+	server.stateMutex.Lock()
+	defer server.stateMutex.Unlock()
+	return server.busy
 }
 
 // onError turns a detected server or browser error into an auto-fix task,

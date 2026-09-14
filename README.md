@@ -71,7 +71,12 @@ unhandled promise rejections back to the chat. Combined with the dev
 server's own log, a server-side or browser-side error while the app is
 running is turned into a task and fixed automatically, then the dev server
 is restarted — up to two attempts per distinct error, after which it's left
-for you instead of retried forever. Whenever the dev server can't be
+for you instead of retried forever. A page that keeps throwing the same
+error on every render while a fix is already in flight doesn't queue a
+fresh attempt for each repeat: reports arriving while one is already
+running are dropped, the same way a burst of log lines from one error is
+coalesced into a single report rather than one per line. Whenever the
+dev server can't be
 reached at all — starting up, restarting, or the health check catching an
 actual crash — the preview shows a small page that polls itself and
 reloads the moment it's back, so the iframe recovers on its own instead of

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/config"
@@ -216,6 +217,54 @@ func TestStateReflectsSetBusyAndSetPhase(t *testing.T) {
 	if body := get(); !strings.Contains(body, `"busy":false`) {
 		t.Fatalf("expected busy:false after setBusy(false), got %q", body)
 	}
+}
+
+func TestClientErrorIsIgnoredWhileBusy(t *testing.T) {
+	// A page whose bug is already being auto-fixed (or hasn't reloaded to
+	// the fix yet) keeps throwing until it does; each repeat must not
+	// queue its own duplicate auto-fix task.
+	dir := t.TempDir()
+	hub := newHub()
+	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	server.setBusy(true)
+	body := `{"error":{"message":"boom"}}`
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/client-error", strings.NewReader(body)))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	// onError is what touches the guard; if it were still fired here
+	// (even asynchronously), the guard would eventually show an attempt.
+	time.Sleep(20 * time.Millisecond)
+	if server.guard.attempts != 0 {
+		t.Fatalf("guard.attempts = %d, want the report dropped while busy", server.guard.attempts)
+	}
+}
+
+func TestClientErrorTriggersAutoFixWhenIdle(t *testing.T) {
+	dir := t.TempDir()
+	hub := newHub()
+	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	body := `{"error":{"message":"boom"}}`
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/client-error", strings.NewReader(body)))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if server.guard.attempts > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("expected the idle server to still trigger an auto-fix attempt")
 }
 
 func TestLineStreamerSplitsAcrossArbitraryChunkBoundaries(t *testing.T) {

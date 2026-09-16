@@ -32,10 +32,22 @@ const (
 // the conversation from the tool calls, so a separate patch call shipped
 // them a second time to learn nothing new. Summary and files come before
 // the diff in the schema so the model still states its intent first.
+//
+// Answer is set instead of the three fields above when the task turns out
+// to be a question rather than a change. Routing alone cannot tell the two
+// apart for anything that needs the files to answer — "what color is the
+// background" is coding_task at that point, since routing has no tools
+// and cannot read the file itself — so it resolves here instead, once
+// this session actually has the file in hand. Without a field for it, a
+// model that reaches this conclusion has nowhere to put the answer but
+// summary, which reads as a change description, not prose meant for the
+// user; asking for it explicitly is what lets an informational question
+// end in a real answer instead of "the model returned no diff."
 type Change struct {
 	Summary       string     `json:"summary"`
 	FilesToModify stringList `json:"files_to_modify"`
 	Diff          string     `json:"diff"`
+	Answer        string     `json:"answer"`
 }
 
 // stringList is a list of strings that also accepts the shapes models
@@ -352,6 +364,13 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		if err != nil {
 			return Outcome{}, err
 		}
+		if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) != "" {
+			// The task turned out to be a question, not a change: nothing
+			// to apply or test, so this concludes the turn immediately
+			// rather than entering the loop meant for an actual change.
+			progress.Log("  answered without changing anything")
+			return Outcome{Reply: change.Answer, Usage: runner.usage}, nil
+		}
 		if attempt == 0 {
 			logSummary(progress, "plan", change.Summary)
 			for _, path := range change.FilesToModify {
@@ -568,7 +587,7 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 				return Change{}, fmt.Errorf("decode the change: %w", err)
 			}
 			salvageChange(&change, text)
-			if strings.TrimSpace(change.Diff) == "" {
+			if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) == "" {
 				return change, fmt.Errorf("the model returned no diff; it replied: %s", snippet(text))
 			}
 			return change, nil
@@ -962,7 +981,8 @@ func changeSchema() map[string]any {
 		"summary":         map[string]any{"type": "string"},
 		"files_to_modify": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"diff":            map[string]any{"type": "string"},
-	}, []string{"summary", "files_to_modify", "diff"})
+		"answer":          map[string]any{"type": "string"},
+	}, []string{"summary", "files_to_modify", "diff", "answer"})
 }
 
 func rewriteSchema() map[string]any {
@@ -1015,6 +1035,12 @@ character for character, including indentation, escapes and HTML entities such a
 that differs by even one character cannot be located. Surround each change with a few unchanged
 lines so there is only one place it can go.
 If told a previous attempt failed, answer the evidence rather than repeating the same diff.
+Not every task is a change. If, once you have read what you need, you find there is nothing to
+modify — the task was really a question, and reading the files was how you found the answer, not
+a step toward writing one — leave summary, files_to_modify and diff empty and put a direct answer
+to what was asked in answer instead: the actual colors, values, structure, or whatever the
+question was about, drawn from what you read, not a description that an answer exists. Use answer
+only for that; when you are making a change, leave it empty and answer through the diff instead.
 Respond with only the JSON object, no other text before or after it.`
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.

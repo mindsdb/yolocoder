@@ -466,6 +466,93 @@ func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 	}
 }
 
+func TestRunnerAnswersAQuestionThatNeededFilesInsteadOfWritingADiff(t *testing.T) {
+	// Traced from a real session: routing correctly sends a question like
+	// "what's the theme's color scheme" into the coding path, since
+	// routing has no tools and cannot read the CSS itself. Once this
+	// session has read it, there's nothing to change — only an answer to
+	// give back, which must not be treated as a failed change.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.css"), []byte("body { background: #6b8f47; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &repo.Repository{Root: root}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			routeAsCodingTask(writer)
+		case "code_change":
+			if requests == 2 {
+				// Reads the file before answering, the same as it would
+				// before writing a diff.
+				response := responseEnvelope{Output: []responseItem{{
+					Type: "function_call", Name: "read_files", CallID: "call_1", Arguments: `{"paths":["index.css"]}`,
+				}}}
+				_ = json.NewEncoder(writer).Encode(response)
+				return
+			}
+			payload, _ := json.Marshal(Change{Answer: "The background is olive green (#6b8f47)."})
+			writeOutputText(writer, string(payload))
+		default:
+			t.Fatalf("unexpected schema %q", schemaName(body))
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "what color is the background", nil, nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Reply != "The background is olive green (#6b8f47)." {
+		t.Fatalf("Reply = %q", outcome.Reply)
+	}
+	if outcome.Applied {
+		t.Fatal("Applied should be false: nothing was changed")
+	}
+	if outcome.Coding {
+		t.Fatal("Coding should be false: this ended as an answer, not a change")
+	}
+}
+
+func TestRunnerStillErrorsWhenNeitherDiffNorAnswerIsGiven(t *testing.T) {
+	// Regression guard: a genuinely empty reply (neither a change nor an
+	// answer) must still fail loudly rather than silently succeeding with
+	// nothing to show for it.
+	root := t.TempDir()
+	repository := &repo.Repository{Root: root}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		switch schemaName(body) {
+		case "message_route":
+			routeAsCodingTask(writer)
+		case "code_change":
+			payload, _ := json.Marshal(Change{})
+			writeOutputText(writer, string(payload))
+		default:
+			t.Fatalf("unexpected schema %q", schemaName(body))
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	if _, err := NewRunner(client, repository).Run(context.Background(), "do something", nil, nil, &recordingProgress{}); err == nil {
+		t.Fatal("expected an error when the model returns neither a diff nor an answer")
+	}
+}
+
 func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
 	// Reproduces a real failure: no files named, every diff rejected, and
 	// the rewrite had nothing to write. It must fall back to the file the

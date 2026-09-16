@@ -224,7 +224,12 @@ YoloCoder keeps the loop deliberately small:
    the map isn't enough) and then answers with a summary, the files it
    touches, and a unified diff. Planning and patching are the same request:
    the files are already in the conversation from the tool calls, so asking
-   separately would resend all of them to learn nothing new.
+   separately would resend all of them to learn nothing new. Routing alone
+   can send something here that turns out not to be a change at all —
+   "what color is the background" needs the CSS in hand to answer, which
+   routing itself has no way to read — so this step can also conclude with
+   a direct answer instead of a diff, ending the turn there rather than
+   forcing a change out of a question.
 4. Applies the diff with `git apply`, which works directly against the
    folder without requiring a Git repository. If Git rejects it, the hunks
    are placed by matching their content instead, since a model reliably

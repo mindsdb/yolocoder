@@ -175,8 +175,15 @@ func TestRunGivesTheWorkOnlyTheChosenHistory(t *testing.T) {
 	if strings.Contains(changeInput, "make it multilingual") {
 		t.Fatalf("the work was given an unchosen turn:\n%s", changeInput)
 	}
-	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "recalled 1 earlier turn") {
-		t.Fatalf("the trail should say what was recalled:\n%s", trail)
+	// The line now also carries what selection was handed and what it
+	// cost, since how much history it read to choose that one turn is the
+	// part worth watching as a folder's log grows.
+	trail := strings.Join(progress.logs, "\n")
+	if !strings.Contains(trail, "recalled 1 of 3 earlier turns") {
+		t.Fatalf("the trail should say what was recalled, and out of how much:\n%s", trail)
+	}
+	if !strings.Contains(trail, "offered") {
+		t.Fatalf("the trail should size the history selection was given:\n%s", trail)
 	}
 }
 

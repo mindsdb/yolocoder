@@ -37,7 +37,7 @@ function setProcessState(state) {
   btnRecover.hidden = state !== "error";
 }
 
-function addMessage(role, text, usage, images) {
+function addMessage(role, text, usage, images, profile) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-" + role;
   // Long messages (a stack trace, a wall of npm output relayed as an
@@ -73,13 +73,22 @@ function addMessage(role, text, usage, images) {
   // bubble in its own tight little column, rather than as another child
   // of #chat-log's own flex gap, so it reads as that one reply's footer
   // and not a separate line in the conversation.
-  if (usage) {
+  // The profile line is independent of usage: a provider that reports no
+  // tokens at all still has a wall clock, so a turn can have one footer,
+  // the other, both, or neither.
+  const footers = [];
+  if (usage) footers.push(formatUsage(usage));
+  if (profile) footers.push(profile);
+  if (footers.length) {
     const group = document.createElement("div");
     group.className = "msg-group";
-    const caption = document.createElement("div");
-    caption.className = "usage-note";
-    caption.textContent = formatUsage(usage);
-    group.append(wrapper, caption);
+    group.appendChild(wrapper);
+    for (const footer of footers) {
+      const caption = document.createElement("div");
+      caption.className = "usage-note";
+      caption.textContent = footer;
+      group.appendChild(caption);
+    }
     chatLog.appendChild(group);
   } else {
     chatLog.appendChild(wrapper);
@@ -309,7 +318,7 @@ events.addEventListener("chat", (event) => {
     addMessage(data.role, data.text, null, data.images);
     openActivity();
   } else {
-    addMessage(data.role, data.text, data.usage);
+    addMessage(data.role, data.text, data.usage, undefined, data.profile);
   }
 });
 events.addEventListener("phase", (event) => {

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mindsdb/yolocoder/internal/agent"
 	"github.com/mindsdb/yolocoder/internal/app"
@@ -308,6 +309,9 @@ func runTask(task string, provider config.LLM, history *session.Log, recalled []
 	if line := outcome.Usage.Summary(); line != "" {
 		fmt.Printf("\x1b[2m  %s\x1b[0m\n", line)
 	}
+	if line := outcome.Profile.Summary(); line != "" {
+		fmt.Printf("\x1b[2m  %s\x1b[0m\n", line)
+	}
 	return nil
 }
 
@@ -358,5 +362,16 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 		CachedTokens: outcome.Usage.CachedTokens,
 		OutputTokens: outcome.Usage.OutputTokens,
 		TotalTokens:  outcome.Usage.TotalTokens,
+		TotalMillis:  millis(outcome.Profile.Total()),
+		RecallMillis: millis(outcome.Profile.Recall.Spent),
+		RecallTurns:  outcome.Profile.Recall.Offered,
+		RecallBytes:  outcome.Profile.Recall.Bytes,
 	})
+}
+
+// millis rounds a duration for the session log, which stores plain
+// numbers rather than Go duration strings so the file stays readable
+// with jq and friends.
+func millis(spent time.Duration) int {
+	return int(spent.Round(time.Millisecond) / time.Millisecond)
 }

@@ -53,6 +53,13 @@ type chatMessage struct {
 	// under that one reply — never on the user/auto-fix/system messages
 	// either side of it.
 	Usage *usageInfo `json:"usage,omitempty"`
+	// Profile rides along the same way and under the same rule: set only
+	// on an assistant reply, and only when a turn was actually measured.
+	// It is sent pre-rendered rather than as steps to re-assemble,
+	// because Profile.Summary is already the one canonical way to write
+	// this line and a second implementation in JavaScript would only be
+	// a second thing to keep in step with it.
+	Profile string `json:"profile,omitempty"`
 	// Images are data URLs pasted into the composer, echoed back only on
 	// the "user" message that sent them so the sender sees their own
 	// screenshot inline in the bubble it went out in.
@@ -645,7 +652,7 @@ func (server *Server) runTask(ctx context.Context, task string, images []string,
 	if reply == "" {
 		reply = "Done."
 	}
-	server.hub.publish("chat", chatMessage{Role: "assistant", Text: reply, Usage: newUsageInfo(outcome.Usage)})
+	server.hub.publish("chat", chatMessage{Role: "assistant", Text: reply, Usage: newUsageInfo(outcome.Usage), Profile: outcome.Profile.Summary()})
 	if outcome.Applied {
 		server.reload()
 	}
@@ -727,7 +734,16 @@ func recordTurn(history *session.Log, task string, outcome agent.Outcome) {
 		Attempts: outcome.Attempts, Rewrote: outcome.Rewrote,
 		InputTokens: outcome.Usage.InputTokens, CachedTokens: outcome.Usage.CachedTokens,
 		OutputTokens: outcome.Usage.OutputTokens, TotalTokens: outcome.Usage.TotalTokens,
+		TotalMillis: millis(outcome.Profile.Total()), RecallMillis: millis(outcome.Profile.Recall.Spent),
+		RecallTurns: outcome.Profile.Recall.Offered, RecallBytes: outcome.Profile.Recall.Bytes,
 	})
+}
+
+// millis rounds a duration for the session log, which stores plain
+// numbers rather than Go duration strings so the file stays readable
+// with jq and friends.
+func millis(spent time.Duration) int {
+	return int(spent.Round(time.Millisecond) / time.Millisecond)
 }
 
 func writeJSON(response http.ResponseWriter, value any) {

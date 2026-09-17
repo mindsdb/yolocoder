@@ -107,6 +107,10 @@ type Outcome struct {
 	// Usage is every call this turn made, summed. Zero when the provider
 	// never reported usage at all (see Usage.Empty).
 	Usage Usage
+	// Profile is where the turn's wall clock went, step by step, summed
+	// the same way and over the same scope as Usage: the whole turn, not
+	// the last call it happened to make.
+	Profile Profile
 }
 
 // Recollection is one earlier turn in this folder, as the agent sees it.
@@ -316,6 +320,9 @@ type Runner struct {
 	// (see app.RunTask), so by the time Run returns this is the whole
 	// turn's cost, not any one call's.
 	usage Usage
+	// profile accumulates the same way over the same scope, in time
+	// rather than tokens.
+	profile Profile
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
@@ -332,24 +339,32 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	progress.Status("Reading your message...")
 	decision, err := runner.route(ctx, task, images, history)
 	if err != nil {
-		return Outcome{}, err
+		return Outcome{Profile: runner.profile}, err
 	}
 	if !decision.CodingTask {
-		return Outcome{Reply: decision.Reply, Usage: runner.usage}, nil
+		progress.Log("  " + runner.profile.Recall.Line())
+		return Outcome{Reply: decision.Reply, Usage: runner.usage, Profile: runner.profile}, nil
 	}
 
+	// Reported whether or not anything was carried: what the selection
+	// step cost, and how much history it had to read to get there, is
+	// worth seeing on every turn, not only the ones where it found
+	// something. A turn that spends a second reading forty turns to
+	// choose none of them is exactly the case worth noticing.
 	carried := recall(history, decision.Relevant)
-	if len(carried) > 0 {
-		progress.Log(fmt.Sprintf("  recalled %d earlier %s", len(carried), plural(len(carried), "turn", "turns")))
-	}
+	runner.profile.Recall.Chosen = len(carried)
+	progress.Log("  " + runner.profile.Recall.Line())
 
 	progress.Status("Mapping the folder...")
+	mapStarted := time.Now()
 	repoMap, err := runner.repository.Map()
+	mapSpent := time.Since(mapStarted)
+	runner.profile.record(StepMap, mapSpent)
 	if err != nil {
-		return Outcome{}, err
+		return Outcome{Profile: runner.profile}, err
 	}
 	mapped := mappedPaths(repoMap)
-	progress.Log(fmt.Sprintf("  mapped %d files", len(mapped)))
+	progress.Log(fmt.Sprintf("  mapped %d files · %s", len(mapped), formatDuration(mapSpent)))
 
 	progress.Status("Working out the change...")
 	session := runner.newChangeSession(task, repoMap, background(decision.Context, carried), images)
@@ -362,14 +377,14 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 		change, err = session.produce(ctx, progress)
 		if err != nil {
-			return Outcome{}, err
+			return Outcome{Profile: runner.profile}, err
 		}
 		if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) != "" {
 			// The task turned out to be a question, not a change: nothing
 			// to apply or test, so this concludes the turn immediately
 			// rather than entering the loop meant for an actual change.
 			progress.Log("  answered without changing anything")
-			return Outcome{Reply: change.Answer, Usage: runner.usage}, nil
+			return Outcome{Reply: change.Answer, Usage: runner.usage, Profile: runner.profile}, nil
 		}
 		if attempt == 0 {
 			logSummary(progress, "plan", change.Summary)
@@ -379,8 +394,12 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 
 		progress.Status("Applying the patch...")
-		if err := runner.repository.Apply(change.Diff); err != nil {
-			progress.Log("  patch did not apply, retrying")
+		patchStarted := time.Now()
+		applyErr := runner.repository.Apply(change.Diff)
+		patchSpent := time.Since(patchStarted)
+		runner.profile.record(StepPatch, patchSpent)
+		if applyErr != nil {
+			progress.Log("  patch did not apply, retrying · " + formatDuration(patchSpent))
 			// Feed back the diff that failed alongside git's complaint.
 			// Without seeing its own output the model has no way to tell
 			// what was wrong with it and tends to reproduce it verbatim.
@@ -390,11 +409,11 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 					"reflowed whitespace) makes the whole hunk fail. Compare git's \"while searching for\" text "+
 					"below against the file contents you already read and copy those lines character for character.\n\n"+
 					"GIT REPORTED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
-				err.Error(), change.Diff)
+				applyErr.Error(), change.Diff)
 			session.report(evidence)
 			continue
 		}
-		progress.Log("  applied the patch")
+		progress.Log("  applied the patch · " + formatDuration(patchSpent))
 
 		// The model names the files it means to touch, and that claim is
 		// worth checking: a patch that quietly leaves out the new files it
@@ -413,16 +432,16 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 
 		progress.Status("Testing the change...")
-		testResult := RunTests(ctx, runner.repository.Root)
+		testResult, testSpent := runner.runTests(ctx)
 		if testResult.Passed {
 			if testResult.Skipped {
 				progress.Log("  no test command detected")
 			} else {
-				progress.Log("  tests passed")
+				progress.Log("  tests passed · " + formatDuration(testSpent))
 			}
-			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1, Usage: runner.usage}, nil
+			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1, Usage: runner.usage, Profile: runner.profile}, nil
 		}
-		progress.Log("  tests failed, retrying")
+		progress.Log("  tests failed, retrying · " + formatDuration(testSpent))
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
 		session.report(evidence)
 	}
@@ -433,45 +452,65 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	if strings.HasPrefix(evidence, "The patch did not apply") {
 		targets := rewriteTargets(change.FilesToModify, session.readPaths, mapped)
 		if len(targets) == 0 {
-			return Outcome{}, fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
+			return Outcome{Profile: runner.profile}, fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
 		}
 		progress.Status("Rewriting the file instead...")
 		summary := ""
 		for _, path := range targets {
 			current, _ := runner.repository.ReadFile(path)
+			rewriteStarted := time.Now()
 			rewrite, err := runner.rewrite(ctx, task, path, current, evidence, images)
+			rewriteSpent := time.Since(rewriteStarted)
+			runner.profile.record(StepRewrite, rewriteSpent)
 			if err != nil {
-				return Outcome{}, err
+				return Outcome{Profile: runner.profile}, err
 			}
 			// An empty rewrite of a file that has content is the model
 			// failing, not an instruction to truncate the user's file.
 			if strings.TrimSpace(rewrite.Content) == "" && strings.TrimSpace(current) != "" {
-				return Outcome{}, fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
+				return Outcome{Profile: runner.profile}, fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
 			}
 			if err := runner.repository.Write(path, rewrite.Content); err != nil {
-				return Outcome{}, err
+				return Outcome{Profile: runner.profile}, err
 			}
-			progress.Log("  wrote " + path)
+			progress.Log("  wrote " + path + " · " + formatDuration(rewriteSpent))
 			if summary == "" {
 				summary = rewrite.Summary
 			}
 		}
 		progress.Status("Testing the change...")
-		testResult := RunTests(ctx, runner.repository.Root)
+		testResult, testSpent := runner.runTests(ctx)
 		if testResult.Passed {
 			if testResult.Skipped {
 				progress.Log("  no test command detected")
 			} else {
-				progress.Log("  tests passed")
+				progress.Log("  tests passed · " + formatDuration(testSpent))
 			}
 			if summary == "" {
 				summary = "Rewrote " + strings.Join(targets, ", ")
 			}
-			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true, Usage: runner.usage}, nil
+			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true, Usage: runner.usage, Profile: runner.profile}, nil
 		}
-		return Outcome{}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
+		return Outcome{Profile: runner.profile}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
-	return Outcome{}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+	return Outcome{Profile: runner.profile}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+}
+
+// runTests runs the project's tests and records what they cost,
+// returning both the result and the time it took so the caller can say
+// so on the line it was already printing.
+//
+// A run that found no test command is deliberately not recorded as a
+// step: nothing ran, so there is nothing there to make faster, and a
+// 0ms "test" entry would only pad the profile line.
+func (runner *Runner) runTests(ctx context.Context) (TestResult, time.Duration) {
+	started := time.Now()
+	result := RunTests(ctx, runner.repository.Root)
+	spent := time.Since(started)
+	if !result.Skipped {
+		runner.profile.record(StepTest, spent)
+	}
+	return result, spent
 }
 
 // route decides whether the message is a question or a change, and when
@@ -507,15 +546,30 @@ func (runner *Runner) route(ctx context.Context, task string, images []string, h
 			messages = append(messages, inputMessage{Role: "user", Content: "PROJECT CONTEXT:\n" + renderNotes(notes)})
 		}
 		if len(turns) > 0 {
-			messages = append(messages, inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + renderHistory(turns)})
+			// Measured here rather than from len(history): this is the
+			// block the selection actually has to read, so it is the one
+			// whose growth decides whether the step is still worth its
+			// round trip. Notes are excluded on purpose — they are
+			// carried whatever it decides, so they are not part of what
+			// selection costs.
+			rendered := renderHistory(turns)
+			runner.profile.Recall.Offered = len(turns)
+			runner.profile.Recall.Bytes = len(rendered)
+			messages = append(messages, inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + rendered})
 		}
 		input = append(messages, inputMessage{Role: "user", Content: "MESSAGE:\n" + task, Images: images})
 	}
+	started := time.Now()
 	response, err := runner.client.create(callCtx, responseRequest{
 		Instructions: instructions,
 		Input:        input,
 		Text:         strictSchema("message_route", schema),
 	})
+	// Recorded before the error check: a call that took a minute and
+	// then failed is precisely the one worth seeing in the profile.
+	spent := time.Since(started)
+	runner.profile.Recall.Spent = spent
+	runner.profile.record(StepRecall, spent)
 	if err != nil {
 		return routeDecision{}, err
 	}
@@ -564,6 +618,7 @@ func (session *changeSession) report(evidence string) {
 func (session *changeSession) produce(ctx context.Context, progress Progress) (Change, error) {
 	for round := 0; round < maxToolRounds; round++ {
 		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
+		started := time.Now()
 		response, err := session.runner.client.create(callCtx, responseRequest{
 			Instructions: changeInstructions,
 			Input:        session.transcript,
@@ -571,10 +626,13 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 			ToolChoice:   "auto",
 			Text:         strictSchema("code_change", changeSchema()),
 		})
+		spent := time.Since(started)
 		cancel()
+		session.runner.profile.record(StepThink, spent)
 		if err != nil {
 			return Change{}, err
 		}
+		progress.Log("  thought · " + formatDuration(spent))
 		session.runner.usage = session.runner.usage.add(response.usage())
 		calls := response.calls()
 		if len(calls) == 0 {
@@ -593,9 +651,18 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 			return change, nil
 		}
 		for _, call := range calls {
-			progress.Log("  " + session.runner.describeCall(call))
+			// Described before the tool runs, not after: describeCall
+			// reports which paths were already shown by consulting the
+			// same served map that answering a read_files call updates,
+			// so asking afterwards would report every file as a re-read.
+			described := session.runner.describeCall(call)
+			progress.Status(described)
+			toolStarted := time.Now()
 			session.readPaths = append(session.readPaths, readFilePaths(call)...)
 			output := session.runner.runTool(ctx, call)
+			toolSpent := time.Since(toolStarted)
+			session.runner.profile.record(StepTools, toolSpent)
+			progress.Log("  " + described + " · " + formatDuration(toolSpent))
 			session.transcript = append(session.transcript, call)
 			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}

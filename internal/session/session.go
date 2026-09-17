@@ -65,15 +65,17 @@ type Turn struct {
 	// log can tell how the agent has been behaving here without debug
 	// logging having been on at the time.
 	//
-	// The history-selection step is broken out from the total, with the
-	// size of what it was handed, because it is the one step whose cost
-	// grows with the folder's history rather than with the task. Reading
-	// recall_ms and recall_turns down a folder's log is what shows
-	// whether that step is getting heavier turn over turn.
-	TotalMillis  int `json:"total_ms,omitempty"`
-	RecallMillis int `json:"recall_ms,omitempty"`
-	RecallTurns  int `json:"recall_turns,omitempty"`
-	RecallBytes  int `json:"recall_bytes,omitempty"`
+	// Recall is broken out from the total because history is offered
+	// through a tool rather than pushed into every turn, and whether a
+	// turn actually reached for it is the thing that says whether that
+	// was the right call. recall_available with no recall_served is a
+	// turn that had history to hand and did not need it; the ratio of
+	// the two down a folder's log is the answer.
+	TotalMillis     int `json:"total_ms,omitempty"`
+	RecallMillis    int `json:"recall_ms,omitempty"`
+	RecallAvailable int `json:"recall_available,omitempty"`
+	RecallServed    int `json:"recall_served,omitempty"`
+	RecallBytes     int `json:"recall_bytes,omitempty"`
 }
 
 // header is the first line of a session file.

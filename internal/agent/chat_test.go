@@ -76,7 +76,7 @@ func TestToChatConvertsATranscript(t *testing.T) {
 		t.Fatalf("messages[4] = %+v", converted.Messages[4])
 	}
 	// Tools nest under "function" in this dialect.
-	if len(converted.Tools) != 2 || converted.Tools[0].Type != "function" || converted.Tools[0].Function.Name != "read_files" {
+	if len(converted.Tools) != 3 || converted.Tools[0].Type != "function" || converted.Tools[0].Function.Name != "read_files" {
 		t.Fatalf("tools = %+v", converted.Tools)
 	}
 	// And the JSON schema moves from text.format to response_format.
@@ -189,14 +189,12 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		}
 		switch requests {
 		case 1:
-			reply(chatMessage{Role: "assistant", Content: `{"coding_task":true,"reply":""}`})
-		case 2:
 			// Ask to read the file, in this dialect's shape.
 			reply(chatMessage{Role: "assistant", ToolCalls: []chatToolCall{{
 				ID: "call_1", Type: "function",
 				Function: chatCallFunction{Name: "read_files", Arguments: `{"paths":["index.html"]}`},
 			}}})
-		case 3:
+		case 2:
 			// The tool result must have come back as a tool message.
 			last := body.Messages[len(body.Messages)-1]
 			if last.Role != "tool" || last.ToolCallID != "call_1" {

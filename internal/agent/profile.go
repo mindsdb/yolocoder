@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -15,11 +14,13 @@ import (
 type Step string
 
 const (
-	// StepRecall is the message_route call: deciding whether the message
-	// is a coding task and, when this folder has history, choosing which
-	// earlier turns to carry. It is called out separately from the rest
-	// of the model calls because it is the one that grows with the
-	// folder's age rather than with the size of the task.
+	// StepRecall is time spent in the recall tool, reading what this
+	// folder was asked before. It is separated from the other tools
+	// because it is the one whose cost grows with the folder's age
+	// rather than with the size of the task, and because whether it gets
+	// called at all is the thing worth watching: history is offered on
+	// demand rather than pushed into every turn, and how often a turn
+	// actually reaches for it is what says whether that was right.
 	StepRecall Step = "recall"
 	StepMap    Step = "map"
 	// StepThink is time inside a code_change call, StepTools the time
@@ -42,34 +43,28 @@ type Span struct {
 	Calls int
 }
 
-// RecallDetail is what the history-selection call was handed and what it
-// made of it. Recorded in this much detail because selection is the step
-// most likely to quietly become the expensive one: it is shown every
-// turn this folder has ever taken (up to the session store's cap) to
-// pick out the few that matter, so its input grows with the folder's
-// history while its output stays one or two sentences. Offered against
-// Chosen is the ratio that says whether the call is still earning the
-// round trip it costs.
+// RecallDetail is what history this folder had and what the turn did
+// about it. Available against Served is the whole point: history is held
+// back and offered through a tool rather than pushed into every turn, so
+// the number that says whether that was the right call is how often a
+// turn with history available actually asked for it.
+//
+// Served, Bytes and Spent are all zero on a turn that never reached for
+// it, which is the answer rather than missing data.
 type RecallDetail struct {
-	// Offered is how many earlier turns it was shown, Bytes how much
-	// rendered history that came to.
-	Offered int
-	Bytes   int
-	// Chosen is how many of those it picked as relevant.
-	Chosen int
+	// Available is how many earlier turns this folder had to offer.
+	Available int
+	// Served is how many the recall tool actually handed over, Bytes how
+	// much rendered history that came to, and Spent how long it took.
+	Served int
+	Bytes  int
 	Spent  time.Duration
 }
 
-// Line is the progress line for this step, streamed as soon as the call
-// returns. With no history there is nothing to select from and the call
-// only routed, so it says that rather than reporting "0 of 0 turns".
+// Line describes what the recall tool served, for the trail.
 func (detail RecallDetail) Line() string {
-	if detail.Offered == 0 {
-		return "routed the message · " + formatDuration(detail.Spent)
-	}
-	return fmt.Sprintf("recalled %d of %d earlier %s · %s offered · %s",
-		detail.Chosen, detail.Offered, plural(detail.Offered, "turn", "turns"),
-		formatBytes(detail.Bytes), formatDuration(detail.Spent))
+	return fmt.Sprintf("recalled %d earlier %s · %s",
+		detail.Served, plural(detail.Served, "turn", "turns"), formatBytes(detail.Bytes))
 }
 
 // Profile is where a turn's wall clock went. Like Usage it covers the
@@ -119,23 +114,20 @@ func (profile Profile) Empty() bool {
 	return len(profile.spans) == 0
 }
 
-// Summary is a compact, human-readable line — "7.2s total · recall 1.0s
-// · map 11ms · think 4.7s ×3" — with no styling of its own, so a caller
-// can wrap it in whatever the terminal or the web UI needs. Empty when
-// nothing was measured.
+// Summary is the turn's total — "2.9s total" — with no styling of its
+// own, so a caller can wrap it in whatever the terminal or the web UI
+// needs. Empty when nothing was measured.
+//
+// Deliberately only the total: every step already streamed its own time
+// onto the trail as it happened, a few lines above wherever this ends
+// up, so repeating the breakdown underneath says nothing new and buries
+// the one number worth comparing between turns. Spans keeps the detail
+// for a caller that wants it.
 func (profile Profile) Summary() string {
 	if profile.Empty() {
 		return ""
 	}
-	parts := []string{formatDuration(profile.Total()) + " total"}
-	for _, span := range profile.spans {
-		part := string(span.Step) + " " + formatDuration(span.Spent)
-		if span.Calls > 1 {
-			part += " ×" + strconv.Itoa(span.Calls)
-		}
-		parts = append(parts, part)
-	}
-	return strings.Join(parts, " · ")
+	return formatDuration(profile.Total()) + " total"
 }
 
 // formatDuration keeps a duration to one glanceable token. Sub-millisecond

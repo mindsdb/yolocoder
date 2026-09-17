@@ -19,10 +19,7 @@ const maxToolRounds = 8
 // slower or more heavily loaded endpoint, can easily take longer than a
 // quick request would, and a request that's merely slow (not actually
 // stuck) failing partway through a build is worse than it taking longer.
-const (
-	routeTimeout   = 60 * time.Second
-	produceTimeout = 5 * time.Minute
-)
+const produceTimeout = 5 * time.Minute
 
 // Change is one attempt at the whole job: what the model means to do,
 // which files it touches, and the diff that does it.
@@ -127,47 +124,6 @@ type Recollection struct {
 	Note bool
 }
 
-type routeDecision struct {
-	CodingTask bool   `json:"coding_task"`
-	Reply      string `json:"reply"`
-	// Relevant are the turn numbers worth carrying into the work, and
-	// Context ties them to the new message. Numbers are asked for as well
-	// as prose because they can be checked: the summaries fed onward are
-	// the ones actually recorded, so a brief that drifts cannot invent
-	// history that never happened.
-	Relevant numberList `json:"relevant"`
-	Context  string     `json:"context"`
-}
-
-// numberList tolerates the shapes a model reaches for when asked for a
-// list of numbers: [3, 7], ["3", "7"], or a bare 3.
-type numberList []int
-
-func (list *numberList) UnmarshalJSON(data []byte) error {
-	var numbers []int
-	if err := json.Unmarshal(data, &numbers); err == nil {
-		*list = numbers
-		return nil
-	}
-	var single int
-	if err := json.Unmarshal(data, &single); err == nil {
-		*list = numberList{single}
-		return nil
-	}
-	var text stringList
-	if err := json.Unmarshal(data, &text); err != nil {
-		return err
-	}
-	values := make(numberList, 0, len(text))
-	for _, entry := range text {
-		if number, err := strconv.Atoi(strings.TrimSpace(entry)); err == nil {
-			values = append(values, number)
-		}
-	}
-	*list = values
-	return nil
-}
-
 // Rewrite carries one file's complete new contents, for when no diff will
 // apply. It is deliberately one file per request with a flat schema:
 // asking for an array of path/content objects made weak providers return
@@ -178,8 +134,9 @@ type Rewrite struct {
 }
 
 type toolArguments struct {
-	Paths []string `json:"paths"`
-	Query string   `json:"query"`
+	Paths  []string `json:"paths"`
+	Query  string   `json:"query"`
+	Reason string   `json:"reason"`
 }
 
 // inputMessage is one message sent to the model. Images (data URLs pasted
@@ -323,37 +280,40 @@ type Runner struct {
 	// profile accumulates the same way over the same scope, in time
 	// rather than tokens.
 	profile Profile
+	// earlier is what this folder has been asked before, held here for
+	// the recall tool to serve rather than pushed into the opening
+	// message. Most turns never need it, and the ones that do can say so
+	// themselves — which is cheaper than paying for all of it every time
+	// on the chance that this turn is one of them.
+	earlier []Recollection
+	// told reports whether earlier has already been handed over, so a
+	// second recall costs a sentence rather than another copy of it in a
+	// transcript that is resent on every following round.
+	told bool
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
 	return &Runner{client: client, repository: repository, served: map[string]string{}}
 }
 
-// Run routes the message first: a plain conversational message gets the
-// model's direct reply with the repository never touched, and only an
-// actual coding task goes through the map/plan/patch/test loop. images are
-// data URLs (screenshots pasted into the web UI) attached to the message,
-// nil when there are none — most models the terminal talks to aren't
-// multimodal at all, so this is never required.
+// Run works the message out in one conversation: the model is given the
+// map and the message together and ends in whichever of three ways fits
+// — a direct reply, an answer drawn from files it read, or a diff.
+//
+// There is deliberately no separate routing call ahead of this. One used
+// to decide "question or change?" before anything was read, but it had no
+// tools and so could not actually settle it for any message that needed
+// the files to answer; it said "change" and deferred, costing a serial
+// round trip to reach a foregone conclusion. The same judgement is made
+// here instead, by the call that can act on it.
+//
+// images are data URLs (screenshots pasted into the web UI) attached to
+// the message, nil when there are none — most models the terminal talks
+// to aren't multimodal at all, so this is never required.
 func (runner *Runner) Run(ctx context.Context, task string, images []string, history []Recollection, progress Progress) (Outcome, error) {
-	progress.Status("Reading your message...")
-	decision, err := runner.route(ctx, task, images, history)
-	if err != nil {
-		return Outcome{Profile: runner.profile}, err
-	}
-	if !decision.CodingTask {
-		progress.Log("  " + runner.profile.Recall.Line())
-		return Outcome{Reply: decision.Reply, Usage: runner.usage, Profile: runner.profile}, nil
-	}
-
-	// Reported whether or not anything was carried: what the selection
-	// step cost, and how much history it had to read to get there, is
-	// worth seeing on every turn, not only the ones where it found
-	// something. A turn that spends a second reading forty turns to
-	// choose none of them is exactly the case worth noticing.
-	carried := recall(history, decision.Relevant)
-	runner.profile.Recall.Chosen = len(carried)
-	progress.Log("  " + runner.profile.Recall.Line())
+	notes, turns := split(history)
+	runner.earlier = turns
+	runner.profile.Recall.Available = len(turns)
 
 	progress.Status("Mapping the folder...")
 	mapStarted := time.Now()
@@ -367,7 +327,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	progress.Log(fmt.Sprintf("  mapped %d files · %s", len(mapped), formatDuration(mapSpent)))
 
 	progress.Status("Working out the change...")
-	session := runner.newChangeSession(task, repoMap, background(decision.Context, carried), images)
+	session := runner.newChangeSession(task, repoMap, notes, len(turns), images)
 
 	var evidence string
 	var change Change
@@ -513,78 +473,6 @@ func (runner *Runner) runTests(ctx context.Context) (TestResult, time.Duration) 
 	return result, spent
 }
 
-// route decides whether the message is a question or a change, and when
-// there is history to draw on, which of it matters.
-//
-// The request is ordered constant-first: the instructions, then the
-// history, then the new message. History only ever grows at its end, so
-// each turn's prompt is the previous turn's prompt plus a little more,
-// which is the only arrangement a provider's prefix cache can reuse.
-// Putting the new message first would defeat it entirely.
-func (runner *Runner) route(ctx context.Context, task string, images []string, history []Recollection) (routeDecision, error) {
-	callCtx, cancel := context.WithTimeout(ctx, routeTimeout)
-	defer cancel()
-
-	notes, turns := split(history)
-	instructions, schema := routingInstructions, routeSchema()
-	input := any(task)
-	if len(images) > 0 {
-		// A bare string can't carry images, and the chat-completions
-		// dialect only knows how to convert a []any of messages (see
-		// chatMessages), so this always wraps even with no history.
-		input = []any{inputMessage{Role: "user", Content: task, Images: images}}
-	}
-	if len(history) > 0 {
-		// Asking for relevance selection costs schema and instructions,
-		// so it is only asked for when there is something to select from.
-		instructions, schema = recallingInstructions, recallSchema()
-		var messages []any
-		// Notes are fixed for the whole invocation where history grows
-		// each turn, so they sit ahead of it: the more stable a block is,
-		// the earlier it belongs.
-		if len(notes) > 0 {
-			messages = append(messages, inputMessage{Role: "user", Content: "PROJECT CONTEXT:\n" + renderNotes(notes)})
-		}
-		if len(turns) > 0 {
-			// Measured here rather than from len(history): this is the
-			// block the selection actually has to read, so it is the one
-			// whose growth decides whether the step is still worth its
-			// round trip. Notes are excluded on purpose — they are
-			// carried whatever it decides, so they are not part of what
-			// selection costs.
-			rendered := renderHistory(turns)
-			runner.profile.Recall.Offered = len(turns)
-			runner.profile.Recall.Bytes = len(rendered)
-			messages = append(messages, inputMessage{Role: "user", Content: "EARLIER IN THIS FOLDER:\n" + rendered})
-		}
-		input = append(messages, inputMessage{Role: "user", Content: "MESSAGE:\n" + task, Images: images})
-	}
-	started := time.Now()
-	response, err := runner.client.create(callCtx, responseRequest{
-		Instructions: instructions,
-		Input:        input,
-		Text:         strictSchema("message_route", schema),
-	})
-	// Recorded before the error check: a call that took a minute and
-	// then failed is precisely the one worth seeing in the profile.
-	spent := time.Since(started)
-	runner.profile.Recall.Spent = spent
-	runner.profile.record(StepRecall, spent)
-	if err != nil {
-		return routeDecision{}, err
-	}
-	runner.usage = runner.usage.add(response.usage())
-	text, err := response.text()
-	if err != nil {
-		return routeDecision{}, err
-	}
-	var decision routeDecision
-	if err := decodeJSON(text, &decision); err != nil {
-		return routeDecision{}, fmt.Errorf("decode message route: %w", err)
-	}
-	return decision, nil
-}
-
 // changeSession is one continuous conversation that reads what it needs
 // and produces a diff. Keeping the transcript here rather than asking the
 // provider to remember it is deliberate: not every OpenAI-compatible
@@ -600,11 +488,33 @@ type changeSession struct {
 	readPaths  []string
 }
 
-func (runner *Runner) newChangeSession(task, repoMap, earlier string, images []string) *changeSession {
-	opening := earlier + fmt.Sprintf("TASK:\n%s\n\nREPOSITORY MAP:\n%s", task, repoMap)
+// newChangeSession opens the conversation, ordered constant-first: the
+// supplied notes, which are fixed for the whole invocation, then the map,
+// which only moves when the folder does, and the message last because it
+// is the one part that is different every time.
+//
+// That order is the only one a provider's prefix cache can reuse. Putting
+// the task ahead of the map — as this did — meant no two turns in a
+// session ever shared a prefix, so the map was re-read as fresh input on
+// every one of them.
+func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollection, earlierTurns int, images []string) *changeSession {
+	var opening strings.Builder
+	if len(notes) > 0 {
+		opening.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
+	}
+	fmt.Fprintf(&opening, "REPOSITORY MAP:\n%s\n", repoMap)
+	if earlierTurns > 0 {
+		// Said out loud because the model cannot otherwise know what it
+		// is missing. Without this line "keep going" looks like a
+		// complete message with no earlier turn to go on, and the recall
+		// tool sits there unused.
+		fmt.Fprintf(&opening, "This folder has %d earlier %s you have not been shown. Call recall to read %s if this message refers to something that is not in front of you.\n\n",
+			earlierTurns, plural(earlierTurns, "turn", "turns"), plural(earlierTurns, "it", "them"))
+	}
+	fmt.Fprintf(&opening, "TASK:\n%s", task)
 	return &changeSession{
 		runner:     runner,
-		transcript: []any{inputMessage{Role: "user", Content: opening, Images: images}},
+		transcript: []any{inputMessage{Role: "user", Content: opening.String(), Images: images}},
 	}
 }
 
@@ -661,7 +571,16 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 			session.readPaths = append(session.readPaths, readFilePaths(call)...)
 			output := session.runner.runTool(ctx, call)
 			toolSpent := time.Since(toolStarted)
-			session.runner.profile.record(StepTools, toolSpent)
+			// Recall is recorded as its own step rather than lumped in
+			// with the rest: whether a turn reached for history at all
+			// is the measurement this design rests on, and it is lost
+			// the moment it is averaged in with reading files.
+			step := StepTools
+			if call.Name == "recall" {
+				step = StepRecall
+				session.runner.profile.Recall.Spent += toolSpent
+			}
+			session.runner.profile.record(step, toolSpent)
 			progress.Log("  " + described + " · " + formatDuration(toolSpent))
 			session.transcript = append(session.transcript, call)
 			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
@@ -785,6 +704,29 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 	return answer.String() + text, nil
 }
 
+// recallEarlier answers a recall call with everything this folder has
+// been asked before, unfiltered and in the recorded words. There is no
+// selection: choosing which turns matter was its own model call once,
+// and paying a serial round trip to narrow a few kilobytes was a worse
+// trade than simply handing them over when asked.
+//
+// A second call costs a sentence rather than another copy, for the same
+// reason readFiles refuses to resend a file already shown: every copy
+// lands in a transcript that is resent in full on every following round.
+func (runner *Runner) recallEarlier() string {
+	if len(runner.earlier) == 0 {
+		return "Nothing earlier has been recorded in this folder."
+	}
+	if runner.told {
+		return "(already recalled above)"
+	}
+	runner.told = true
+	rendered := renderHistory(runner.earlier)
+	runner.profile.Recall.Served = len(runner.earlier)
+	runner.profile.Recall.Bytes = len(rendered)
+	return "EARLIER IN THIS FOLDER:\n" + rendered
+}
+
 // describeCall renders a tool call as a short line for the progress log,
 // so the user can see which files the model is actually looking at. A
 // re-read that costs nothing says so, rather than looking like the file
@@ -814,6 +756,11 @@ func (runner *Runner) describeCall(call responseItem) string {
 		}
 	case "search":
 		return "search " + strconv.Quote(arguments.Query)
+	case "recall":
+		if reason := strings.TrimSpace(arguments.Reason); reason != "" {
+			return "recall earlier turns: " + reason
+		}
+		return "recall earlier turns"
 	default:
 		return call.Name
 	}
@@ -859,48 +806,6 @@ func split(history []Recollection) (notes, turns []Recollection) {
 		turns = append(turns, entry)
 	}
 	return notes, turns
-}
-
-// recall picks out the turns the router chose, keeping the recorded text
-// rather than any retelling of it. Supplied notes are kept whatever the
-// router decided: the caller passed them in on purpose, so dropping them
-// is not a judgement the router gets to make.
-func recall(history []Recollection, chosen []int) []Recollection {
-	wanted := make(map[int]bool, len(chosen))
-	for _, number := range chosen {
-		wanted[number] = true
-	}
-	var kept []Recollection
-	for _, turn := range history {
-		if turn.Note || wanted[turn.Number] {
-			kept = append(kept, turn)
-		}
-	}
-	return kept
-}
-
-// background is what the work should know about what came before: the
-// router's brief, then the turns it pointed at, verbatim from the record.
-func background(brief string, turns []Recollection) string {
-	if strings.TrimSpace(brief) == "" && len(turns) == 0 {
-		return ""
-	}
-	notes, recorded := split(turns)
-	var text strings.Builder
-	if len(notes) > 0 {
-		text.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
-	}
-	if strings.TrimSpace(brief) == "" && len(recorded) == 0 {
-		return text.String()
-	}
-	text.WriteString("EARLIER IN THIS FOLDER:\n")
-	if brief = strings.TrimSpace(brief); brief != "" {
-		text.WriteString(brief + "\n")
-	}
-	if len(recorded) > 0 {
-		text.WriteString(renderHistory(recorded))
-	}
-	return text.String() + "\n"
 }
 
 func plural(count int, one, many string) string {
@@ -1027,6 +932,8 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 			return "ERROR: " + err.Error()
 		}
 		return output
+	case "recall":
+		return runner.recallEarlier()
 	default:
 		return "ERROR: unknown tool " + call.Name
 	}
@@ -1039,6 +946,13 @@ func repositoryTools() []functionTool {
 		}},
 		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
+		}},
+		// reason is required rather than the tool taking no arguments at
+		// all: a strict empty-properties schema is the shape fussy
+		// providers are likeliest to reject, and asking why it is
+		// reaching back makes the trail say so too.
+		{Type: "function", Name: "recall", Description: "Read what was asked in this folder before and what came of it. Use it when the message refers to something you cannot see.", Strict: true, Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"reason": map[string]any{"type": "string"}}, "required": []string{"reason"}, "additionalProperties": false,
 		}},
 	}
 }
@@ -1059,37 +973,37 @@ func rewriteSchema() map[string]any {
 	}, []string{"summary", "content"})
 }
 
-// recallSchema is the routing schema plus relevance selection, used only
-// when there is history to select from.
-func recallSchema() map[string]any {
-	return objectSchema(map[string]any{
-		"coding_task": map[string]any{"type": "boolean"},
-		"reply":       map[string]any{"type": "string"},
-		"relevant":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-		"context":     map[string]any{"type": "string"},
-	}, []string{"coding_task", "reply", "relevant", "context"})
-}
-
-func routeSchema() map[string]any {
-	return objectSchema(map[string]any{
-		"coding_task": map[string]any{"type": "boolean"},
-		"reply":       map[string]any{"type": "string"},
-	}, []string{"coding_task", "reply"})
-}
-
 func objectSchema(properties map[string]any, required []string) map[string]any {
 	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 }
 
-const changeInstructions = `You are a small coding agent making one change.
-Start from the repository map. Use read_files for the files you need and search only when the
-map is not enough. Read a file before changing it; never write a diff against contents you have
-not seen. Avoid wandering beyond what the task needs.
-Everything you have already read stays in this conversation, so do not read a file a second
-time or search for text you have already been shown; scroll up and use it.
-When you have enough, answer with the change: a one-line summary, the files it modifies, and the
-diff that makes it. Make the smallest complete change, and include tests when the repository
-already has them.
+const changeInstructions = `You are a small coding agent working in one folder.
+
+You are given the repository map and the user's message. The message may be a coding task,
+a question about the project, or ordinary conversation, and deciding which is part of your
+job: end in exactly one of these three ways.
+
+Nothing to read and nothing to change — a greeting, a thank-you, a remark, or a question you
+can already answer: put your reply in answer and call no tool at all. Do not go looking
+through the repository for a message that did not ask you to.
+
+A question the files can answer: read what you need, then put the answer in answer — the
+actual colors, values, structure, or whatever was asked, drawn from what you read, not a
+description that an answer exists — leaving summary, files_to_modify and diff empty.
+
+A change: read what you need, then return a one-line summary, the files it modifies, and the
+diff that makes it, leaving answer empty. Make the smallest complete change, and include
+tests when the repository already has them.
+
+Reading: start from the repository map. Use read_files for the files you need, naming every
+file you want in one call rather than a call per file, and search only when the map is not
+enough. Read a file before changing it; never write a diff against contents you have not
+seen. Use recall when the message leans on something you cannot see — "keep going", "undo
+that", "do the same for the other one" — to read what this folder was asked before and what
+came of it; a message that stands on its own does not need it. Everything you have already
+read stays in this conversation, so do not read a file a second time or search for text you
+have already been shown; scroll up and use it. Avoid wandering beyond what the task needs.
+
 The diff may be a unified diff or the "*** Begin Patch / *** Update File:" format; either is
 read by matching its text against the file, so line numbers and hunk counts are ignored and do
 not need to be correct.
@@ -1102,12 +1016,6 @@ character for character, including indentation, escapes and HTML entities such a
 that differs by even one character cannot be located. Surround each change with a few unchanged
 lines so there is only one place it can go.
 If told a previous attempt failed, answer the evidence rather than repeating the same diff.
-Not every task is a change. If, once you have read what you need, you find there is nothing to
-modify — the task was really a question, and reading the files was how you found the answer, not
-a step toward writing one — leave summary, files_to_modify and diff empty and put a direct answer
-to what was asked in answer instead: the actual colors, values, structure, or whatever the
-question was about, drawn from what you read, not a description that an answer exists. Use answer
-only for that; when you are making a change, leave it empty and answer through the diff instead.
 Respond with only the JSON object, no other text before or after it.`
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.
@@ -1117,29 +1025,4 @@ from the supplied current contents with only the required edit made.
 Never abbreviate, summarize, or elide any part of the file with comments
 like "unchanged" or "...": what you return replaces the file exactly, so
 anything you leave out is deleted.
-Respond with only the JSON object, no other text before or after it.`
-
-const recallingInstructions = `You are the first step of a small coding agent, and you are shown
-what has already been asked in this folder before the new message.
-Decide whether the new message is a coding task that requires reading or changing files, or just
-a conversational message.
-Set coding_task to true only when the user wants code written, fixed, explained from the files,
-or otherwise wants the project inspected or changed.
-When coding_task is false, answer the user yourself in reply, using the earlier turns when the
-question is about them ("what did I ask before?" is answered from the list, not guessed at).
-When coding_task is true, leave reply empty.
-A PROJECT CONTEXT block, if present, was handed to you directly rather than asked in an earlier
-turn. Treat it as fact about the project, and do not list it in relevant: it is carried anyway.
-In relevant, list the numbers of the earlier turns that genuinely bear on the new message.
-Prefer constraints the user stated, corrections they made, and the goal they are working toward;
-a correction is worth more than a success, because it is the user refining what they meant.
-Leave out turns that merely went well and have no bearing now. An empty list is the right answer
-when nothing earlier matters.
-In context, write one or two sentences tying those turns to the new message, for whoever does
-the work. Say only what the list supports; do not invent history.
-Respond with only the JSON object, no other text before or after it.`
-
-const routingInstructions = `Decide whether the user's message is a coding task that requires reading or changing files in this project, or just a conversational message.
-Set coding_task to true only when the user wants code written, fixed, explained from the files, or otherwise wants the project inspected or changed.
-When coding_task is false, put your complete, direct reply to the user in reply. When coding_task is true, leave reply empty.
 Respond with only the JSON object, no other text before or after it.`

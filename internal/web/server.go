@@ -735,7 +735,8 @@ func recordTurn(history *session.Log, task string, outcome agent.Outcome) {
 		InputTokens: outcome.Usage.InputTokens, CachedTokens: outcome.Usage.CachedTokens,
 		OutputTokens: outcome.Usage.OutputTokens, TotalTokens: outcome.Usage.TotalTokens,
 		TotalMillis: millis(outcome.Profile.Total()), RecallMillis: millis(outcome.Profile.Recall.Spent),
-		RecallTurns: outcome.Profile.Recall.Offered, RecallBytes: outcome.Profile.Recall.Bytes,
+		RecallAvailable: outcome.Profile.Recall.Available, RecallServed: outcome.Profile.Recall.Served,
+		RecallBytes: outcome.Profile.Recall.Bytes,
 	})
 }
 

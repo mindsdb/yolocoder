@@ -351,21 +351,22 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 		kind = "code"
 	}
 	_ = history.Append(session.Turn{
-		Message:      task,
-		Kind:         kind,
-		Summary:      outcome.Reply,
-		Files:        outcome.Files,
-		Applied:      outcome.Applied,
-		Attempts:     outcome.Attempts,
-		Rewrote:      outcome.Rewrote,
-		InputTokens:  outcome.Usage.InputTokens,
-		CachedTokens: outcome.Usage.CachedTokens,
-		OutputTokens: outcome.Usage.OutputTokens,
-		TotalTokens:  outcome.Usage.TotalTokens,
-		TotalMillis:  millis(outcome.Profile.Total()),
-		RecallMillis: millis(outcome.Profile.Recall.Spent),
-		RecallTurns:  outcome.Profile.Recall.Offered,
-		RecallBytes:  outcome.Profile.Recall.Bytes,
+		Message:         task,
+		Kind:            kind,
+		Summary:         outcome.Reply,
+		Files:           outcome.Files,
+		Applied:         outcome.Applied,
+		Attempts:        outcome.Attempts,
+		Rewrote:         outcome.Rewrote,
+		InputTokens:     outcome.Usage.InputTokens,
+		CachedTokens:    outcome.Usage.CachedTokens,
+		OutputTokens:    outcome.Usage.OutputTokens,
+		TotalTokens:     outcome.Usage.TotalTokens,
+		TotalMillis:     millis(outcome.Profile.Total()),
+		RecallMillis:    millis(outcome.Profile.Recall.Spent),
+		RecallAvailable: outcome.Profile.Recall.Available,
+		RecallServed:    outcome.Profile.Recall.Served,
+		RecallBytes:     outcome.Profile.Recall.Bytes,
 	})
 }
 

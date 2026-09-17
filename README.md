@@ -216,32 +216,40 @@ pick one, or pass a name directly with `yolocoder model <name>`.
 
 YoloCoder keeps the loop deliberately small:
 
-1. Routes the message: a plain conversational message gets the model's
-   direct reply and stops there; only a coding task continues below.
-2. Builds a compact map of the current folder (`.gitignore`-aware when it
+1. Builds a compact map of the current folder (`.gitignore`-aware when it
    already has its own Git repository, a plain walk otherwise).
-3. Opens one conversation that reads the files it needs (or searches, when
-   the map isn't enough) and then answers with a summary, the files it
-   touches, and a unified diff. Planning and patching are the same request:
-   the files are already in the conversation from the tool calls, so asking
-   separately would resend all of them to learn nothing new. Routing alone
-   can send something here that turns out not to be a change at all —
-   "what color is the background" needs the CSS in hand to answer, which
-   routing itself has no way to read — so this step can also conclude with
-   a direct answer instead of a diff, ending the turn there rather than
-   forcing a change out of a question.
-4. Applies the diff with `git apply`, which works directly against the
+2. Opens one conversation with that map and the message, which ends in
+   whichever of three ways fits: a direct reply, an answer drawn from
+   files it read, or a summary plus the files it touches plus a unified
+   diff. Planning and patching are the same request — the files are
+   already in the conversation from the tool calls, so asking separately
+   would resend all of them to learn nothing new — and so is deciding
+   what kind of message this was. A separate routing call used to come
+   first, but it had no tools and so couldn't settle "question or
+   change?" for anything needing the files to answer ("what color is the
+   background" needs the CSS in hand); it said "change" and deferred,
+   costing a round trip on every turn to reach a foregone conclusion.
+3. Applies the diff with `git apply`, which works directly against the
    folder without requiring a Git repository. If Git rejects it, the hunks
    are placed by matching their content instead, since a model reliably
    gets the content right and the line numbers and counts wrong.
-5. Runs the repository's detected test command.
-6. Retries at most twice, continuing the same conversation so a repair
+4. Runs the repository's detected test command.
+5. Retries at most twice, continuing the same conversation so a repair
    costs only the failure evidence rather than the whole context again.
-7. Falls back to writing whole files when no diff will apply at all.
+6. Falls back to writing whole files when no diff will apply at all.
+
+Earlier turns in the folder are held back rather than sent. The opening
+message says how many there are and offers a `recall` tool; a turn that
+leans on something it can't see ("keep going", "undo that") asks for them
+and gets all of them, unfiltered, in the recorded words. Most turns stand
+on their own and never pay for history at all. Picking out the relevant
+turns used to be its own model call, which cost a round trip on every turn
+to narrow a few kilobytes — a worse trade than simply handing them over
+when asked.
 
 The model never receives a shell tool. Local code exposes only bounded
-`read_files` and `search` tools during context gathering. Patch application
-and testing are deterministic local operations.
+`read_files`, `search` and `recall` tools during context gathering. Patch
+application and testing are deterministic local operations.
 
 Release builds check the rolling `latest` GitHub release whenever the CLI
 starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum,

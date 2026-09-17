@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -93,10 +94,6 @@ func schemaName(body map[string]any) string {
 func writeOutputText(writer http.ResponseWriter, text string) {
 	response := responseEnvelope{Output: []responseItem{{Type: "message", Content: []contentItem{{Type: "output_text", Text: text}}}}}
 	_ = json.NewEncoder(writer).Encode(response)
-}
-
-func routeAsCodingTask(writer http.ResponseWriter) {
-	fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}]}`)
 }
 
 // recordingProgress captures progress output so tests can assert on the
@@ -292,10 +289,8 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch requests {
 		case 1:
-			routeAsCodingTask(writer)
-		case 2:
 			fmt.Fprint(writer, `{"id":"resp_1","output":[{"type":"function_call","name":"read_files","call_id":"call_1","arguments":"{\"paths\":[\"hello.txt\"]}"}]}`)
-		case 3:
+		case 2:
 			// The continuation resends the transcript itself rather than
 			// leaning on previous_response_id: not every OpenAI-compatible
 			// provider persists server-side response state, and one that
@@ -346,17 +341,18 @@ func TestRunnerReadsThenChangesInOneConversation(t *testing.T) {
 	if string(content) != "new\n" {
 		t.Fatalf("hello.txt = %q", content)
 	}
-	// Route, one tool round, one answer. Planning and patching used to be
-	// separate calls that shipped every file twice.
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
+	// One tool round, one answer. Planning and patching used to be
+	// separate calls that shipped every file twice, and a routing call
+	// used to sit ahead of both.
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
 
 func TestRunnerAccumulatesUsageAcrossCalls(t *testing.T) {
-	// A turn can cost several calls (route, then produce, then possibly
-	// rewrite); what's worth reporting is all of them summed, not any
-	// one call's own count.
+	// A turn can cost several calls (a tool round, then the change, then
+	// possibly a rewrite); what's worth reporting is all of them summed,
+	// not any one call's own count.
 	repository := integrationRepository(t)
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -364,7 +360,7 @@ func TestRunnerAccumulatesUsageAcrossCalls(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch requests {
 		case 1:
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\"}"}]}],`+
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"function_call","name":"read_files","call_id":"call_1","arguments":"{\"paths\":[\"hello.txt\"]}"}],`+
 				`"usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110,"input_tokens_details":{"cached_tokens":20}}}`)
 		case 2:
 			diff := "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n"
@@ -416,8 +412,6 @@ func TestRunnerRepairsWithinTheSameConversation(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			changes++
 			if changes == 2 {
@@ -487,8 +481,6 @@ func TestRunnerAnswersAQuestionThatNeededFilesInsteadOfWritingADiff(t *testing.T
 		requests++
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			if requests == 2 {
 				// Reads the file before answering, the same as it would
@@ -536,8 +528,6 @@ func TestRunnerStillErrorsWhenNeitherDiffNorAnswerIsGiven(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			payload, _ := json.Marshal(Change{})
 			writeOutputText(writer, string(payload))
@@ -573,8 +563,6 @@ func TestRunnerRewritesTheFileItReadWhenNoneIsNamed(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			changes++
 			if changes == 1 {
@@ -635,8 +623,6 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			payload, _ := json.Marshal(Change{FilesToModify: []string{"index.html"}, Diff: "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1 +1 @@\n-nope\n+new\n"})
 			writeOutputText(writer, string(payload))
@@ -658,26 +644,33 @@ func TestRunnerRefusesToEmptyAFileOnRewrite(t *testing.T) {
 	}
 }
 
-func TestRunnerRoutesNonCodingMessageWithoutTouchingRepository(t *testing.T) {
+func TestRunnerAnswersAConversationalMessageInOneCall(t *testing.T) {
+	// There is no routing call ahead of the work any more, so "hi" costs
+	// exactly one round trip: the same call everything else goes through,
+	// ending in answer without reading a file or writing a diff.
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests++
 		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(writer, `{"id":"resp_route","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":false,\"reply\":\"Hi there!\"}"}]}]}`)
+		payload, _ := json.Marshal(Change{Answer: "Hi there!"})
+		fmt.Fprintf(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`, strconv.Quote(string(payload)))
 	}))
 	defer server.Close()
 
 	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
-	repository := &repo.Repository{Root: filepath.Join(t.TempDir(), "does-not-exist")}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "hi", nil, nil, &recordingProgress{})
+	outcome, err := NewRunner(client, &repo.Repository{Root: t.TempDir()}).
+		Run(context.Background(), "hi", nil, nil, &recordingProgress{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if outcome.Reply != "Hi there!" {
 		t.Fatalf("reply = %q", outcome.Reply)
 	}
+	if outcome.Coding || outcome.Applied {
+		t.Fatalf("a conversational message changed nothing, so it is not a coding turn: %+v", outcome)
+	}
 	if requests != 1 {
-		t.Fatalf("requests = %d, want 1 (repository must not be touched)", requests)
+		t.Fatalf("requests = %d, want 1", requests)
 	}
 }
 
@@ -870,8 +863,6 @@ func TestRunnerRetriesWhenPromisedFilesAreNotCreated(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch schemaName(body) {
-		case "message_route":
-			routeAsCodingTask(writer)
 		case "code_change":
 			changes++
 			if changes == 1 {

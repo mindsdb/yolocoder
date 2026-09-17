@@ -57,31 +57,24 @@ func TestProfileSummary(t *testing.T) {
 	profile.record(StepThink, 2*time.Second)
 	profile.record(StepThink, 2700*time.Millisecond)
 
-	want := "5.8s total · recall 1.1s · map 11ms · think 4.7s ×2"
-	if got := profile.Summary(); got != want {
+	// Only the total: the steps each streamed their own time onto the
+	// trail already, so the footer is for the one comparable number.
+	if got, want := profile.Summary(), "5.8s total"; got != want {
 		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+	// The breakdown is still there for anyone who wants it.
+	if got := len(profile.Spans()); got != 3 {
+		t.Fatalf("Spans() = %d, want 3 kept alongside the total", got)
 	}
 }
 
 func TestRecallDetailLine(t *testing.T) {
-	// No history to select from: the call only routed, so saying "0 of 0
-	// turns" would be reporting on work that never happened.
-	detail := RecallDetail{Spent: 900 * time.Millisecond}
-	if got, want := detail.Line(), "routed the message · 900ms"; got != want {
-		t.Fatalf("Line() with no history = %q, want %q", got, want)
-	}
-
-	detail = RecallDetail{Offered: 45, Bytes: 7987, Chosen: 1, Spent: 1040 * time.Millisecond}
-	want := "recalled 1 of 45 earlier turns · 7.8 KB offered · 1.0s"
-	if got := detail.Line(); got != want {
+	detail := RecallDetail{Available: 45, Served: 45, Bytes: 7987, Spent: 3 * time.Millisecond}
+	if got, want := detail.Line(), "recalled 45 earlier turns · 7.8 KB"; got != want {
 		t.Fatalf("Line() = %q, want %q", got, want)
 	}
-
-	// The case worth noticing: a lot of history read to choose none of it.
-	detail = RecallDetail{Offered: 20, Bytes: 8192, Chosen: 0, Spent: 2 * time.Second}
-	want = "recalled 0 of 20 earlier turns · 8.0 KB offered · 2.0s"
-	if got := detail.Line(); got != want {
-		t.Fatalf("Line() choosing nothing = %q, want %q", got, want)
+	if got, want := (RecallDetail{Served: 1, Bytes: 312}).Line(), "recalled 1 earlier turn · 312 B"; got != want {
+		t.Fatalf("Line() singular = %q, want %q", got, want)
 	}
 }
 
@@ -123,11 +116,9 @@ func TestRunProfilesTheTurn(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		round++
 		switch round {
-		case 1: // message_route
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"coding_task\":true,\"reply\":\"\",\"relevant\":[3],\"context\":\"carry on\"}"}]}]}`)
-		case 2: // code_change, asking to read a file
+		case 1: // asks to read a file
 			fmt.Fprint(writer, `{"id":"r","output":[{"type":"function_call","name":"read_files","call_id":"c1","arguments":"{\"paths\":[\"a.txt\"]}"}]}`)
-		default: // code_change, answering without a diff
+		default: // answers without a diff
 			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"\",\"files_to_modify\":[],\"diff\":\"\",\"answer\":\"it says hello\"}"}]}]}`)
 		}
 	}))
@@ -152,13 +143,13 @@ func TestRunProfilesTheTurn(t *testing.T) {
 	for _, span := range profile.Spans() {
 		steps[span.Step] = span
 	}
-	for _, step := range []Step{StepRecall, StepMap, StepThink, StepTools} {
+	for _, step := range []Step{StepMap, StepThink, StepTools} {
 		if _, measured := steps[step]; !measured {
 			t.Errorf("%s was not measured; profile = %q", step, profile.Summary())
 		}
 	}
-	// Two code_change calls: the one that asked to read, and the one that
-	// answered. Folding them into a single counted span is the point.
+	// Two calls: the one that asked to read, and the one that answered.
+	// Folding them into a single counted span is the point.
 	if got := steps[StepThink].Calls; got != 2 {
 		t.Errorf("think calls = %d, want 2", got)
 	}
@@ -168,15 +159,12 @@ func TestRunProfilesTheTurn(t *testing.T) {
 		t.Error("a turn that changed nothing should record no patch step")
 	}
 
-	// The selection detail is the part this exists for: it should say how
-	// much history it was handed, not just how long it took.
-	if profile.Recall.Offered != len(pastTurns) {
-		t.Errorf("Recall.Offered = %d, want %d", profile.Recall.Offered, len(pastTurns))
+	// History was available and this turn never reached for it, which is
+	// the measurement, not a gap.
+	if profile.Recall.Available != len(pastTurns) {
+		t.Errorf("Recall.Available = %d, want %d", profile.Recall.Available, len(pastTurns))
 	}
-	if profile.Recall.Chosen != 1 {
-		t.Errorf("Recall.Chosen = %d, want 1", profile.Recall.Chosen)
-	}
-	if profile.Recall.Bytes == 0 {
-		t.Error("Recall.Bytes should size the history the selection had to read")
+	if profile.Recall.Served != 0 {
+		t.Errorf("Recall.Served = %d, want 0 on a turn that never asked", profile.Recall.Served)
 	}
 }

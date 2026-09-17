@@ -385,6 +385,15 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		runner.profile.record(StepPatch, patchSpent)
 		if applyErr != nil {
 			progress.Log("  patch did not apply, retrying · " + formatDuration(patchSpent))
+			// Why, not just that. The applier already works out which
+			// file, which hunk and which single line differs; until now
+			// all of that went to the model and to the debug log, and
+			// the person watching got three words they could do nothing
+			// with — on a run where roughly a quarter of changes need a
+			// repair, that is the thing worth seeing.
+			for _, line := range repo.Explain(applyErr) {
+				progress.Log("    " + line)
+			}
 			// Feed back the diff that failed alongside git's complaint.
 			// Without seeing its own output the model has no way to tell
 			// what was wrong with it and tends to reproduce it verbatim.
@@ -427,6 +436,9 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1, Usage: runner.usage, Profile: runner.profile}, nil
 		}
 		progress.Log("  tests failed, retrying · " + formatDuration(testSpent))
+		for _, line := range firstFailures(testResult.Output) {
+			progress.Log("    " + line)
+		}
 		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
 		session.report(evidence)
 	}
@@ -479,6 +491,33 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		return Outcome{Profile: runner.profile}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
 	}
 	return Outcome{Profile: runner.profile}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+}
+
+// firstFailures are the few lines of test output most likely to say what
+// broke, for the trail. The model gets the whole thing either way; this
+// is so the person watching does not have to turn on debug logging to
+// find out whether it was one type error or forty.
+func firstFailures(output string) []string {
+	var picked []string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "$ ") {
+			continue
+		}
+		picked = append(picked, clip(trimmed, 110))
+		if len(picked) == 3 {
+			break
+		}
+	}
+	return picked
+}
+
+// clip keeps a line inside a terminal's width.
+func clip(line string, limit int) string {
+	if len(line) <= limit {
+		return line
+	}
+	return line[:limit] + "..."
 }
 
 // runTests runs the project's tests and records what they cost,

@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -496,5 +497,52 @@ func TestUpdateFileWithAHunkHeaderIsUnaffected(t *testing.T) {
 	}
 	if !strings.Contains(got, `<button id="restart">New game</button>`) {
 		t.Fatalf("the rest of the file was lost:\n%s", got)
+	}
+}
+
+func TestExplainNamesTheFileAndTheLineThatDiffers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.tsx"), []byte("const a = 1;\nconst board = useState(empty());\nconst c = 3;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repository := &Repository{Root: root}
+
+	// The middle line is subtly wrong — the shape of near miss a model
+	// reproducing a file by eye actually produces.
+	err := repository.Apply("--- a/app.tsx\n+++ b/app.tsx\n@@\n const a = 1;\n-const board = useState(() => empty());\n+const board = useState(fresh());\n const c = 3;\n")
+	if err == nil {
+		t.Fatal("a hunk whose context is not in the file should not apply")
+	}
+	lines := Explain(err)
+	if len(lines) != 3 {
+		t.Fatalf("Explain() = %q, want the reason plus the two lines that differ", lines)
+	}
+	if !strings.HasPrefix(lines[0], "app.tsx: could not find this hunk's lines") {
+		t.Fatalf("first line should name the file and the reason: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "() => empty()") {
+		t.Fatalf("expected line should be what the hunk wanted: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "useState(empty())") {
+		t.Fatalf("found line should be what is really there: %q", lines[2])
+	}
+}
+
+func TestExplainFallsBackToTheErrorsOwnFirstLine(t *testing.T) {
+	if got := Explain(errors.New("something else went wrong\nwith more detail below")); len(got) != 1 || got[0] != "something else went wrong" {
+		t.Fatalf("Explain() = %q", got)
+	}
+	if got := Explain(nil); got != nil {
+		t.Fatalf("Explain(nil) = %q, want nothing to print", got)
+	}
+}
+
+func TestExplainClipsALongLine(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	got := Explain(&HunkError{Path: "a.ts", Reason: "nope", Expected: long, Found: long})
+	for _, line := range got[1:] {
+		if len(line) > 130 {
+			t.Fatalf("a line escaped clipping at %d characters", len(line))
+		}
 	}
 }

@@ -1,9 +1,80 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// HunkError is why one hunk could not be placed. It carries the pieces
+// apart as well as the full text so the two audiences can be served
+// differently: the model gets Detail, which shows it the block it wrote
+// and everything known about why it did not fit, while a person watching
+// the run gets Summary — the file, the one-line reason, and the single
+// line that actually differs. Before this, only the model was told
+// anything; the trail said "patch did not apply" and stopped, which is
+// the one thing nobody can act on.
+type HunkError struct {
+	// Path is the file it failed on, filled in by the caller that knows
+	// which file's hunks were being placed.
+	Path   string
+	Reason string
+	// Expected and Found are the first line of the closest near miss,
+	// empty when nothing in the file resembled the block at all.
+	Expected string
+	Found    string
+	Detail   string
+}
+
+func (failure *HunkError) Error() string {
+	if failure.Path != "" {
+		return failure.Path + ": " + failure.Detail
+	}
+	return failure.Detail
+}
+
+// Summary is the short form, for a progress line.
+func (failure *HunkError) Summary() []string {
+	head := failure.Reason
+	if failure.Path != "" {
+		head = failure.Path + ": " + failure.Reason
+	}
+	lines := []string{head}
+	if failure.Expected != "" {
+		lines = append(lines, "expected: "+clipLine(failure.Expected), "in file:  "+clipLine(failure.Found))
+	}
+	return lines
+}
+
+// Explain reduces an apply failure to a few lines worth showing someone.
+// A hunk that could not be placed knows exactly what went wrong; anything
+// else (git refusing the patch outright, an unreadable file) falls back to
+// the error's own first line.
+func Explain(err error) []string {
+	var failure *HunkError
+	if errors.As(err, &failure) {
+		return failure.Summary()
+	}
+	if err == nil {
+		return nil
+	}
+	first, _, _ := strings.Cut(err.Error(), "\n")
+	if first = strings.TrimSpace(first); first == "" {
+		return nil
+	}
+	return []string{clipLine(first)}
+}
+
+// clipLine keeps a line inside a terminal's width rather than letting a
+// long source line wrap into an unreadable block.
+func clipLine(line string) string {
+	const limit = 110
+	line = strings.TrimRight(line, "\r\n")
+	if len(line) <= limit {
+		return line
+	}
+	return line[:limit] + "..."
+}
 
 // A model writing a unified diff reliably gets the content right and the
 // bookkeeping wrong: hunk headers that miscount lines, start lines that
@@ -203,6 +274,14 @@ func (repository *Repository) applyByContent(patch string) error {
 		}
 		content, err := applyHunks(current, file.hunks)
 		if err != nil {
+			// The file is known here and not where the failure was
+			// raised, so it is filled in on the way past rather than
+			// wrapped, which would hide it from errors.As.
+			var failure *HunkError
+			if errors.As(err, &failure) {
+				failure.Path = file.path
+				return failure
+			}
 			return fmt.Errorf("%s: %w", file.path, err)
 		}
 		updated[file.path] = content
@@ -227,7 +306,8 @@ func applyHunks(content string, hunks []hunk) (string, error) {
 				lines = current.after
 				continue
 			}
-			return "", fmt.Errorf("a hunk has no context to place it by")
+			const reason = "a hunk has no context to place it by"
+			return "", &HunkError{Reason: reason, Detail: reason}
 		}
 		index, err := locate(lines, current.before)
 		if err != nil {
@@ -264,9 +344,16 @@ func locate(lines, block []string) (int, error) {
 	}
 	switch {
 	case len(matches) == 0:
-		return 0, fmt.Errorf("could not find this hunk's lines in the file:\n%s%s", preview(block), nearMiss(lines, block))
+		expected, found, at := nearMiss(lines, block)
+		reason := "could not find this hunk's lines in the file"
+		detail := fmt.Sprintf("%s:\n%s", reason, preview(block))
+		if expected != "" {
+			detail += fmt.Sprintf("\n\nthe closest match is at line %d, where it differs:\n  expected: %q\n  in file:  %q", at, expected, found)
+		}
+		return 0, &HunkError{Reason: reason, Expected: expected, Found: found, Detail: detail}
 	case len(matches) > 1 && len(block) < 3:
-		return 0, fmt.Errorf("this hunk's lines appear %d times, too ambiguous to place:\n%s%s", len(matches), preview(block), disambiguate(lines, matches))
+		reason := fmt.Sprintf("this hunk's lines appear %d times, too ambiguous to place", len(matches))
+		return 0, &HunkError{Reason: reason, Detail: fmt.Sprintf("%s:\n%s%s", reason, preview(block), disambiguate(lines, matches))}
 	default:
 		return matches[0], nil
 	}
@@ -307,7 +394,10 @@ func normalizeEntities(line string) string {
 // a low-quality guess would be worse than no guess. This turns "could not
 // find this hunk" from a dead end into something the model can act on
 // directly, rather than having it reproduce the same failing diff again.
-func nearMiss(lines, block []string) string {
+// nearMiss finds the closest place the block almost fits and reports the
+// first line that differs there: what the hunk expected, what is actually
+// in the file, and which line that is. Empty when nothing resembles it.
+func nearMiss(lines, block []string) (expected, found string, at int) {
 	bestStart, bestScore := -1, 0
 	for start := 0; start+len(block) <= len(lines); start++ {
 		score := 0
@@ -323,17 +413,15 @@ func nearMiss(lines, block []string) string {
 	// Require at least half the block to already line up, or this is
 	// pointing at an unrelated part of the file rather than a near miss.
 	if bestStart == -1 || bestScore*2 < len(block) {
-		return ""
+		return "", "", 0
 	}
 	for offset, want := range block {
 		got := lines[bestStart+offset]
 		if got != want {
-			return fmt.Sprintf(
-				"\n\nthe closest match is at line %d, where it differs:\n  expected: %q\n  in file:  %q",
-				bestStart+offset+1, want, got)
+			return want, got, bestStart + offset + 1
 		}
 	}
-	return ""
+	return "", "", 0
 }
 
 func findAll(lines, block []string, equal func(string, string) bool) []int {

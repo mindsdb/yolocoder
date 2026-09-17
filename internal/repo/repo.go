@@ -236,7 +236,10 @@ func (repository *Repository) Apply(patch string) error {
 
 	if contentErr := repository.applyByContent(patch); contentErr != nil {
 		debug.Logf("PATCH FAILED", "git apply: %v\nby content: %v", gitErr, contentErr)
-		return fmt.Errorf("%w\n\nPlacing the hunks by content also failed: %v", gitErr, contentErr)
+		// Both errors are wrapped: the model reads the whole text, and a
+		// caller reaching for Explain wants the content applier's, which
+		// is the one that knows which line actually differs.
+		return fmt.Errorf("%w\n\nPlacing the hunks by content also failed: %w", gitErr, contentErr)
 	}
 	debug.Log("PATCH APPLIED", "by matching content, after git apply declined its line numbers")
 	return nil

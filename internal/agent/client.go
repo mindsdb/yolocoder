@@ -195,6 +195,18 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return client.create(ctx, request)
 	}
 
+	// Some providers constrain generation to a tool call whenever tools
+	// are offered, then fail outright when the model would rather answer
+	// directly — which is exactly what a message needing no files does.
+	// Asking again with no tools at all gives it what it was trying to
+	// do, and is far better than failing the turn over it.
+	if len(request.Tools) > 0 && failedToGenerateToolCall(replyBody) {
+		debug.Log("TOOLS", "the provider demanded a tool call the model would not make; asking again without tools")
+		request.Tools = nil
+		request.ToolChoice = ""
+		return client.create(ctx, request)
+	}
+
 	// Some providers won't take tool definitions and a JSON schema in the
 	// same request. Ask again without the schema, describing the shape in
 	// the instructions instead, and keep doing that for this run.
@@ -227,6 +239,20 @@ func (client *Client) decode(body []byte) (responseEnvelope, error) {
 	var envelope responseEnvelope
 	err := json.Unmarshal(body, &envelope)
 	return envelope, err
+}
+
+// failedToGenerateToolCall recognizes a provider that pinned tool_choice
+// to "required" on its own account — we only ever send "auto" — and then
+// errored because the model produced an ordinary reply instead of a tool
+// call. MindsHub: "Failed to generate tool call but tool_choice =
+// 'required'."
+//
+// This is not a retry of a flaky request: repeating it unchanged would
+// fail the same way. It is a signal that the turn does not need a tool at
+// all, so the retry drops them.
+func failedToGenerateToolCall(body []byte) bool {
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "tool_choice") && strings.Contains(text, "failed to generate tool call")
 }
 
 // rejectsSchemaWithTools recognizes a provider refusing a request that

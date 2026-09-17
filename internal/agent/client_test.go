@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -119,5 +120,43 @@ func TestCreateSurfacesAProviderErrorMessage(t *testing.T) {
 	_, err := client.create(context.Background(), responseRequest{Input: "hi"})
 	if err == nil || !strings.Contains(err.Error(), "Wrong API Key") {
 		t.Fatalf("err = %v, want the provider's own message", err)
+	}
+}
+
+func TestProviderThatDemandsAToolCallIsAskedAgainWithoutTools(t *testing.T) {
+	// Some providers pin tool_choice to "required" on their own account —
+	// we only ever send "auto" — and then fail when the model would rather
+	// answer directly, which is what a message needing no files does.
+	var sawTools []bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		tools, _ := body["tools"].([]any)
+		sawTools = append(sawTools, len(tools) > 0)
+		writer.Header().Set("Content-Type", "application/json")
+		if len(tools) > 0 {
+			writer.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(writer, `{"message":"Failed to generate tool_calls. Exception: Failed to generate tool call but tool_choice = 'required'.","type":"generation_error","code":"parser_error"}`)
+			return
+		}
+		fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"answer\":\"Hi there!\"}"}]}]}`)
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	response, err := client.create(context.Background(), responseRequest{
+		Input:      "hi",
+		Tools:      repositoryTools(false),
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("the turn should survive the provider's demand: %v", err)
+	}
+	if len(sawTools) != 2 || !sawTools[0] || sawTools[1] {
+		t.Fatalf("tools per request = %v, want the retry to drop them", sawTools)
+	}
+	text, err := response.text()
+	if err != nil || !strings.Contains(text, "Hi there!") {
+		t.Fatalf("text = %q, %v", text, err)
 	}
 }

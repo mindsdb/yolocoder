@@ -159,12 +159,9 @@ func TestRunProfilesTheTurn(t *testing.T) {
 		t.Error("a turn that changed nothing should record no patch step")
 	}
 
-	// History was available and this turn never reached for it, which is
-	// the measurement, not a gap.
-	if profile.Recall.Available != len(pastTurns) {
-		t.Errorf("Recall.Available = %d, want %d", profile.Recall.Available, len(pastTurns))
-	}
-	if profile.Recall.Served != 0 {
-		t.Errorf("Recall.Served = %d, want 0 on a turn that never asked", profile.Recall.Served)
+	// pastTurns is exactly the inline window, so nothing was left behind
+	// it for recall to offer and nothing was served.
+	if profile.Recall.Available != 0 || profile.Recall.Served != 0 {
+		t.Errorf("Recall = %+v, want nothing beyond the inline turns", profile.Recall)
 	}
 }

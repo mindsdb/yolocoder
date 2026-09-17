@@ -190,6 +190,10 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		toggleDebug()
 		fmt.Println()
 		return true, false
+	case "/recall":
+		toggleRecall(fromEnvironment, provider)
+		fmt.Println()
+		return true, false
 	case "/setup":
 		if fromEnvironment {
 			fmt.Println("[*_*] /setup can't change an OPENAI_* environment provider; restart without --llm-from-env-vars to use a saved one.")
@@ -220,6 +224,28 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		return true, false
 	}
 	return false, false
+}
+
+// toggleRecall turns the recall tool on or off for the turns from here
+// on. It takes effect immediately either way; saving it is what makes it
+// stick, and an OPENAI_* environment provider isn't ours to write, so
+// that case toggles for this session only and says so.
+func toggleRecall(fromEnvironment bool, provider *config.LLM) {
+	provider.Recall = !provider.Recall
+	state := "off"
+	if provider.Recall {
+		state = "on"
+	}
+	if fromEnvironment {
+		fmt.Printf("[*_*] Recall %s for this session. An OPENAI_* environment provider can't be saved.\n", state)
+		return
+	}
+	if err := config.Save(*provider); err != nil {
+		fmt.Printf("[*_*] Recall %s for this session, but it could not be saved: %v\n", state, err)
+		return
+	}
+	fmt.Printf("[*_*] Recall %s. The agent %s read turns older than the last %d it is shown.\n",
+		state, map[bool]string{true: "can now", false: "can no longer"}[provider.Recall], 3)
 }
 
 // openHistory starts or continues this folder's session log.

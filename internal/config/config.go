@@ -21,6 +21,13 @@ type LLM struct {
 	// so an empty value is resolved by asking the endpoint rather than
 	// assumed.
 	API string
+	// Recall offers the agent a tool for reading further back than the
+	// few turns it is given inline. Off by default: it is an extra tool
+	// definition on every request and an extra round trip when used, and
+	// the recent turns cover almost every follow-up on their own. Stored
+	// here because this is the one settings file there is, not because
+	// it has anything to do with the provider.
+	Recall bool
 }
 
 const (
@@ -34,6 +41,7 @@ type settings struct {
 	BaseURL  string `json:"base_url"`
 	Model    string `json:"model,omitempty"`
 	API      string `json:"api,omitempty"`
+	Recall   bool   `json:"recall,omitempty"`
 }
 
 type credentials struct {
@@ -79,7 +87,7 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API}, true, nil
+	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall}, true, nil
 }
 
 func Save(provider LLM) error {
@@ -94,7 +102,7 @@ func Save(provider LLM) error {
 	if err != nil {
 		return err
 	}
-	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API}
+	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall}
 	if err := writeJSON(filepath.Join(dir, "config.json"), public, 0o644); err != nil {
 		return fmt.Errorf("save configuration: %w", err)
 	}

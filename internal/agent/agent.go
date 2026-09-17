@@ -280,12 +280,15 @@ type Runner struct {
 	// profile accumulates the same way over the same scope, in time
 	// rather than tokens.
 	profile Profile
-	// earlier is what this folder has been asked before, held here for
-	// the recall tool to serve rather than pushed into the opening
-	// message. Most turns never need it, and the ones that do can say so
-	// themselves — which is cheaper than paying for all of it every time
-	// on the chance that this turn is one of them.
+	// earlier is everything this folder has been asked before. The last
+	// few turns of it ride along in the opening message; the rest is held
+	// here for the recall tool to serve, when that tool is offered at all.
 	earlier []Recollection
+	// recall reports whether the recall tool is offered this run. Off by
+	// default (see config.LLM.Recall): the inline turns already answer
+	// almost every follow-up, and an unused tool is still a definition on
+	// every request.
+	recall bool
 	// told reports whether earlier has already been handed over, so a
 	// second recall costs a sentence rather than another copy of it in a
 	// transcript that is resent on every following round.
@@ -294,6 +297,27 @@ type Runner struct {
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
 	return &Runner{client: client, repository: repository, served: map[string]string{}}
+}
+
+// UseRecall offers (or withholds) the tool for reading further back than
+// the turns carried inline.
+func (runner *Runner) UseRecall(on bool) { runner.recall = on }
+
+// inlineTurns is how many of the most recent turns ride along in the
+// opening message. Measured on a real folder, three of them come to
+// around 1.5 KB — far less than a round trip spent fetching them would
+// cost, and they cover the follow-ups that make up most of a session
+// ("make it bigger", "undo that", "now the other one").
+const inlineTurns = 3
+
+// recentTurns splits the history into the turns carried inline and the
+// count of older ones behind them, which is all the recall tool has left
+// to offer.
+func (runner *Runner) recentTurns() ([]Recollection, int) {
+	if len(runner.earlier) <= inlineTurns {
+		return runner.earlier, 0
+	}
+	return runner.earlier[len(runner.earlier)-inlineTurns:], len(runner.earlier) - inlineTurns
 }
 
 // Run works the message out in one conversation: the model is given the
@@ -313,7 +337,8 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 func (runner *Runner) Run(ctx context.Context, task string, images []string, history []Recollection, progress Progress) (Outcome, error) {
 	notes, turns := split(history)
 	runner.earlier = turns
-	runner.profile.Recall.Available = len(turns)
+	_, beyond := runner.recentTurns()
+	runner.profile.Recall.Available = beyond
 
 	progress.Status("Mapping the folder...")
 	mapStarted := time.Now()
@@ -327,7 +352,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	progress.Log(fmt.Sprintf("  mapped %d files · %s", len(mapped), formatDuration(mapSpent)))
 
 	progress.Status("Working out the change...")
-	session := runner.newChangeSession(task, repoMap, notes, len(turns), images)
+	session := runner.newChangeSession(task, repoMap, notes, images)
 
 	var evidence string
 	var change Change
@@ -497,19 +522,23 @@ type changeSession struct {
 // the task ahead of the map — as this did — meant no two turns in a
 // session ever shared a prefix, so the map was re-read as fresh input on
 // every one of them.
-func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollection, earlierTurns int, images []string) *changeSession {
+func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollection, images []string) *changeSession {
 	var opening strings.Builder
 	if len(notes) > 0 {
 		opening.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
 	}
 	fmt.Fprintf(&opening, "REPOSITORY MAP:\n%s\n", repoMap)
-	if earlierTurns > 0 {
-		// Said out loud because the model cannot otherwise know what it
-		// is missing. Without this line "keep going" looks like a
-		// complete message with no earlier turn to go on, and the recall
-		// tool sits there unused.
-		fmt.Fprintf(&opening, "This folder has %d earlier %s you have not been shown. Call recall to read %s if this message refers to something that is not in front of you.\n\n",
-			earlierTurns, plural(earlierTurns, "turn", "turns"), plural(earlierTurns, "it", "them"))
+	recent, beyond := runner.recentTurns()
+	if len(recent) > 0 {
+		opening.WriteString("EARLIER IN THIS FOLDER:\n" + renderHistory(recent) + "\n")
+	}
+	if beyond > 0 && runner.recall {
+		// Said out loud because the model cannot otherwise know there is
+		// anything behind what it was shown, and the tool would sit
+		// unused however far back the message actually reaches.
+		fmt.Fprintf(&opening, "%d further %s came before %s, and %s not shown. Call recall to read %s if this message reaches back past what is above.\n\n",
+			beyond, plural(beyond, "turn", "turns"), plural(len(recent), "that one", "those"),
+			plural(beyond, "is", "are"), plural(beyond, "it", "them"))
 	}
 	fmt.Fprintf(&opening, "TASK:\n%s", task)
 	return &changeSession{
@@ -532,7 +561,7 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 		response, err := session.runner.client.create(callCtx, responseRequest{
 			Instructions: changeInstructions,
 			Input:        session.transcript,
-			Tools:        repositoryTools(),
+			Tools:        repositoryTools(session.runner.recall),
 			ToolChoice:   "auto",
 			Text:         strictSchema("code_change", changeSchema()),
 		})
@@ -704,27 +733,29 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 	return answer.String() + text, nil
 }
 
-// recallEarlier answers a recall call with everything this folder has
-// been asked before, unfiltered and in the recorded words. There is no
-// selection: choosing which turns matter was its own model call once,
-// and paying a serial round trip to narrow a few kilobytes was a worse
-// trade than simply handing them over when asked.
+// recallEarlier answers a recall call with everything older than the
+// turns already carried inline, unfiltered and in the recorded words.
+// There is no selection: choosing which turns matter was its own model
+// call once, and paying a serial round trip to narrow a few kilobytes
+// was a worse trade than simply handing them over when asked.
 //
 // A second call costs a sentence rather than another copy, for the same
 // reason readFiles refuses to resend a file already shown: every copy
 // lands in a transcript that is resent in full on every following round.
 func (runner *Runner) recallEarlier() string {
-	if len(runner.earlier) == 0 {
-		return "Nothing earlier has been recorded in this folder."
+	_, beyond := runner.recentTurns()
+	if beyond == 0 {
+		return "Nothing came before the turns you were already shown."
 	}
 	if runner.told {
 		return "(already recalled above)"
 	}
 	runner.told = true
-	rendered := renderHistory(runner.earlier)
-	runner.profile.Recall.Served = len(runner.earlier)
+	older := runner.earlier[:beyond]
+	rendered := renderHistory(older)
+	runner.profile.Recall.Served = len(older)
 	runner.profile.Recall.Bytes = len(rendered)
-	return "EARLIER IN THIS FOLDER:\n" + rendered
+	return "BEFORE THAT, IN THIS FOLDER:\n" + rendered
 }
 
 // describeCall renders a tool call as a short line for the progress log,
@@ -939,22 +970,25 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 	}
 }
 
-func repositoryTools() []functionTool {
-	return []functionTool{
+func repositoryTools(recall bool) []functionTool {
+	tools := []functionTool{
 		{Type: "function", Name: "read_files", Description: "Read one or more repository files after choosing them from the map.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 12}}, "required": []string{"paths"}, "additionalProperties": false,
 		}},
 		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
 		}},
+	}
+	if recall {
 		// reason is required rather than the tool taking no arguments at
 		// all: a strict empty-properties schema is the shape fussy
 		// providers are likeliest to reject, and asking why it is
 		// reaching back makes the trail say so too.
-		{Type: "function", Name: "recall", Description: "Read what was asked in this folder before and what came of it. Use it when the message refers to something you cannot see.", Strict: true, Parameters: map[string]any{
+		tools = append(tools, functionTool{Type: "function", Name: "recall", Description: "Read what was asked in this folder before the turns you were shown. Use it when the message reaches back further than those.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"reason": map[string]any{"type": "string"}}, "required": []string{"reason"}, "additionalProperties": false,
-		}},
+		}})
 	}
+	return tools
 }
 
 func changeSchema() map[string]any {
@@ -998,9 +1032,8 @@ tests when the repository already has them.
 Reading: start from the repository map. Use read_files for the files you need, naming every
 file you want in one call rather than a call per file, and search only when the map is not
 enough. Read a file before changing it; never write a diff against contents you have not
-seen. Use recall when the message leans on something you cannot see — "keep going", "undo
-that", "do the same for the other one" — to read what this folder was asked before and what
-came of it; a message that stands on its own does not need it. Everything you have already
+seen. The last few turns in this folder are already above; recall, when it is offered, reads what
+came before those, for a message that reaches back further than they go. Everything you have already
 read stays in this conversation, so do not read a file a second time or search for text you
 have already been shown; scroll up and use it. Avoid wandering beyond what the task needs.
 

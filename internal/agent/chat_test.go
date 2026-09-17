@@ -40,7 +40,7 @@ func TestToChatConvertsATranscript(t *testing.T) {
 			toolOutput{Type: "function_call_output", CallID: "call_1", Output: "<html>"},
 			inputMessage{Role: "user", Content: "that diff did not apply"},
 		},
-		Tools:      repositoryTools(),
+		Tools:      repositoryTools(true),
 		ToolChoice: "auto",
 		Text:       strictSchema("code_change", changeSchema()),
 	}
@@ -328,7 +328,7 @@ func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 		Model:        "m",
 		Instructions: "be brief",
 		Input:        "hi",
-		Tools:        repositoryTools(),
+		Tools:        repositoryTools(true),
 		Text:         strictSchema("code_change", changeSchema()),
 	}
 	converted, err := toChat(request, true)
@@ -398,7 +398,7 @@ func TestClientRetriesWithoutTheSchemaWhenRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := responseRequest{Input: "hi", Tools: repositoryTools(), Text: strictSchema("code_change", changeSchema())}
+	request := responseRequest{Input: "hi", Tools: repositoryTools(true), Text: strictSchema("code_change", changeSchema())}
 	response, err := client.create(context.Background(), request)
 	if err != nil {
 		t.Fatalf("create() = %v, want the retry to succeed", err)

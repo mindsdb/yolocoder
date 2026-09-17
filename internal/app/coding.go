@@ -24,6 +24,7 @@ var SessionCommands = []terminal.Command{
 	{Name: "/setup", Description: "connect an LLM provider"},
 	{Name: "/model", Description: "choose the model to use"},
 	{Name: "/debug", Description: "show the raw model exchange"},
+	{Name: "/recall", Description: "toggle reading turns older than the last few"},
 	{Name: "/help", Description: "show these commands"},
 	{Name: "/exit", Description: "end the session"},
 }
@@ -75,7 +76,9 @@ func RunTask(ctx context.Context, task string, images []string, provider config.
 	if err != nil {
 		return agent.Outcome{}, err
 	}
-	outcome, runErr := agent.NewRunner(client, repository).Run(ctx, task, images, history, progress)
+	runner := agent.NewRunner(client, repository)
+	runner.UseRecall(provider.Recall)
+	outcome, runErr := runner.Run(ctx, task, images, history, progress)
 	rememberDialect(provider, client)
 	return outcome, runErr
 }

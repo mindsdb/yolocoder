@@ -54,108 +54,149 @@ func recordingServer(t *testing.T, handle func(writer http.ResponseWriter, round
 	return server, &bodies
 }
 
-func TestHistoryIsOfferedRatherThanSent(t *testing.T) {
-	// The turns themselves must not be in the opening message: the whole
-	// point of the recall tool is that a turn pays for history only when
-	// it says it needs it.
+// manyTurns is longer than the inline window, so some of it only exists
+// behind the recall tool.
+var manyTurns = []Recollection{
+	{Number: 1, Message: "make it multilingual", Summary: "Added i18n", Files: []string{"translations.js"}},
+	{Number: 2, Message: "hi", Summary: "Hello!"},
+	{Number: 3, Message: "use a green palette", Summary: "Recoloured to Game Boy green"},
+	{Number: 4, Message: "fit the side cards too", Summary: "Compacted the cards", Files: []string{"base_index.html"}},
+	{Number: 5, Message: "add a room code", Summary: "Added room codes"},
+	{Number: 6, Message: "shrink the header", Summary: "Header is smaller"},
+}
+
+func runOnce(t *testing.T, history []Recollection, recall bool, task string) ([]map[string]any, Outcome) {
+	t.Helper()
 	server, bodies := recordingServer(t, func(writer http.ResponseWriter, round int) {
-		answerOnce(writer, "no need")
+		answerOnce(writer, "ok")
 	})
 	defer server.Close()
-
-	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
-	if _, err := NewRunner(client, &repo.Repository{Root: t.TempDir()}).
-		Run(context.Background(), "hi", nil, pastTurns, &recordingProgress{}); err != nil {
+	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()},
+		&repo.Repository{Root: t.TempDir()})
+	runner.UseRecall(recall)
+	outcome, err := runner.Run(context.Background(), task, nil, history, &recordingProgress{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	opening := firstInput(t, *bodies)
-	if strings.Contains(opening, "make it multilingual") {
-		t.Fatalf("history should not be sent unasked:\n%s", opening)
+	return *bodies, outcome
+}
+
+func TestTheLastFewTurnsRideAlongUnasked(t *testing.T) {
+	// Cheap enough not to be worth a round trip: the recent turns are
+	// what a follow-up like "keep going" actually leans on.
+	bodies, _ := runOnce(t, manyTurns, false, "keep going")
+	opening := firstInput(t, bodies)
+	for _, want := range []string{"fit the side cards too", "add a room code", "shrink the header"} {
+		if !strings.Contains(opening, want) {
+			t.Fatalf("the last turns should ride along; %q is missing:\n%s", want, opening)
+		}
 	}
-	// But it must say the history is there, or the model cannot know
-	// what it is missing and will never reach for it.
-	if !strings.Contains(opening, "3 earlier turns") || !strings.Contains(opening, "recall") {
-		t.Fatalf("the opening should offer the history it is holding back:\n%s", opening)
+	// And only the last few: the rest is what recall exists for.
+	if strings.Contains(opening, "make it multilingual") {
+		t.Fatalf("only the inline window belongs in the opening:\n%s", opening)
 	}
 }
 
-func TestRecallServesEveryTurnUnfiltered(t *testing.T) {
+func TestRecallIsNotOfferedByDefault(t *testing.T) {
+	names := map[string]bool{}
+	for _, tool := range repositoryTools(false) {
+		names[tool.Name] = true
+	}
+	if names["recall"] {
+		t.Fatal("recall should be off unless it was turned on")
+	}
+	if !names["read_files"] || !names["search"] {
+		t.Fatalf("the ordinary tools should still be there: %v", names)
+	}
+	if len(repositoryTools(true)) != len(repositoryTools(false))+1 {
+		t.Fatal("turning recall on should add exactly the one tool")
+	}
+
+	// With it off, nothing should invite the model to reach further back.
+	bodies, _ := runOnce(t, manyTurns, false, "keep going")
+	if opening := firstInput(t, bodies); strings.Contains(opening, "recall") {
+		t.Fatalf("the opening should not mention a tool that is not offered:\n%s", opening)
+	}
+}
+
+func TestRecallOfferIsAnnouncedWhenItIsOn(t *testing.T) {
+	// The model cannot know there is anything behind what it was shown
+	// unless it is told, and the tool would sit unused.
+	bodies, _ := runOnce(t, manyTurns, true, "keep going")
+	opening := firstInput(t, bodies)
+	if !strings.Contains(opening, "3 further turns") || !strings.Contains(opening, "recall") {
+		t.Fatalf("the opening should offer what it is holding back:\n%s", opening)
+	}
+}
+
+func TestRecallServesOnlyWhatIsOlderThanTheInlineTurns(t *testing.T) {
 	runner := NewRunner(&Client{}, &repo.Repository{Root: t.TempDir()})
-	runner.earlier = pastTurns
+	runner.earlier = manyTurns
 
 	served := runner.recallEarlier()
-	for _, want := range []string{"make it multilingual", "hi", "fit the side cards too", "Compacted the cards"} {
+	for _, want := range []string{"make it multilingual", "hi", "use a green palette"} {
 		if !strings.Contains(served, want) {
 			t.Fatalf("recall dropped %q; there is no selection any more:\n%s", want, served)
 		}
 	}
-	if runner.profile.Recall.Served != len(pastTurns) {
-		t.Fatalf("Recall.Served = %d, want %d", runner.profile.Recall.Served, len(pastTurns))
+	// The inline turns are already in the opening; sending them twice
+	// would just be another copy in a transcript that is resent.
+	if strings.Contains(served, "shrink the header") {
+		t.Fatalf("recall resent a turn that was already carried inline:\n%s", served)
 	}
-	if runner.profile.Recall.Bytes != len(renderHistory(pastTurns)) {
-		t.Fatal("Recall.Bytes should size what was actually handed over")
+	if runner.profile.Recall.Served != 3 {
+		t.Fatalf("Recall.Served = %d, want 3", runner.profile.Recall.Served)
 	}
 
-	// A second call costs a sentence, not another copy in a transcript
-	// that is resent on every following round.
 	if again := runner.recallEarlier(); strings.Contains(again, "make it multilingual") {
 		t.Fatalf("recall resent history it had already served:\n%s", again)
 	}
 }
 
-func TestRecallOnAFolderWithNoHistorySaysSo(t *testing.T) {
+func TestRecallWithNothingBehindTheInlineTurnsSaysSo(t *testing.T) {
 	runner := NewRunner(&Client{}, &repo.Repository{Root: t.TempDir()})
-	if got := runner.recallEarlier(); !strings.Contains(got, "Nothing earlier") {
-		t.Fatalf("recall on an empty folder = %q", got)
+	runner.earlier = pastTurns // exactly the inline window, nothing behind it
+	if got := runner.recallEarlier(); !strings.Contains(got, "Nothing came before") {
+		t.Fatalf("recall with nothing older = %q", got)
 	}
 }
 
-func TestRunServesHistoryWhenTheModelAsksForIt(t *testing.T) {
+func TestRunServesOlderTurnsWhenTheModelAsksForThem(t *testing.T) {
 	server, bodies := recordingServer(t, func(writer http.ResponseWriter, round int) {
 		if round == 1 {
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"function_call","name":"recall","call_id":"c1","arguments":"{\"reason\":\"the message says keep going\"}"}]}`)
+			fmt.Fprint(writer, `{"id":"r","output":[{"type":"function_call","name":"recall","call_id":"c1","arguments":"{\"reason\":\"the message reaches back past what is shown\"}"}]}`)
 			return
 		}
 		answerOnce(writer, "picked up where we left off")
 	})
 	defer server.Close()
 
-	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()},
+		&repo.Repository{Root: t.TempDir()})
+	runner.UseRecall(true)
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, &repo.Repository{Root: t.TempDir()}).
-		Run(context.Background(), "keep going", nil, pastTurns, progress)
+	outcome, err := runner.Run(context.Background(), "go back to the original palette", nil, manyTurns, progress)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The turns reach the model as a tool result on the second request.
 	encoded, _ := json.Marshal((*bodies)[1]["input"])
-	if !strings.Contains(string(encoded), "fit the side cards too") {
-		t.Fatalf("the recalled turns never reached the model:\n%s", encoded)
+	if !strings.Contains(string(encoded), "make it multilingual") {
+		t.Fatalf("the older turns never reached the model:\n%s", encoded)
 	}
-	if outcome.Profile.Recall.Available != len(pastTurns) || outcome.Profile.Recall.Served != len(pastTurns) {
-		t.Fatalf("Recall = %+v, want all turns available and served", outcome.Profile.Recall)
+	if outcome.Profile.Recall.Available != 3 || outcome.Profile.Recall.Served != 3 {
+		t.Fatalf("Recall = %+v, want 3 available and 3 served", outcome.Profile.Recall)
 	}
-	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "the message says keep going") {
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "reaches back past") {
 		t.Fatalf("the trail should say why it reached back:\n%s", trail)
 	}
 }
 
 func TestATurnThatNeverRecallsRecordsThatItDidNot(t *testing.T) {
-	// The measurement the design rests on: history was there, and this
-	// turn did not need it. Served staying zero is the answer, not a gap.
-	server, _ := recordingServer(t, func(writer http.ResponseWriter, round int) {
-		answerOnce(writer, "stands on its own")
-	})
-	defer server.Close()
-
-	client := &Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}
-	outcome, err := NewRunner(client, &repo.Repository{Root: t.TempDir()}).
-		Run(context.Background(), "what is 2 + 2", nil, pastTurns, &recordingProgress{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.Profile.Recall.Available != len(pastTurns) {
-		t.Fatalf("Recall.Available = %d, want %d", outcome.Profile.Recall.Available, len(pastTurns))
+	// The measurement: older turns were there to ask for, and this turn
+	// did not need them. Served staying zero is the answer, not a gap.
+	_, outcome := runOnce(t, manyTurns, true, "what is 2 + 2")
+	if outcome.Profile.Recall.Available != 3 {
+		t.Fatalf("Recall.Available = %d, want 3", outcome.Profile.Recall.Available)
 	}
 	if outcome.Profile.Recall.Served != 0 || outcome.Profile.Recall.Spent != 0 {
 		t.Fatalf("Recall = %+v, want nothing served on a turn that never asked", outcome.Profile.Recall)

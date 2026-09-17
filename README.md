@@ -238,18 +238,31 @@ YoloCoder keeps the loop deliberately small:
    costs only the failure evidence rather than the whole context again.
 6. Falls back to writing whole files when no diff will apply at all.
 
-Earlier turns in the folder are held back rather than sent. The opening
-message says how many there are and offers a `recall` tool; a turn that
-leans on something it can't see ("keep going", "undo that") asks for them
-and gets all of them, unfiltered, in the recorded words. Most turns stand
-on their own and never pay for history at all. Picking out the relevant
-turns used to be its own model call, which cost a round trip on every turn
-to narrow a few kilobytes — a worse trade than simply handing them over
-when asked.
+The last three turns in the folder ride along in that opening message.
+They're small — around 1.5 KB on a real folder — and they cover the
+follow-ups that make up most of a session ("make it bigger", "undo that",
+"now the other one"), so fetching them separately would cost a round trip
+to save almost nothing. Choosing which earlier turns were relevant used to
+be its own model call, shown every recorded turn to pick out a few; that
+cost a round trip on the coding model every turn to narrow a few kilobytes.
+
+Anything older than those three is not sent at all. `/recall` in a session
+turns on a `recall` tool that reads them on request, for a message that
+reaches back further than the turns it was shown. It's off by default: an
+unused tool is still a definition on every request, and the recent turns
+answer nearly everything on their own.
 
 The model never receives a shell tool. Local code exposes only bounded
-`read_files`, `search` and `recall` tools during context gathering. Patch
-application and testing are deterministic local operations.
+`read_files` and `search` tools during context gathering, plus `recall`
+when it's switched on. Patch application and testing are deterministic
+local operations.
+
+Some OpenAI-compatible providers pin `tool_choice` to `required` whenever
+tools are offered — YoloCoder only ever sends `auto` — and then fail the
+request outright when the model would rather reply than call a tool, which
+is exactly what a message needing no files does. That failure is caught and
+the request is retried once with no tools, which is what the model was
+trying to do anyway.
 
 Release builds check the rolling `latest` GitHub release whenever the CLI
 starts. If a newer build is available, YoloCoder verifies its SHA-256 checksum,

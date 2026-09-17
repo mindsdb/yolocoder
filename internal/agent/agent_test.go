@@ -899,3 +899,77 @@ func TestRunnerRetriesWhenPromisedFilesAreNotCreated(t *testing.T) {
 		t.Fatalf("the trail should say a promised file was missing:\n%s", trail)
 	}
 }
+
+func TestASummaryWithNoDiffIsRepairedRatherThanFatal(t *testing.T) {
+	// Seen in practice: a long summary describing the change in prose,
+	// with the diff field left empty. That used to end the turn and throw
+	// away everything the conversation had already read.
+	repository := integrationRepository(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("Content-Type", "application/json")
+		var payload []byte
+		if requests == 1 {
+			payload, _ = json.Marshal(Change{Summary: "Restored the green theme across the CSS and the inline colors", FilesToModify: []string{"hello.txt"}})
+		} else {
+			diff := "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n"
+			payload, _ = json.Marshal(Change{Summary: "Update greeting", FilesToModify: []string{"hello.txt"}, Diff: diff})
+		}
+		fmt.Fprintf(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`, strconv.Quote(string(payload)))
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	progress := &recordingProgress{}
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "restore the theme", nil, nil, progress)
+	if err != nil {
+		t.Fatalf("a missing diff should be repaired, not fatal: %v", err)
+	}
+	if !outcome.Applied || outcome.Attempts != 2 {
+		t.Fatalf("outcome = %+v, want the second attempt to have landed", outcome)
+	}
+	content, readErr := os.ReadFile(filepath.Join(repository.Root, "hello.txt"))
+	if readErr != nil || string(content) != "new\n" {
+		t.Fatalf("hello.txt = %q, %v", content, readErr)
+	}
+	trail := strings.Join(progress.logs, "\n")
+	if !strings.Contains(trail, "no diff came back, retrying") {
+		t.Fatalf("the trail should say a diff was missing:\n%s", trail)
+	}
+	if !strings.Contains(trail, "Restored the green theme") {
+		t.Fatalf("the trail should show what it claimed to have done:\n%s", trail)
+	}
+}
+
+func TestAPromisedDiffThatNeverArrivesFallsBackToWholeFiles(t *testing.T) {
+	// Three summaries and no diff: the intent is known and the file is
+	// untouched, which is exactly what the whole-file fallback is for.
+	repository := integrationRepository(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		if schemaName(body) == "file_rewrite" {
+			payload, _ := json.Marshal(Rewrite{Summary: "Rewrote it", Content: "new\n"})
+			fmt.Fprintf(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`, strconv.Quote(string(payload)))
+			return
+		}
+		payload, _ := json.Marshal(Change{Summary: "I changed it, honest", FilesToModify: []string{"hello.txt"}})
+		fmt.Fprintf(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`, strconv.Quote(string(payload)))
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, apiKey: "test", model: "test", http: server.Client()}
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "change it", nil, nil, &recordingProgress{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Rewrote || !outcome.Applied {
+		t.Fatalf("outcome = %+v, want the whole-file fallback to have run", outcome)
+	}
+	content, _ := os.ReadFile(filepath.Join(repository.Root, "hello.txt"))
+	if string(content) != "new\n" {
+		t.Fatalf("hello.txt = %q", content)
+	}
+}

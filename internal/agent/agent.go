@@ -362,7 +362,19 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 		change, err = session.produce(ctx, progress)
 		if err != nil {
-			return Outcome{Profile: runner.profile}, err
+			if !errors.Is(err, errNoDiff) {
+				return Outcome{Profile: runner.profile}, err
+			}
+			progress.Log("  no diff came back, retrying")
+			logSummary(progress, "  it said", change.Summary)
+			evidence = fmt.Sprintf(
+				"You returned a summary but the diff field was empty, so nothing changed. "+
+					"The summary said:\n\n%s\n\nProduce the diff that makes exactly that change now, "+
+					"in the diff field. Keep the summary to a single short line: it is written before "+
+					"the diff, and a long one leaves less room for the diff that actually matters.",
+				strings.TrimSpace(change.Summary))
+			session.report(evidence)
+			continue
 		}
 		if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) != "" {
 			// The task turned out to be a question, not a change: nothing
@@ -446,7 +458,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	// Every diff was rejected. A diff only applies when its context and
 	// removed lines match the file exactly, which a model-written one
 	// often gets subtly wrong, so fall back to writing whole files.
-	if strings.HasPrefix(evidence, "The patch did not apply") {
+	if strings.HasPrefix(evidence, "The patch did not apply") || strings.HasPrefix(evidence, "You returned a summary but the diff field was empty") {
 		targets := rewriteTargets(change.FilesToModify, session.readPaths, mapped)
 		if len(targets) == 0 {
 			return Outcome{Profile: runner.profile}, fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
@@ -624,7 +636,13 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 			}
 			salvageChange(&change, text)
 			if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) == "" {
-				return change, fmt.Errorf("the model returned no diff; it replied: %s", snippet(text))
+				// Repairable, not fatal: the model described a change
+				// and then did not produce one, which is a slip it can
+				// answer for — and it has already read the files, so
+				// making it try again costs the evidence and nothing
+				// else. Failing the turn here threw away everything the
+				// conversation had gathered over a missing field.
+				return change, fmt.Errorf("%w; it replied: %s", errNoDiff, snippet(text))
 			}
 			return change, nil
 		}
@@ -656,6 +674,10 @@ func (session *changeSession) produce(ctx context.Context, progress Progress) (C
 	}
 	return Change{}, fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
 }
+
+// errNoDiff marks a reply that promised a change and carried neither a
+// diff nor an answer. Run recognizes it and repairs rather than giving up.
+var errNoDiff = errors.New("the model returned no diff")
 
 // rewrite asks for one file's complete new contents, used when no diff
 // would apply.
@@ -1066,7 +1088,10 @@ description that an answer exists — leaving summary, files_to_modify and diff 
 
 A change: read what you need, then return a one-line summary, the files it modifies, and the
 diff that makes it, leaving answer empty. Make the smallest complete change, and include
-tests when the repository already has them.
+tests when the repository already has them. The summary is one short line and nothing more —
+it is written before the diff, so a long one spends the room the diff needs; describe the
+change in the diff, not in prose about it. A summary with an empty diff changes nothing at
+all, and is the one reply that is always wrong.
 
 Reading: start from the repository map. Use read_files for the files you need, naming every
 file you want in one call rather than a call per file, and search only when the map is not

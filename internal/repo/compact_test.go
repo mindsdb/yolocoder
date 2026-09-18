@@ -319,52 +319,84 @@ func TestContextStillHoldsAHunkTogether(t *testing.T) {
 	}
 }
 
-func TestScatteredAnchorsAreNamedAsSuch(t *testing.T) {
-	// Verbatim shape from a real run: three anchors gathered from all over
-	// the file into one hunk. Every line is really there; none of them are
-	// adjacent. The old report said the first line differed from itself,
-	// and the model spent its whole edit budget hunting for a difference
-	// that did not exist.
+// Separate edits bunched into one hunk used to cost the whole turn: the
+// patch was rejected, the model regenerated it, and on a real run it
+// never recovered. Each part places on its own, so the split happens here
+// rather than in a round trip.
+func TestBunchedEditsAreSplitAndPlaced(t *testing.T) {
 	repository := project(t, map[string]string{
-		"App.tsx": `type Language = "en" | "ru" | "pt";
-filler one
-filler two
-const translations = {
-filler three
+		"App.tsx": `type Language = "en" | "ru";
+import x from "y";
+
+function load() {
   return saved === "ru" ? saved : "en";
+}
+
+const translations = {
+  pt: { createRoom: "Criar sala" },
+};
 `,
 	})
 	err := repository.Apply("@App.tsx\n" +
-		"-type Language = \"en\" | \"ru\" | \"pt\";\n" +
-		"+type Language = \"en\" | \"ru\" | \"pt\" | \"pl\";\n" +
-		" const translations = {\n" +
-		"   return saved === \"ru\" ? saved : \"en\";\n")
-	if err == nil {
-		t.Fatal("a hunk of scattered anchors cannot be placed")
+		"-type Language = \"en\" | \"ru\";\n" +
+		"+type Language = \"en\" | \"ru\" | \"pl\";\n" +
+		"-  return saved === \"ru\" ? saved : \"en\";\n" +
+		"+  return saved === \"ru\" || saved === \"pl\" ? saved : \"en\";\n" +
+		"   pt: { createRoom: \"Criar sala\" },\n" +
+		"+  pl: { createRoom: \"Utwórz pokój\" },\n")
+	if err != nil {
+		t.Fatalf("three bunched edits should have been split and placed: %v", err)
 	}
-	lines := strings.Join(Explain(err), "\n")
-	if !strings.Contains(lines, "not next to each other") {
-		t.Fatalf("the report should name the real problem:\n%s", lines)
+	got := read(t, repository, "App.tsx")
+	for _, want := range []string{
+		`type Language = "en" | "ru" | "pl";`,
+		`saved === "ru" || saved === "pl" ? saved : "en";`,
+		`pl: { createRoom: "Utwórz pokój" },`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
 	}
-	// And the full text tells the model where each line really is, and
-	// what to do about it.
-	detail := err.Error()
-	for _, want := range []string{"line 1:", "line 4:", "line 6:", "separate hunks"} {
-		if !strings.Contains(detail, want) {
-			t.Fatalf("detail missing %q:\n%s", want, detail)
+	// And the lines between them are exactly where they were.
+	for _, untouched := range []string{`import x from "y";`, `pt: { createRoom: "Criar sala" },`} {
+		if !strings.Contains(got, untouched) {
+			t.Fatalf("an untouched line was disturbed:\n%s", got)
 		}
 	}
 }
 
-func TestANearMissNeverReportsALineAsDifferingFromItself(t *testing.T) {
-	repository := project(t, map[string]string{"a.ts": "const kept = 1;\nfiller\nconst other = 2;\n"})
-	err := repository.Apply("@a.ts\n-const kept = 1;\n-const other = 2;\n+merged;\n")
+// A hunk is only split where every anchor occurs exactly once. A line
+// that appears twice gives no honest answer about which edit belongs
+// where, so it is reported instead of guessed at.
+func TestAnAmbiguousAnchorIsReportedRatherThanSplit(t *testing.T) {
+	repository := project(t, map[string]string{
+		"a.ts": "call();\nfiller\ncall();\nmore\nother();\n",
+	})
+	err := repository.Apply("@a.ts\n call();\n-other();\n+changed();\n")
 	if err == nil {
-		t.Fatal("those two lines are not adjacent")
+		t.Fatal("that hunk's anchor appears twice and is not adjacent to the rest")
+	}
+	if joined := strings.Join(Explain(err), "\n"); !strings.Contains(joined, "a.ts:") {
+		t.Fatalf("Explain() = %q", joined)
+	}
+}
+
+// A line cannot differ from itself. When a block fails for a structural
+// reason rather than a textual one, the report has to say something other
+// than "expected X, in file X".
+func TestANearMissNeverReportsALineAsDifferingFromItself(t *testing.T) {
+	repository := project(t, map[string]string{
+		"a.ts": "const kept = 1;\nfiller\nconst kept = 1;\nmore\nconst other = 2;\n",
+	})
+	// "const kept = 1;" appears twice, so the hunk cannot be split and
+	// falls through to the reporting path.
+	err := repository.Apply("@a.ts\n const kept = 1;\n-const other = 2;\n+merged;\n")
+	if err == nil {
+		t.Fatal("expected a failure")
 	}
 	for _, line := range Explain(err) {
-		if strings.HasPrefix(line, "expected: ") {
-			t.Fatalf("a line cannot differ from itself; the report should say what is really wrong:\n%v", Explain(err))
+		if strings.HasPrefix(line, "expected: ") && strings.Contains(line, "const kept") {
+			t.Fatalf("a line cannot differ from itself:\n%v", Explain(err))
 		}
 	}
 }

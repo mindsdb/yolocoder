@@ -166,6 +166,30 @@ func clipLine(line string) string {
 type hunk struct {
 	before []string // context and removed lines, in order
 	after  []string // context and added lines, in order
+	// ops is the same content with its shape kept: which lines were
+	// context, which removed, which added. before and after are what
+	// placing a hunk needs; ops is what splitting one needs, and a hunk
+	// that has to be split is one a model wrote as a single edit when it
+	// meant several.
+	ops []patchOp
+}
+
+// patchOp is one line of a hunk and what it was doing there.
+type patchOp struct {
+	kind byte // ' ' context, '-' removed, '+' added
+	text string
+}
+
+// add records a line in both representations at once, so they cannot
+// drift apart.
+func (current *hunk) add(kind byte, text string) {
+	current.ops = append(current.ops, patchOp{kind: kind, text: text})
+	if kind != '+' {
+		current.before = append(current.before, text)
+	}
+	if kind != '-' {
+		current.after = append(current.after, text)
+	}
 }
 
 type filePatch struct {
@@ -257,18 +281,16 @@ func parsePatch(patch string) ([]filePatch, error) {
 		case active == nil:
 			// Preamble, index lines, or trailing noise.
 		case strings.HasPrefix(line, "-"):
-			active.before = append(active.before, line[1:])
+			active.add('-', line[1:])
 		case strings.HasPrefix(line, "+"):
-			active.after = append(active.after, line[1:])
+			active.add('+', line[1:])
 		case strings.HasPrefix(line, " "):
-			active.before = append(active.before, line[1:])
-			active.after = append(active.after, line[1:])
+			active.add(' ', line[1:])
 		case line == "":
 			// An empty line inside a hunk is an empty context line, but a
 			// trailing blank at the end of the patch is not. Treat it as
 			// context only while the hunk is still collecting.
-			active.before = append(active.before, "")
-			active.after = append(active.after, "")
+			active.add(' ', "")
 		case strings.HasPrefix(line, `\`):
 			// "\ No newline at end of file"
 		default:
@@ -427,6 +449,19 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		}
 		index, err := locate(lines, current.before)
 		if err != nil {
+			// The hunk may be several edits written as one — anchors
+			// gathered from all over the file, which is what a model
+			// produces when it puts everything in a single patch. That
+			// is mechanically recoverable: each part places on its own,
+			// and doing it here costs nothing where sending it back
+			// costs a round trip and a whole patch regenerated.
+			if parts := splitByAnchor(lines, current); parts != nil {
+				placed, partFailures := applyHunks(strings.Join(lines, "\n"), parts)
+				if len(partFailures) == 0 {
+					lines = strings.Split(placed, "\n")
+					continue
+				}
+			}
 			failures = append(failures, err)
 			continue
 		}
@@ -437,6 +472,62 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		lines = replaced
 	}
 	return strings.Join(lines, "\n"), failures
+}
+
+// splitByAnchor breaks a hunk into the separate edits it was probably
+// meant to be, or nil if it is not that kind of hunk.
+//
+// The test is positional: every context and removed line is looked up in
+// the file, and wherever two consecutive ones are not adjacent there, the
+// hunk is cut. Added lines stay with the anchor above them, which is
+// where the model put them. A hunk that is genuinely one edit has
+// adjacent anchors throughout and comes back nil, so nothing is split
+// that did not need splitting.
+//
+// Each anchor has to occur exactly once for this to be safe: a line that
+// appears twice gives no honest answer about where its edit belongs, and
+// guessing would put a change somewhere nobody asked for.
+func splitByAnchor(lines []string, current hunk) []hunk {
+	if len(current.ops) == 0 {
+		return nil
+	}
+	at := func(text string) int {
+		found := -1
+		for index, line := range lines {
+			if line == text || strings.TrimSpace(line) == strings.TrimSpace(text) {
+				if found != -1 {
+					return -1 // ambiguous
+				}
+				found = index
+			}
+		}
+		return found
+	}
+
+	var parts []hunk
+	var part hunk
+	previous := -1
+	for _, op := range current.ops {
+		if op.kind == '+' {
+			part.add(op.kind, op.text)
+			continue
+		}
+		position := at(op.text)
+		if position == -1 {
+			return nil
+		}
+		if previous != -1 && position != previous+1 {
+			parts = append(parts, part)
+			part = hunk{}
+		}
+		part.add(op.kind, op.text)
+		previous = position
+	}
+	parts = append(parts, part)
+	if len(parts) < 2 {
+		return nil
+	}
+	return parts
 }
 
 // locate finds the one place block occurs in lines. A short block that

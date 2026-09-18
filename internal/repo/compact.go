@@ -235,20 +235,18 @@ func parseCompact(patch string) ([]filePatch, error) {
 		}
 		switch line[0] {
 		case ' ':
-			active.before = append(active.before, line[1:])
-			active.after = append(active.after, line[1:])
+			active.add(' ', line[1:])
 		case '-':
-			active.before = append(active.before, line[1:])
+			active.add('-', line[1:])
 		case '+':
-			active.after = append(active.after, line[1:])
+			active.add('+', line[1:])
 		default:
 			// An unprefixed line is a context line that lost its leading
 			// space. Taking it as context is the reading that can still
 			// succeed: the whitespace-insensitive pass in locate matches
 			// it either way, where refusing the patch outright costs a
 			// whole round trip over one missing character.
-			active.before = append(active.before, line)
-			active.after = append(active.after, line)
+			active.add(' ', line)
 		}
 	}
 	if current != nil {

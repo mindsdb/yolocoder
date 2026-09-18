@@ -72,6 +72,9 @@ type toolArguments struct {
 	Query  string   `json:"query"`
 	Reason string   `json:"reason"`
 	Patch  string   `json:"patch"`
+	// Comment is what the model would have said at the end of the turn,
+	// written with its last edit instead of in a round trip of its own.
+	Comment string `json:"response_comment_for_user"`
 }
 
 // inputMessage is one message sent to the model. Images (data URLs pasted
@@ -406,6 +409,35 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			session.transcript = append(session.transcript, call)
 			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}
+
+		// An edit that landed and carried a closing note is the model
+		// saying it is finished, in the same breath as its last change.
+		// Believing it saves the round trip that existed only to hear
+		// "done" — the whole transcript resent to generate forty words,
+		// two seconds for a sentence it could have written already.
+		//
+		// The check still runs, and still has the final say: if it fails
+		// the note is dropped and the conversation continues, because a
+		// model cannot declare victory over a build it just broke by
+		// declaring it slightly earlier.
+		if session.closing != "" {
+			result, testSpent := runner.runTests(ctx)
+			switch {
+			case result.Skipped:
+				progress.Log("  no check command detected")
+			case !result.Passed:
+				progress.Log("  check failed, back to it · " + formatDuration(testSpent))
+				for _, line := range firstFailures(result.Output) {
+					progress.Log("    " + line)
+				}
+				session.closing = ""
+				session.report("The edits applied, but the project's check failed. Fix it.\n" + result.Output)
+				continue
+			default:
+				progress.Log("  check passed · " + formatDuration(testSpent))
+			}
+			return session.outcome(session.closing), nil
+		}
 	}
 	return Outcome{}, fmt.Errorf("%w after %d rounds", errOutOfRounds, maxRounds)
 }
@@ -497,6 +529,9 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 	for _, path := range changed {
 		session.applied = appendUnique(session.applied, path)
 	}
+	// Recorded only now, after the edit actually landed: a note left on a
+	// patch that could not be placed would end the turn on a promise.
+	session.closing = strings.TrimSpace(arguments.Comment)
 	// Said plainly, because the alternative is what happened on the first
 	// real run: the model applied an edit, was told only "Applied", and
 	// spent three further round trips reading the files back to see
@@ -657,6 +692,10 @@ type changeSession struct {
 	applied     []string
 	attempted   []string
 	lastFailure error
+	// closing is the note the model left with an edit it called its last.
+	// Set only by an edit that actually applied, so a failed one cannot
+	// end the turn on a promise.
+	closing string
 	// used counts calls per tool, against toolQuota.
 	used map[string]int
 }
@@ -1032,8 +1071,16 @@ func repositoryTools(recall bool) []functionTool {
 		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
 		}},
-		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed.", Strict: true, Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"patch": map[string]any{"type": "string"}}, "required": []string{"patch"}, "additionalProperties": false,
+		// patch is named first, and required first, so a long comment
+		// cannot spend the output room the patch needs — which is the
+		// failure a summary field written ahead of a diff used to cause.
+		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. On your last edit, put your closing note to the user in response_comment_for_user and the turn ends there; leave it empty while you still have work to do.", Strict: true, Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"patch":                     map[string]any{"type": "string"},
+				"response_comment_for_user": map[string]any{"type": "string"},
+			},
+			"required": []string{"patch", "response_comment_for_user"}, "additionalProperties": false,
 		}},
 	}
 	if recall {
@@ -1082,6 +1129,10 @@ search — for when the map is not enough to find something.
 apply_diff — make the edit. Read a file before changing it; never write an edit against
   contents you have not seen. When it says the patch applied, it applied: every edit was
   placed and the file contains it. Do not read the file back to check.
+  response_comment_for_user — leave it empty while you still have work to do. On your last
+  edit, write there what you would have said at the end: what you changed, and anything the
+  user should know. If that edit applies and the project's check passes, your note is the
+  reply and the turn is over. It saves you a whole round trip spent saying "done".
 recall, when it is offered — the turns before the few already above, for a message that
   reaches back further than they go.
 

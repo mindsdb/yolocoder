@@ -21,9 +21,17 @@ func calls(name, id, arguments string) string {
 		strconv.Quote(name), strconv.Quote(id), strconv.Quote(arguments))
 }
 
-// edits is a model reply that calls apply_diff with a compact patch.
+// edits is a model reply that calls apply_diff with a compact patch and
+// no closing note, so the turn carries on.
 func edits(id, patch string) string {
-	arguments, _ := json.Marshal(map[string]string{"patch": patch})
+	arguments, _ := json.Marshal(map[string]string{"patch": patch, "response_comment_for_user": ""})
+	return calls("apply_diff", id, string(arguments))
+}
+
+// editsAndFinishes is the same call carrying the model's closing note,
+// which ends the turn if the edit lands and the check passes.
+func editsAndFinishes(id, patch, comment string) string {
+	arguments, _ := json.Marshal(map[string]string{"patch": patch, "response_comment_for_user": comment})
 	return calls("apply_diff", id, string(arguments))
 }
 
@@ -413,5 +421,112 @@ func TestASuccessfulEditSaysNotToReadItBack(t *testing.T) {
 	}
 	if !strings.Contains(result, "a.ts") {
 		t.Fatalf("it should still say what changed:\n%s", result)
+	}
+}
+
+func TestAnEditCarryingItsOwnClosingNoteEndsTheTurn(t *testing.T) {
+	// The round trip this removes existed only to hear "done": the whole
+	// transcript resent to generate forty words.
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	server, seen := scripted(t,
+		editsAndFinishes("c1", "@a.ts\n-const x = 1;\n+const x = 2;\n", "Bumped `x` to 42."),
+	)
+	defer server.Close()
+
+	outcome, _, err := run(t, repository, server, "bump x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("requests = %d, want the edit to have been the whole turn", len(*seen))
+	}
+	if outcome.Reply != "Bumped `x` to 42." {
+		t.Fatalf("reply = %q, want the note written with the edit", outcome.Reply)
+	}
+	if !outcome.Applied || !outcome.Coding {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	content, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
+	if string(content) != "const x = 2;\n" {
+		t.Fatalf("a.ts = %q", content)
+	}
+}
+
+func TestAnEmptyNoteLetsTheTurnCarryOn(t *testing.T) {
+	// Only a filled-in note means "finished". An edit with none is just
+	// an edit, and the model goes on working.
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n", "b.ts": "const y = 2;\n"})
+	server, seen := scripted(t,
+		edits("c1", "@a.ts\n-const x = 1;\n+const x = 9;\n"),
+		editsAndFinishes("c2", "@b.ts\n-const y = 2;\n+const y = 8;\n", "Changed both."),
+	)
+	defer server.Close()
+
+	outcome, _, err := run(t, repository, server, "change both")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("requests = %d, want the first edit not to have ended the turn", len(*seen))
+	}
+	if outcome.Reply != "Changed both." {
+		t.Fatalf("reply = %q", outcome.Reply)
+	}
+	if len(outcome.Files) != 2 {
+		t.Fatalf("Files = %v, want both", outcome.Files)
+	}
+}
+
+func TestAFailedEditsNoteDoesNotEndTheTurn(t *testing.T) {
+	// A note on a patch that could not be placed would end the turn on a
+	// promise. It is recorded only once the edit has actually landed.
+	repository := folder(t, map[string]string{"a.ts": "const real = 1;\n"})
+	server, seen := scripted(t,
+		editsAndFinishes("c1", "@a.ts\n-const imaginary = 1;\n+const imaginary = 2;\n", "All done!"),
+		finishes("Actually, I could not place that edit."),
+	)
+	defer server.Close()
+
+	outcome, _, err := run(t, repository, server, "change it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("requests = %d, want the failed edit not to have ended the turn", len(*seen))
+	}
+	if outcome.Reply == "All done!" {
+		t.Fatal("a note on a failed edit must not become the reply")
+	}
+	if outcome.Applied {
+		t.Fatalf("outcome = %+v, want nothing applied", outcome)
+	}
+}
+
+func TestAClosingNoteStillWaitsForTheCheck(t *testing.T) {
+	// Declaring victory slightly earlier is still declaring victory: the
+	// check has the final say either way.
+	repository := folder(t, map[string]string{
+		"go.mod":       "module demo\n\ngo 1.24\n",
+		"demo.go":      "package demo\n\nfunc Add(a, b int) int { return a - b }\n",
+		"demo_test.go": "package demo\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n",
+	})
+	server, seen := scripted(t,
+		editsAndFinishes("c1", "@demo.go\n-func Add(a, b int) int { return a - b }\n+func Add(a, b int) int { return a * b }\n", "Fixed it!"),
+		editsAndFinishes("c2", "@demo.go\n-func Add(a, b int) int { return a * b }\n+func Add(a, b int) int { return a + b }\n", "Fixed it properly."),
+	)
+	defer server.Close()
+
+	outcome, progress, err := run(t, repository, server, "fix Add")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Reply != "Fixed it properly." {
+		t.Fatalf("reply = %q, want the note from the edit that actually passed", outcome.Reply)
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("requests = %d, want the first note refused by the check", len(*seen))
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "check failed, back to it") {
+		t.Fatalf("the trail should show the refusal:\n%s", trail)
 	}
 }

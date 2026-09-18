@@ -234,7 +234,13 @@ YoloCoder keeps the loop deliberately small:
    conversation rather than starting a fresh attempt.
 4. Runs the repository's detected check command when the model tries to
    finish, and sends it back to work if that fails. It cannot declare
-   victory over a build it just broke.
+   victory over a build it just broke. An edit can carry the model's
+   closing note to the user with it (`response_comment_for_user`), and
+   when that edit lands and the check passes, the note is the reply and
+   the turn ends there — removing a round trip that existed only to hear
+   "done", which meant resending the whole transcript to generate forty
+   words. The check still has the final say: if it fails the note is
+   dropped and the conversation carries on.
 5. Falls back to writing whole files when it runs out of edits or rounds
    without landing anything.
 

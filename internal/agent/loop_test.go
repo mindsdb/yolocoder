@@ -41,6 +41,15 @@ func reads(id string, paths ...string) string {
 	return calls("read_files", id, string(arguments))
 }
 
+// saysAndCalls is a reply carrying the model's own words alongside a
+// tool call, which is what a provider actually returns most rounds.
+func saysAndCalls(aside, name, id, arguments string) string {
+	return fmt.Sprintf(`{"id":"r","output":[`+
+		`{"type":"message","content":[{"type":"output_text","text":%s}]},`+
+		`{"type":"function_call","name":%s,"call_id":%s,"arguments":%s}]}`,
+		strconv.Quote(aside), strconv.Quote(name), strconv.Quote(id), strconv.Quote(arguments))
+}
+
 // finishes is a model reply with no tool call, which ends the turn.
 func finishes(text string) string {
 	return fmt.Sprintf(`{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`,
@@ -528,5 +537,92 @@ func TestAClosingNoteStillWaitsForTheCheck(t *testing.T) {
 	}
 	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "check failed, back to it") {
 		t.Fatalf("the trail should show the refusal:\n%s", trail)
+	}
+}
+
+func TestWhatTheModelSaysBesideAToolCallIsKept(t *testing.T) {
+	// It was being dropped twice: never shown, and never put back into the
+	// conversation, so on round three the model could not see the plan it
+	// had written on round one.
+	plan := "Adding Polish needs four changes: the Language type, a pl entry, the saved-preference check, and the option."
+	readArgs, _ := json.Marshal(map[string][]string{"paths": {"a.ts"}})
+	server, seen := scripted(t,
+		saysAndCalls(plan, "read_files", "c1", string(readArgs)),
+		finishes("Done."),
+	)
+	defer server.Close()
+
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	_, progress, err := run(t, repository, server, "add polish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It reaches the person watching.
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "Adding Polish needs four changes") {
+		t.Fatalf("the model's own words should show on the trail:\n%s", trail)
+	}
+	// And it reaches the model again on the next round.
+	encoded, _ := json.Marshal((*seen)[1]["input"])
+	var decoded []any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	conversation := fmt.Sprint(decoded...)
+	if !strings.Contains(conversation, "Adding Polish needs four changes") {
+		t.Fatalf("the plan should still be in the conversation:\n%s", conversation)
+	}
+	if !strings.Contains(conversation, "assistant") {
+		t.Fatalf("and carried as the model's own turn:\n%s", conversation)
+	}
+}
+
+func TestAnEmptyAsideIsNotCarried(t *testing.T) {
+	// Most rounds the message is just "\n\n". Carrying that would put an
+	// empty assistant turn in the conversation every single round.
+	readArgs, _ := json.Marshal(map[string][]string{"paths": {"a.ts"}})
+	server, seen := scripted(t,
+		saysAndCalls("\n\n", "read_files", "c1", string(readArgs)),
+		finishes("Done."),
+	)
+	defer server.Close()
+
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	if _, _, err := run(t, repository, server, "read it"); err != nil {
+		t.Fatal(err)
+	}
+	parts, _ := (*seen)[1]["input"].([]any)
+	for _, part := range parts {
+		message, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		if message["role"] == "assistant" && strings.TrimSpace(fmt.Sprint(message["content"])) == "" {
+			t.Fatalf("an empty aside was carried: %#v", message)
+		}
+	}
+}
+
+func TestALongAsideIsCappedBeforeItIsCarried(t *testing.T) {
+	long := strings.Repeat("thinking out loud at some length. ", 80)
+	readArgs, _ := json.Marshal(map[string][]string{"paths": {"a.ts"}})
+	server, seen := scripted(t,
+		saysAndCalls(long, "read_files", "c1", string(readArgs)),
+		finishes("Done."),
+	)
+	defer server.Close()
+
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	_, progress, err := run(t, repository, server, "read it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal((*seen)[1]["input"])
+	if len(encoded) > len(long) {
+		t.Fatalf("the whole ramble was carried: %d bytes of input", len(encoded))
+	}
+	for _, line := range progress.logs {
+		if len(line) > 140 {
+			t.Fatalf("a trail line ran to %d characters", len(line))
+		}
 	}
 }

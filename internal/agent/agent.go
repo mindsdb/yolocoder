@@ -385,6 +385,19 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			return session.outcome(reply), nil
 		}
 
+		// A reply can carry the model's own words alongside its tool calls
+		// — a plan, a correction, a note on what it just found. Those were
+		// being dropped twice over: never shown, and never put back into
+		// the conversation, so the model could not see on round three the
+		// four-step plan it had written on round one.
+		if aside := strings.TrimSpace(asideOf(response)); aside != "" {
+			for _, line := range asideLines(aside) {
+				progress.Log("    " + line)
+			}
+			session.transcript = append(session.transcript,
+				inputMessage{Role: "assistant", Content: clip(aside, maxAside)})
+		}
+
 		for _, call := range calls {
 			// Described before the tool runs, not after: describeCall
 			// reports which paths were already shown by consulting the
@@ -631,6 +644,41 @@ func appendUnique(list []string, value string) []string {
 		}
 	}
 	return append(list, value)
+}
+
+// maxAside bounds what is carried forward. Measured over a real turn the
+// asides came to about 176 tokens in total against transcripts of eleven
+// thousand — under two per cent, and in the cached prefix at that. The
+// cap is insurance against a model that decides to think out loud at
+// length every round, not a budget anyone is expected to reach.
+const maxAside = 800
+
+// asideOf is whatever the model said beside its tool calls, or empty.
+// text() reports an error when a reply carried no message at all, which
+// is the ordinary case here rather than a fault.
+func asideOf(response responseEnvelope) string {
+	text, err := response.text()
+	if err != nil {
+		return ""
+	}
+	return text
+}
+
+// asideLines are the first couple of lines of an aside, for the trail.
+// The model gets all of it; a person watching wants the gist without a
+// paragraph landing in the middle of the progress log.
+func asideLines(aside string) []string {
+	var lines []string
+	for _, line := range strings.Split(aside, "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		lines = append(lines, clip(line, 110))
+		if len(lines) == 2 {
+			break
+		}
+	}
+	return lines
 }
 
 // firstFailures are the few lines of check output most likely to say

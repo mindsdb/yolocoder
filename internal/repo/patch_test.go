@@ -546,3 +546,115 @@ func TestExplainClipsALongLine(t *testing.T) {
 		}
 	}
 }
+
+// threeFiles writes a small project whose files each contain a line a
+// patch can miss in a different way.
+func threeFiles(t *testing.T) *Repository {
+	t.Helper()
+	root := t.TempDir()
+	for name, body := range map[string]string{
+		"app.tsx":  "const a = 1;\nconst board = useState(empty());\nconst c = 3;\n",
+		"main.css": ":root {\n  --bg: #b7c98a;\n}\n",
+		"dup.ts":   "call();\nother();\ncall();\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &Repository{Root: root}
+}
+
+func TestOnePassReportsEveryEditThatCannotBePlaced(t *testing.T) {
+	repository := threeFiles(t)
+	// Three separate problems in one patch: a wrong line in app.tsx, a
+	// wrong value in main.css, and an ambiguous one-line hunk in dup.ts.
+	patch := "--- a/app.tsx\n+++ b/app.tsx\n@@\n const a = 1;\n-const board = useState(() => empty());\n+const board = useState(fresh());\n const c = 3;\n" +
+		"--- a/main.css\n+++ b/main.css\n@@\n-  --bg: #001933;\n+  --bg: #123456;\n" +
+		"--- a/dup.ts\n+++ b/dup.ts\n@@\n-call();\n+called();\n"
+
+	err := repository.Apply(patch)
+	if err == nil {
+		t.Fatal("a patch with three unplaceable edits should not apply")
+	}
+	var whole *PatchError
+	if !errors.As(err, &whole) {
+		t.Fatalf("error should carry every failure, got %T: %v", err, err)
+	}
+	if len(whole.Failures) != 3 {
+		t.Fatalf("reported %d failures, want all 3 in one pass:\n%v", len(whole.Failures), Explain(err))
+	}
+
+	// Each one names its own file, so a repair can fix all three at once.
+	named := map[string]bool{}
+	for _, failure := range whole.Failures {
+		named[failure.Path] = true
+	}
+	for _, want := range []string{"app.tsx", "main.css", "dup.ts"} {
+		if !named[want] {
+			t.Errorf("no failure reported for %s", want)
+		}
+	}
+
+	// The model's text must list all of them and say to fix all of them.
+	text := err.Error()
+	if !strings.Contains(text, "Fix every one of them") {
+		t.Errorf("the model is not told to fix them all:\n%s", text)
+	}
+	for _, want := range []string{"[1]", "[2]", "[3]"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("failure %s missing from the text given to the model", want)
+		}
+	}
+
+	// And the trail leads with the count.
+	if lines := Explain(err); lines[0] != "3 edits could not be placed" {
+		t.Fatalf("Explain() led with %q", lines[0])
+	}
+}
+
+func TestNothingIsWrittenWhenAnyEditFails(t *testing.T) {
+	repository := threeFiles(t)
+	// The first edit is perfectly good; the second is not. Neither lands.
+	patch := "--- a/app.tsx\n+++ b/app.tsx\n@@\n const a = 1;\n-const board = useState(empty());\n+const board = useState(fresh());\n const c = 3;\n" +
+		"--- a/main.css\n+++ b/main.css\n@@\n-  --bg: #001933;\n+  --bg: #123456;\n"
+
+	if err := repository.Apply(patch); err == nil {
+		t.Fatal("the patch should be refused")
+	}
+	content, err := os.ReadFile(filepath.Join(repository.Root, "app.tsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "fresh()") {
+		t.Fatalf("the placeable edit was written even though the patch failed:\n%s", content)
+	}
+}
+
+func TestASingleFailureStillReadsAsOne(t *testing.T) {
+	repository := threeFiles(t)
+	err := repository.Apply("--- a/main.css\n+++ b/main.css\n@@\n-  --bg: #001933;\n+  --bg: #123456;\n")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	lines := Explain(err)
+	if strings.HasSuffix(lines[0], "edits could not be placed") {
+		t.Fatalf("one failure should not be counted like a list: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[0], "main.css: ") {
+		t.Fatalf("Explain() = %q", lines[0])
+	}
+}
+
+func TestTheTrailDoesNotPrintEveryFailureForever(t *testing.T) {
+	var many PatchError
+	for index := 0; index < 9; index++ {
+		many.Failures = append(many.Failures, &HunkError{Path: "a.ts", Reason: "could not find this hunk's lines in the file"})
+	}
+	lines := many.Summary()
+	if lines[0] != "9 edits could not be placed" {
+		t.Fatalf("led with %q", lines[0])
+	}
+	if last := lines[len(lines)-1]; last != "... and 5 more" {
+		t.Fatalf("trail should stop and say how many remain, got %q", last)
+	}
+}

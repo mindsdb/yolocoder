@@ -410,11 +410,13 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 			// Without seeing its own output the model has no way to tell
 			// what was wrong with it and tends to reproduce it verbatim.
 			evidence = fmt.Sprintf(
-				"The patch did not apply. Git looks for the context and removed lines exactly as written, "+
-					"so any difference from the real file (an HTML entity spelled out, a changed attribute, "+
-					"reflowed whitespace) makes the whole hunk fail. Compare git's \"while searching for\" text "+
-					"below against the file contents you already read and copy those lines character for character.\n\n"+
-					"GIT REPORTED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
+				"The patch did not apply, and nothing was changed. A hunk is placed by matching its "+
+					"context and removed lines against the real file, so any difference from it (an HTML "+
+					"entity spelled out, a changed attribute, reflowed whitespace) makes that hunk fail. "+
+					"Every edit that could not be placed is listed below, with the closest line found for "+
+					"each: fix all of them in the next diff, not just the first. Copy those lines character "+
+					"for character from the file contents you already read.\n\n"+
+					"WHAT FAILED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
 				applyErr.Error(), change.Diff)
 			session.report(evidence)
 			continue

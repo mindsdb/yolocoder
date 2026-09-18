@@ -46,11 +46,63 @@ func (failure *HunkError) Summary() []string {
 	return lines
 }
 
+// PatchError is every edit in one patch that could not be placed, rather
+// than the first one found.
+//
+// Validating the whole patch before giving up is what makes a repair cost
+// one round trip instead of several: a patch with three bad hunks used to
+// report one, get a fix for it, and only then reveal the next — three
+// model calls to learn what one pass already knew. The trade is that
+// hunks apply in sequence, so a hunk that only fails because an earlier
+// one did not land is reported approximately; three approximate reports
+// still beat one exact one when each costs a round trip.
+type PatchError struct {
+	Failures []*HunkError
+}
+
+// trailLimit is how many failures the progress trail shows before saying
+// how many more there are. The model always gets all of them — it is the
+// one that has to fix them — but a person watching wants the shape of the
+// problem, not forty lines of it.
+const trailLimit = 4
+
+func (failure *PatchError) Error() string {
+	if len(failure.Failures) == 1 {
+		return failure.Failures[0].Error()
+	}
+	var text strings.Builder
+	fmt.Fprintf(&text, "%d edits in this patch could not be placed. Fix every one of them:\n", len(failure.Failures))
+	for index, one := range failure.Failures {
+		fmt.Fprintf(&text, "\n[%d] %s\n", index+1, one.Error())
+	}
+	return text.String()
+}
+
+// Summary is the short form, for a progress line.
+func (failure *PatchError) Summary() []string {
+	if len(failure.Failures) == 1 {
+		return failure.Failures[0].Summary()
+	}
+	lines := []string{fmt.Sprintf("%d edits could not be placed", len(failure.Failures))}
+	for index, one := range failure.Failures {
+		if index == trailLimit {
+			lines = append(lines, fmt.Sprintf("... and %d more", len(failure.Failures)-trailLimit))
+			break
+		}
+		lines = append(lines, one.Summary()...)
+	}
+	return lines
+}
+
 // Explain reduces an apply failure to a few lines worth showing someone.
 // A hunk that could not be placed knows exactly what went wrong; anything
 // else (git refusing the patch outright, an unreadable file) falls back to
 // the error's own first line.
 func Explain(err error) []string {
+	var whole *PatchError
+	if errors.As(err, &whole) {
+		return whole.Summary()
+	}
 	var failure *HunkError
 	if errors.As(err, &failure) {
 		return failure.Summary()
@@ -256,6 +308,7 @@ func (repository *Repository) applyByContent(patch string) error {
 	// Work out every file's new contents before writing anything, so a
 	// failure on the second file doesn't leave the first one changed.
 	updated := make(map[string]string, len(patches))
+	var failures []*HunkError
 	for _, file := range patches {
 		if len(file.hunks) == 0 {
 			continue
@@ -272,19 +325,24 @@ func (repository *Repository) applyByContent(patch string) error {
 			}
 			current = read
 		}
-		content, err := applyHunks(current, file.hunks)
-		if err != nil {
+		content, hunkFailures := applyHunks(current, file.hunks)
+		for _, failure := range hunkFailures {
 			// The file is known here and not where the failure was
-			// raised, so it is filled in on the way past rather than
-			// wrapped, which would hide it from errors.As.
-			var failure *HunkError
-			if errors.As(err, &failure) {
-				failure.Path = file.path
-				return failure
-			}
-			return fmt.Errorf("%s: %w", file.path, err)
+			// raised, so it is filled in on the way past.
+			failure.Path = file.path
+			failures = append(failures, failure)
 		}
+		// Kept even when some hunks failed, so a second block for the
+		// same file is validated against what did place rather than
+		// against the original — otherwise one bad hunk cascades into
+		// spurious failures for every edit after it.
 		updated[file.path] = content
+	}
+	// Nothing is written until the whole patch has been checked. This is
+	// the same code that does the real work rather than a second opinion
+	// on it, so a patch that validates here cannot then fail to apply.
+	if len(failures) > 0 {
+		return &PatchError{Failures: failures}
 	}
 	if len(updated) == 0 {
 		return fmt.Errorf("patch changed nothing")
@@ -297,8 +355,13 @@ func (repository *Repository) applyByContent(patch string) error {
 	return nil
 }
 
-func applyHunks(content string, hunks []hunk) (string, error) {
+// applyHunks places every hunk it can and reports every one it cannot.
+// A hunk that fails is skipped rather than aborting the pass, so the rest
+// are still checked against the content as it stands — which is what lets
+// one validation pass find every problem in the patch.
+func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 	lines := strings.Split(content, "\n")
+	var failures []*HunkError
 	for _, current := range hunks {
 		if len(current.before) == 0 {
 			// A pure insertion with no context could go anywhere.
@@ -307,11 +370,13 @@ func applyHunks(content string, hunks []hunk) (string, error) {
 				continue
 			}
 			const reason = "a hunk has no context to place it by"
-			return "", &HunkError{Reason: reason, Detail: reason}
+			failures = append(failures, &HunkError{Reason: reason, Detail: reason})
+			continue
 		}
 		index, err := locate(lines, current.before)
 		if err != nil {
-			return "", err
+			failures = append(failures, err)
+			continue
 		}
 		replaced := make([]string, 0, len(lines)-len(current.before)+len(current.after))
 		replaced = append(replaced, lines[:index]...)
@@ -319,13 +384,13 @@ func applyHunks(content string, hunks []hunk) (string, error) {
 		replaced = append(replaced, lines[index+len(current.before):]...)
 		lines = replaced
 	}
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n"), failures
 }
 
 // locate finds the one place block occurs in lines. A short block that
 // appears more than once is ambiguous, and picking one would risk editing
 // the wrong part of the file, so it is refused instead.
-func locate(lines, block []string) (int, error) {
+func locate(lines, block []string) (int, *HunkError) {
 	matches := findAll(lines, block, func(a, b string) bool { return a == b })
 	if len(matches) == 0 {
 		// Fall back to ignoring indentation and line-ending drift, which

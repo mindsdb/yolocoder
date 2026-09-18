@@ -186,3 +186,23 @@ func parseCompact(patch string) ([]filePatch, error) {
 	}
 	return patches, nil
 }
+
+// PatchPaths are the files a patch touches, in the order it names them.
+// Exported so a caller can report what an edit changed without parsing
+// the patch a second time itself, and so it can say which files a failed
+// one was aiming at.
+func PatchPaths(patch string) []string {
+	patches, err := parsePatch(patch)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, file := range patches {
+		if file.path != "" && !seen[file.path] {
+			seen[file.path] = true
+			paths = append(paths, file.path)
+		}
+	}
+	return paths
+}

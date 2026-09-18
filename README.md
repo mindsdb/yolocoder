@@ -218,25 +218,56 @@ YoloCoder keeps the loop deliberately small:
 
 1. Builds a compact map of the current folder (`.gitignore`-aware when it
    already has its own Git repository, a plain walk otherwise).
-2. Opens one conversation with that map and the message, which ends in
-   whichever of three ways fits: a direct reply, an answer drawn from
-   files it read, or a summary plus the files it touches plus a unified
-   diff. Planning and patching are the same request — the files are
-   already in the conversation from the tool calls, so asking separately
-   would resend all of them to learn nothing new — and so is deciding
-   what kind of message this was. A separate routing call used to come
-   first, but it had no tools and so couldn't settle "question or
-   change?" for anything needing the files to answer ("what color is the
-   background" needs the CSS in hand); it said "change" and deferred,
-   costing a round trip on every turn to reach a foregone conclusion.
-3. Applies the diff with `git apply`, which works directly against the
-   folder without requiring a Git repository. If Git rejects it, the hunks
-   are placed by matching their content instead, since a model reliably
-   gets the content right and the line numbers and counts wrong.
-4. Runs the repository's detected test command.
-5. Retries at most twice, continuing the same conversation so a repair
-   costs only the failure evidence rather than the whole context again.
-6. Falls back to writing whole files when no diff will apply at all.
+2. Opens one conversation with that map and the message, and works in it
+   until there is something to say. The model reads with `read_files` and
+   `search`, edits with `apply_diff`, and finishes by replying in plain
+   markdown with no tool call — which is the reply you read. Deciding
+   whether the message was a task, a question or ordinary conversation
+   happens there too, by the call that can act on the answer. A separate
+   routing call used to come first, but it had no tools and so couldn't
+   settle "question or change?" for anything needing the files to answer;
+   it said "change" and deferred, costing a round trip every turn.
+3. Places each edit by matching its text against the file. Nothing is
+   written unless every edit in the patch can be placed, and a rejection
+   comes back as that tool's result — naming each edit it could not find
+   and the closest line to it — so the repair continues the same
+   conversation rather than starting a fresh attempt.
+4. Runs the repository's detected check command when the model tries to
+   finish, and sends it back to work if that fails. It cannot declare
+   victory over a build it just broke.
+5. Falls back to writing whole files when it runs out of edits or rounds
+   without landing anything.
+
+Each tool has its own budget for a turn rather than sharing one ceiling,
+because they go wrong differently: a model that can't place a hunk will
+spend every round retrying the edit, where one that's merely exploring
+reads a few files and stops.
+
+Edits use a compact patch format, not a unified diff — no `@@` markers,
+no line numbers, no counts, since none of it is read anyway:
+
+```
+@path            modify this file
+@+path           create it; every following line is its literal content
+
+ context before
+-old line
++new line
+ context after
+```
+
+A blank line separates one edit from the next, and context is optional.
+That leaves the model nothing to get right except the text itself, which
+is the only part that matters: a line differing by one character can't be
+found. Unified diffs and the `*** Begin Patch` format still parse, for
+models that reach for them anyway.
+
+The request carries tools and no JSON schema. Asking for both in one
+request is what produced the provider workarounds in `client.go` — some
+refuse the combination outright, and at least one pins `tool_choice` to
+`required` and then fails when the model would rather reply than call a
+tool. Tools plus a plain-message ending is the one shape every
+OpenAI-compatible provider implements the same way.
 
 The last three turns in the folder ride along in that opening message.
 They're small — around 1.5 KB on a real folder — and they cover the
@@ -253,9 +284,9 @@ unused tool is still a definition on every request, and the recent turns
 answer nearly everything on their own.
 
 The model never receives a shell tool. Local code exposes only bounded
-`read_files` and `search` tools during context gathering, plus `recall`
-when it's switched on. Patch application and testing are deterministic
-local operations.
+`read_files`, `search` and `apply_diff`, plus `recall` when it's switched
+on. Placing edits and running the check are deterministic local
+operations.
 
 Some OpenAI-compatible providers pin `tool_choice` to `required` whenever
 tools are offered — YoloCoder only ever sends `auto` — and then fail the

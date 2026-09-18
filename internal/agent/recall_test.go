@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -19,11 +18,10 @@ var pastTurns = []Recollection{
 	{Number: 3, Message: "fit the side cards too", Summary: "Compacted the cards", Files: []string{"base_index.html"}},
 }
 
-// answerOnce replies to every call with a Change carrying only an answer,
-// which ends the turn without a patch or a test run.
+// answerOnce ends the turn with a plain reply and no tool call, which is
+// how every turn finishes now.
 func answerOnce(writer http.ResponseWriter, answer string) {
-	payload, _ := json.Marshal(Change{Answer: answer})
-	fmt.Fprintf(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":%s}]}]}`, strconv.Quote(string(payload)))
+	fmt.Fprint(writer, finishes(answer))
 }
 
 // firstInput is the opening message of the first request a server saw.

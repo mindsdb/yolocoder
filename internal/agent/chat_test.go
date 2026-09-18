@@ -42,7 +42,6 @@ func TestToChatConvertsATranscript(t *testing.T) {
 		},
 		Tools:      repositoryTools(true),
 		ToolChoice: "auto",
-		Text:       strictSchema("code_change", changeSchema()),
 	}
 	converted, err := toChat(request, false)
 	if err != nil {
@@ -76,15 +75,25 @@ func TestToChatConvertsATranscript(t *testing.T) {
 		t.Fatalf("messages[4] = %+v", converted.Messages[4])
 	}
 	// Tools nest under "function" in this dialect.
-	if len(converted.Tools) != 3 || converted.Tools[0].Type != "function" || converted.Tools[0].Function.Name != "read_files" {
+	if len(converted.Tools) != 4 || converted.Tools[0].Type != "function" || converted.Tools[0].Function.Name != "read_files" {
 		t.Fatalf("tools = %+v", converted.Tools)
 	}
-	// And the JSON schema moves from text.format to response_format.
-	if converted.ResponseFormat == nil || converted.ResponseFormat.Type != "json_schema" {
-		t.Fatalf("response format = %+v", converted.ResponseFormat)
+	// The working loop sends no schema at all now, so none should appear.
+	if converted.ResponseFormat != nil {
+		t.Fatalf("response format = %+v, want none alongside tools", converted.ResponseFormat)
 	}
-	if converted.ResponseFormat.JSONSchema.Name != "code_change" || !converted.ResponseFormat.JSONSchema.Strict {
-		t.Fatalf("json schema = %+v", converted.ResponseFormat.JSONSchema)
+	// It still converts when one is asked for, which the whole-file
+	// rewrite still does — that call carries no tools, so there is no
+	// conflict for a provider to object to.
+	withSchema, err := toChat(responseRequest{Model: "m", Input: "rewrite it", Text: strictSchema("file_rewrite", rewriteSchema())}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withSchema.ResponseFormat == nil || withSchema.ResponseFormat.Type != "json_schema" {
+		t.Fatalf("response format = %+v", withSchema.ResponseFormat)
+	}
+	if withSchema.ResponseFormat.JSONSchema.Name != "file_rewrite" || !withSchema.ResponseFormat.JSONSchema.Strict {
+		t.Fatalf("json schema = %+v", withSchema.ResponseFormat.JSONSchema)
 	}
 }
 
@@ -204,9 +213,19 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 			if !strings.Contains(content, "<title>Old</title>") {
 				t.Fatalf("tool result did not carry the file: %q", content)
 			}
-			diff := "diff --git a/index.html b/index.html\n--- a/index.html\n+++ b/index.html\n@@ -1,3 +1,3 @@\n <html>\n-<title>Old</title>\n+<title>New</title>\n </html>\n"
-			payload, _ := json.Marshal(Change{Summary: "Retitle", FilesToModify: []string{"index.html"}, Diff: diff})
-			reply(chatMessage{Role: "assistant", Content: string(payload)})
+			patch := "@index.html\n-<title>Old</title>\n+<title>New</title>\n"
+			arguments, _ := json.Marshal(map[string]string{"patch": patch})
+			reply(chatMessage{Role: "assistant", ToolCalls: []chatToolCall{{
+				ID: "call_2", Type: "function",
+				Function: chatCallFunction{Name: "apply_diff", Arguments: string(arguments)},
+			}}})
+		case 3:
+			// And the edit's own result comes back the same way.
+			last := body.Messages[len(body.Messages)-1]
+			if last.Role != "tool" || last.ToolCallID != "call_2" {
+				t.Fatalf("last message = %+v, want the edit's result", last)
+			}
+			reply(chatMessage{Role: "assistant", Content: "Retitle"})
 		default:
 			t.Fatalf("unexpected request %d", requests)
 		}
@@ -329,7 +348,7 @@ func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 		Instructions: "be brief",
 		Input:        "hi",
 		Tools:        repositoryTools(true),
-		Text:         strictSchema("code_change", changeSchema()),
+		Text:         strictSchema("file_rewrite", rewriteSchema()),
 	}
 	converted, err := toChat(request, true)
 	if err != nil {
@@ -345,7 +364,7 @@ func TestToChatDescribesTheShapeWhenTheSchemaIsDropped(t *testing.T) {
 	if !strings.Contains(system, "be brief") {
 		t.Fatalf("system message lost the instructions: %q", system)
 	}
-	want := "summary (string), files_to_modify (array of strings), diff (string)"
+	want := "summary (string), content (string)"
 	if !strings.Contains(system, want) {
 		t.Fatalf("system message = %q, want it to describe %q", system, want)
 	}
@@ -398,7 +417,7 @@ func TestClientRetriesWithoutTheSchemaWhenRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := responseRequest{Input: "hi", Tools: repositoryTools(true), Text: strictSchema("code_change", changeSchema())}
+	request := responseRequest{Input: "hi", Tools: repositoryTools(true), Text: strictSchema("file_rewrite", rewriteSchema())}
 	response, err := client.create(context.Background(), request)
 	if err != nil {
 		t.Fatalf("create() = %v, want the retry to succeed", err)

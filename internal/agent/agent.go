@@ -21,70 +21,6 @@ const maxToolRounds = 8
 // stuck) failing partway through a build is worse than it taking longer.
 const produceTimeout = 5 * time.Minute
 
-// Change is one attempt at the whole job: what the model means to do,
-// which files it touches, and the diff that does it.
-//
-// Planning and patching are deliberately one request. Splitting them cost
-// a round trip and, worse, resent every file: the contents are already in
-// the conversation from the tool calls, so a separate patch call shipped
-// them a second time to learn nothing new. Summary and files come before
-// the diff in the schema so the model still states its intent first.
-//
-// Answer is set instead of the three fields above when the task turns out
-// to be a question rather than a change. Routing alone cannot tell the two
-// apart for anything that needs the files to answer — "what color is the
-// background" is coding_task at that point, since routing has no tools
-// and cannot read the file itself — so it resolves here instead, once
-// this session actually has the file in hand. Without a field for it, a
-// model that reaches this conclusion has nowhere to put the answer but
-// summary, which reads as a change description, not prose meant for the
-// user; asking for it explicitly is what lets an informational question
-// end in a real answer instead of "the model returned no diff."
-type Change struct {
-	Summary       string     `json:"summary"`
-	FilesToModify stringList `json:"files_to_modify"`
-	Diff          string     `json:"diff"`
-	Answer        string     `json:"answer"`
-}
-
-// stringList is a list of strings that also accepts the shapes models
-// reach for when a provider doesn't enforce the schema: a list of objects
-// ([{"path":"index.html","changes":[...]}]) or a bare string. Refusing
-// those outright cost us the whole plan over a wrapper the content was
-// perfectly good inside of.
-type stringList []string
-
-func (list *stringList) UnmarshalJSON(data []byte) error {
-	var plain []string
-	if err := json.Unmarshal(data, &plain); err == nil {
-		*list = plain
-		return nil
-	}
-	var single string
-	if err := json.Unmarshal(data, &single); err == nil {
-		*list = stringList{single}
-		return nil
-	}
-	var objects []struct {
-		Path        string `json:"path"`
-		File        string `json:"file"`
-		Name        string `json:"name"`
-		Step        string `json:"step"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(data, &objects); err != nil {
-		return err
-	}
-	values := make(stringList, 0, len(objects))
-	for _, object := range objects {
-		if value := firstNonEmpty(object.Path, object.File, object.Name, object.Step, object.Description); value != "" {
-			values = append(values, value)
-		}
-	}
-	*list = values
-	return nil
-}
-
 // Outcome is what a run amounted to: what to tell the user, whether it
 // was a coding task at all, and what it touched. The caller needs more
 // than the reply text so it can record the turn.
@@ -137,6 +73,7 @@ type toolArguments struct {
 	Paths  []string `json:"paths"`
 	Query  string   `json:"query"`
 	Reason string   `json:"reason"`
+	Patch  string   `json:"patch"`
 }
 
 // inputMessage is one message sent to the model. Images (data URLs pasted
@@ -353,164 +290,290 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 
 	progress.Status("Working out the change...")
 	session := runner.newChangeSession(task, repoMap, notes, images)
-
-	var evidence string
-	var change Change
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			progress.Status("Repairing from new evidence...")
-		}
-		change, err = session.produce(ctx, progress)
-		if err != nil {
-			if !errors.Is(err, errNoDiff) {
-				return Outcome{Profile: runner.profile}, err
-			}
-			progress.Log("  no diff came back, retrying")
-			logSummary(progress, "  it said", change.Summary)
-			evidence = fmt.Sprintf(
-				"You returned a summary but the diff field was empty, so nothing changed. "+
-					"The summary said:\n\n%s\n\nProduce the diff that makes exactly that change now, "+
-					"in the diff field. Keep the summary to a single short line: it is written before "+
-					"the diff, and a long one leaves less room for the diff that actually matters.",
-				strings.TrimSpace(change.Summary))
-			session.report(evidence)
-			continue
-		}
-		if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) != "" {
-			// The task turned out to be a question, not a change: nothing
-			// to apply or test, so this concludes the turn immediately
-			// rather than entering the loop meant for an actual change.
-			progress.Log("  answered without changing anything")
-			return Outcome{Reply: change.Answer, Usage: runner.usage, Profile: runner.profile}, nil
-		}
-		if attempt == 0 {
-			logSummary(progress, "plan", change.Summary)
-			for _, path := range change.FilesToModify {
-				progress.Log("  will edit " + path)
-			}
-		}
-
-		progress.Status("Applying the patch...")
-		patchStarted := time.Now()
-		applyErr := runner.repository.Apply(change.Diff)
-		patchSpent := time.Since(patchStarted)
-		runner.profile.record(StepPatch, patchSpent)
-		if applyErr != nil {
-			progress.Log("  patch did not apply, retrying · " + formatDuration(patchSpent))
-			// Why, not just that. The applier already works out which
-			// file, which hunk and which single line differs; until now
-			// all of that went to the model and to the debug log, and
-			// the person watching got three words they could do nothing
-			// with — on a run where roughly a quarter of changes need a
-			// repair, that is the thing worth seeing.
-			for _, line := range repo.Explain(applyErr) {
-				progress.Log("    " + line)
-			}
-			// Feed back the diff that failed alongside git's complaint.
-			// Without seeing its own output the model has no way to tell
-			// what was wrong with it and tends to reproduce it verbatim.
-			evidence = fmt.Sprintf(
-				"The patch did not apply, and nothing was changed. A hunk is placed by matching its "+
-					"context and removed lines against the real file, so any difference from it (an HTML "+
-					"entity spelled out, a changed attribute, reflowed whitespace) makes that hunk fail. "+
-					"Every edit that could not be placed is listed below, with the closest line found for "+
-					"each: fix all of them in the next diff, not just the first. Copy those lines character "+
-					"for character from the file contents you already read.\n\n"+
-					"WHAT FAILED:\n%s\n\nTHE DIFF THAT FAILED:\n%s",
-				applyErr.Error(), change.Diff)
-			session.report(evidence)
-			continue
-		}
-		progress.Log("  applied the patch · " + formatDuration(patchSpent))
-
-		// The model names the files it means to touch, and that claim is
-		// worth checking: a patch that quietly leaves out the new files it
-		// promised applies perfectly well and looks like success.
-		if missing := runner.missingFiles(change.FilesToModify); len(missing) > 0 {
-			progress.Log("  but " + strings.Join(missing, ", ") + " was not created, retrying")
-			evidence = fmt.Sprintf(
-				"The patch applied, but it did not create %s, which you said it would modify. "+
-					"A file that does not exist yet has to be created by the patch itself: use "+
-					"\"*** Add File: <path>\" followed by every line of its contents, or a unified "+
-					"diff whose header is \"--- /dev/null\". Include the complete contents of each "+
-					"file, not a description of them.",
-				strings.Join(missing, ", "))
-			session.report(evidence)
-			continue
-		}
-
-		progress.Status("Testing the change...")
-		testResult, testSpent := runner.runTests(ctx)
-		if testResult.Passed {
-			if testResult.Skipped {
-				progress.Log("  no test command detected")
-			} else {
-				progress.Log("  tests passed · " + formatDuration(testSpent))
-			}
-			return Outcome{Reply: change.Summary, Coding: true, Files: change.FilesToModify, Applied: true, Attempts: attempt + 1, Usage: runner.usage, Profile: runner.profile}, nil
-		}
-		progress.Log("  tests failed, retrying · " + formatDuration(testSpent))
-		for _, line := range firstFailures(testResult.Output) {
-			progress.Log("    " + line)
-		}
-		evidence = "The patch applied, but tests failed. Produce an incremental diff against the current repository.\n" + testResult.Output
-		session.report(evidence)
+	outcome, err := session.work(ctx, progress)
+	// The whole-file fallback is for a model that ran out of room, not
+	// one that made up its mind. A turn that finished on its own saying
+	// it could not do something has decided that, and overriding it by
+	// rewriting a file whole would be the tool talking over the judgement
+	// it just asked for. Running out of rounds or out of apply_diff calls
+	// is the opposite: no decision was reached, and the conversation
+	// already knows everything the rewrite needs.
+	outOfEdits := err == nil && !outcome.Applied && session.used["apply_diff"] >= toolQuota["apply_diff"]
+	stuck := len(session.attempted) > 0 && (outOfEdits || errors.Is(err, errOutOfRounds))
+	if stuck {
+		return runner.rewriteInstead(ctx, task, session, mapped, images, progress)
 	}
-
-	// Every diff was rejected. A diff only applies when its context and
-	// removed lines match the file exactly, which a model-written one
-	// often gets subtly wrong, so fall back to writing whole files.
-	if strings.HasPrefix(evidence, "The patch did not apply") || strings.HasPrefix(evidence, "You returned a summary but the diff field was empty") {
-		targets := rewriteTargets(change.FilesToModify, session.readPaths, mapped)
-		if len(targets) == 0 {
-			return Outcome{Profile: runner.profile}, fmt.Errorf("no diff would apply and the model named no file to rewrite:\n%s", evidence)
-		}
-		progress.Status("Rewriting the file instead...")
-		summary := ""
-		for _, path := range targets {
-			current, _ := runner.repository.ReadFile(path)
-			rewriteStarted := time.Now()
-			rewrite, err := runner.rewrite(ctx, task, path, current, evidence, images)
-			rewriteSpent := time.Since(rewriteStarted)
-			runner.profile.record(StepRewrite, rewriteSpent)
-			if err != nil {
-				return Outcome{Profile: runner.profile}, err
-			}
-			// An empty rewrite of a file that has content is the model
-			// failing, not an instruction to truncate the user's file.
-			if strings.TrimSpace(rewrite.Content) == "" && strings.TrimSpace(current) != "" {
-				return Outcome{Profile: runner.profile}, fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
-			}
-			if err := runner.repository.Write(path, rewrite.Content); err != nil {
-				return Outcome{Profile: runner.profile}, err
-			}
-			progress.Log("  wrote " + path + " · " + formatDuration(rewriteSpent))
-			if summary == "" {
-				summary = rewrite.Summary
-			}
-		}
-		progress.Status("Testing the change...")
-		testResult, testSpent := runner.runTests(ctx)
-		if testResult.Passed {
-			if testResult.Skipped {
-				progress.Log("  no test command detected")
-			} else {
-				progress.Log("  tests passed · " + formatDuration(testSpent))
-			}
-			if summary == "" {
-				summary = "Rewrote " + strings.Join(targets, ", ")
-			}
-			return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: 3, Rewrote: true, Usage: runner.usage, Profile: runner.profile}, nil
-		}
-		return Outcome{Profile: runner.profile}, fmt.Errorf("rewrote %s, but tests failed:\n%s", strings.Join(targets, ", "), testResult.Output)
+	if err != nil {
+		return Outcome{Profile: runner.profile}, err
 	}
-	return Outcome{Profile: runner.profile}, fmt.Errorf("could not complete the task after repair attempts:\n%s", evidence)
+	return outcome, nil
 }
 
-// firstFailures are the few lines of test output most likely to say what
-// broke, for the trail. The model gets the whole thing either way; this
-// is so the person watching does not have to turn on debug logging to
-// find out whether it was one type error or forty.
+// work is the whole turn: one conversation that reads, edits and finally
+// says something. It ends when the model replies without calling a tool
+// — there is no schema and no finishing tool, because a plain message
+// with no tool call is the one shape every provider agrees on, and
+// asking for tools and a response_format together is what produced both
+// of the provider workarounds in client.go.
+func (session *changeSession) work(ctx context.Context, progress Progress) (Outcome, error) {
+	runner := session.runner
+	for round := 0; round < maxRounds; round++ {
+		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
+		started := time.Now()
+		response, err := runner.client.create(callCtx, responseRequest{
+			Instructions: changeInstructions,
+			Input:        session.transcript,
+			Tools:        repositoryTools(runner.recall),
+			ToolChoice:   "auto",
+		})
+		spent := time.Since(started)
+		cancel()
+		runner.profile.record(StepThink, spent)
+		if err != nil {
+			return Outcome{}, err
+		}
+		runner.usage = runner.usage.add(response.usage())
+		progress.Log("  thought · " + formatDuration(spent))
+
+		calls := response.calls()
+		if len(calls) == 0 {
+			reply, err := response.text()
+			if err != nil {
+				return Outcome{}, err
+			}
+			// The model believes it is finished. If it changed anything,
+			// the project gets a say before that is accepted: a failing
+			// check goes back into this same conversation rather than
+			// ending the turn, so it cannot declare victory over a build
+			// it just broke.
+			if len(session.applied) > 0 {
+				result, testSpent := runner.runTests(ctx)
+				switch {
+				case result.Skipped:
+					progress.Log("  no check command detected")
+				case !result.Passed:
+					progress.Log("  check failed, back to it · " + formatDuration(testSpent))
+					for _, line := range firstFailures(result.Output) {
+						progress.Log("    " + line)
+					}
+					session.report("The edits applied, but the project's check failed. Fix it.\n" + result.Output)
+					continue
+				default:
+					progress.Log("  check passed · " + formatDuration(testSpent))
+				}
+			}
+			return session.outcome(reply), nil
+		}
+
+		for _, call := range calls {
+			// Described before the tool runs, not after: describeCall
+			// reports which paths were already shown by consulting the
+			// same served map that answering a read_files call updates,
+			// so asking afterwards would report every file as a re-read.
+			described := runner.describeCall(call)
+			progress.Status(described)
+			toolStarted := time.Now()
+			output, detail := session.runTool(ctx, call)
+			toolSpent := time.Since(toolStarted)
+			runner.profile.record(stepFor(call.Name), toolSpent)
+			if call.Name == "recall" {
+				runner.profile.Recall.Spent += toolSpent
+			}
+			progress.Log("  " + described + " · " + formatDuration(toolSpent))
+			// Under the line that reports the call, not before it: the
+			// timing is only known once the tool has run, and the reason
+			// an edit was rejected belongs beneath what it was rejecting.
+			for _, line := range detail {
+				progress.Log("    " + line)
+			}
+			session.transcript = append(session.transcript, call)
+			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
+		}
+	}
+	return Outcome{}, fmt.Errorf("%w after %d rounds", errOutOfRounds, maxRounds)
+}
+
+// errOutOfRounds means the conversation never reached a plain reply. It
+// is a distinct error because a turn that spent its rounds trying to
+// edit is not a failed turn yet: the whole-file fallback can still
+// finish the job from what it already knows.
+var errOutOfRounds = errors.New("the model did not finish")
+
+// outcome is what the turn amounted to, built from what actually
+// happened rather than from what the model said it would do. Applied and
+// Files used to be the model's own claim, which had to be audited
+// afterwards because a patch could quietly omit a file it promised;
+// here they are simply the edits that landed.
+func (session *changeSession) outcome(reply string) Outcome {
+	return Outcome{
+		Reply:    strings.TrimSpace(reply),
+		Coding:   len(session.applied) > 0,
+		Files:    session.applied,
+		Applied:  len(session.applied) > 0,
+		Attempts: session.used["apply_diff"],
+		Usage:    session.runner.usage,
+		Profile:  session.runner.profile,
+	}
+}
+
+// runTool answers one call, holding each tool to its own budget. The
+// budgets are separate because the tools fail differently: a model that
+// cannot place a hunk will burn every round retrying apply_diff, where
+// one that is exploring reads a few files and stops. A tool that is out
+// of budget says so as its result rather than erroring, so the model can
+// still finish with what it has instead of the turn dying.
+// It returns the tool's result for the model, and any lines worth
+// showing the person watching underneath it.
+func (session *changeSession) runTool(ctx context.Context, call responseItem) (string, []string) {
+	quota, known := toolQuota[call.Name]
+	if !known {
+		return "ERROR: unknown tool " + call.Name, nil
+	}
+	if session.used[call.Name] >= quota {
+		return fmt.Sprintf("ERROR: %s has been used %d times, which is the limit for one turn. "+
+				"Work with what you already have, and say what you were unable to do.", call.Name, quota),
+			[]string{fmt.Sprintf("out of %s calls for this turn", call.Name)}
+	}
+	session.used[call.Name]++
+
+	if call.Name == "apply_diff" {
+		return session.applyDiff(call)
+	}
+	session.readPaths = append(session.readPaths, readFilePaths(call)...)
+	return session.runner.runTool(ctx, call), nil
+}
+
+// applyDiff places one patch and reports what happened in the terms the
+// next round needs.
+//
+// A failure carries the current contents of the files it touched when
+// they are not the ones the model was last shown — which happens once an
+// earlier apply_diff has landed and moved the ground under this one.
+// Without that the model has to spend a whole round asking to read a
+// file again just to see what it already changed.
+func (session *changeSession) applyDiff(call responseItem) (string, []string) {
+	var arguments toolArguments
+	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
+		return "ERROR: invalid tool arguments: " + err.Error(), nil
+	}
+	patch := strings.TrimSpace(arguments.Patch)
+	if patch == "" {
+		return "ERROR: no patch was given.", []string{"no patch was given"}
+	}
+	runner := session.runner
+	started := time.Now()
+	err := runner.repository.Apply(patch)
+	runner.profile.record(StepPatch, time.Since(started))
+	if err != nil {
+		var failure *repo.PatchError
+		if errors.As(err, &failure) {
+			for _, one := range failure.Failures {
+				session.attempted = appendUnique(session.attempted, one.Path)
+			}
+		}
+		session.lastFailure = err
+		return "The patch did not apply and nothing was changed.\n\n" + err.Error() + session.staleContents(err),
+			repo.Explain(err)
+	}
+	session.lastFailure = nil
+	changed := repo.PatchPaths(patch)
+	for _, path := range changed {
+		session.applied = appendUnique(session.applied, path)
+	}
+	return "Applied. Changed: " + strings.Join(changed, ", "), nil
+}
+
+// staleContents are the current contents of the files a failed patch
+// touched, for the ones the model has not been shown as they now stand.
+func (session *changeSession) staleContents(err error) string {
+	var failure *repo.PatchError
+	if !errors.As(err, &failure) {
+		return ""
+	}
+	var stale []string
+	for _, one := range failure.Failures {
+		if one.Path != "" && !session.runner.alreadyShown(one.Path) {
+			stale = appendUnique(stale, one.Path)
+		}
+	}
+	if len(stale) == 0 {
+		return ""
+	}
+	text, readErr := session.runner.readFiles(stale)
+	if readErr != nil {
+		return ""
+	}
+	return "\n\nTHESE FILES AS THEY NOW STAND — match your context lines against this, not against what you saw earlier:\n" + text
+}
+
+// rewriteInstead is the last resort: the model spent its budget without
+// landing an edit, so the files it was trying to patch are asked for
+// whole instead of in pieces.
+func (runner *Runner) rewriteInstead(ctx context.Context, task string, session *changeSession, mapped []string, images []string, progress Progress) (Outcome, error) {
+	targets := rewriteTargets(session.attempted, session.readPaths, mapped)
+	if len(targets) == 0 {
+		return Outcome{Profile: runner.profile}, fmt.Errorf("no edit would apply and there was no file to rewrite")
+	}
+	evidence := "Your edits could not be placed."
+	if session.lastFailure != nil {
+		evidence = session.lastFailure.Error()
+	}
+	progress.Status("Rewriting the file instead...")
+	summary := ""
+	for _, path := range targets {
+		current, _ := runner.repository.ReadFile(path)
+		started := time.Now()
+		rewrite, err := runner.rewrite(ctx, task, path, current, evidence, images)
+		spent := time.Since(started)
+		runner.profile.record(StepRewrite, spent)
+		if err != nil {
+			return Outcome{Profile: runner.profile}, err
+		}
+		// An empty rewrite of a file that has content is the model
+		// failing, not an instruction to truncate the user's file.
+		if strings.TrimSpace(rewrite.Content) == "" && strings.TrimSpace(current) != "" {
+			return Outcome{Profile: runner.profile}, fmt.Errorf("refusing to empty %s: the model returned no content for it", path)
+		}
+		if err := runner.repository.Write(path, rewrite.Content); err != nil {
+			return Outcome{Profile: runner.profile}, err
+		}
+		progress.Log("  wrote " + path + " · " + formatDuration(spent))
+		if summary == "" {
+			summary = rewrite.Summary
+		}
+	}
+	progress.Status("Testing the change...")
+	result, testSpent := runner.runTests(ctx)
+	if !result.Passed {
+		return Outcome{Profile: runner.profile}, fmt.Errorf("rewrote %s, but the check failed:\n%s", strings.Join(targets, ", "), result.Output)
+	}
+	if result.Skipped {
+		progress.Log("  no check command detected")
+	} else {
+		progress.Log("  check passed · " + formatDuration(testSpent))
+	}
+	if summary == "" {
+		summary = "Rewrote " + strings.Join(targets, ", ")
+	}
+	return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: session.used["apply_diff"], Rewrote: true, Usage: runner.usage, Profile: runner.profile}, nil
+}
+
+func appendUnique(list []string, value string) []string {
+	if value == "" {
+		return list
+	}
+	for _, existing := range list {
+		if existing == value {
+			return list
+		}
+	}
+	return append(list, value)
+}
+
+// firstFailures are the few lines of check output most likely to say
+// what broke, for the trail. The model gets the whole thing either way;
+// this is so the person watching does not have to turn on debug logging
+// to find out whether it was one type error or forty.
 func firstFailures(output string) []string {
 	var picked []string
 	for _, line := range strings.Split(output, "\n") {
@@ -564,6 +627,44 @@ type changeSession struct {
 	runner     *Runner
 	transcript []any
 	readPaths  []string
+	// applied are the files edits actually landed in, attempted the ones
+	// an edit was tried on and failed. Both are recorded as they happen,
+	// so the turn's outcome is what the repository says rather than what
+	// the model claimed it would do.
+	applied     []string
+	attempted   []string
+	lastFailure error
+	// used counts calls per tool, against toolQuota.
+	used map[string]int
+}
+
+// maxRounds bounds the whole conversation; toolQuota bounds each tool
+// within it. Separate budgets because the tools go wrong differently: a
+// model that cannot place a hunk will spend every round retrying
+// apply_diff, where one that is merely exploring reads a few files and
+// stops. One total ceiling would let the first starve the second.
+const maxRounds = 20
+
+var toolQuota = map[string]int{
+	"read_files": 8,
+	"search":     5,
+	"apply_diff": 4,
+	"recall":     1,
+}
+
+// stepFor is the profile step a tool's time belongs to. Recall is kept
+// apart from the other tools because whether a turn reached for history
+// at all is the measurement, and it is lost the moment it is averaged in
+// with reading files.
+func stepFor(tool string) Step {
+	switch tool {
+	case "apply_diff":
+		return StepPatch
+	case "recall":
+		return StepRecall
+	default:
+		return StepTools
+	}
 }
 
 // newChangeSession opens the conversation, ordered constant-first: the
@@ -597,6 +698,7 @@ func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollectio
 	return &changeSession{
 		runner:     runner,
 		transcript: []any{inputMessage{Role: "user", Content: opening.String(), Images: images}},
+		used:       map[string]int{},
 	}
 }
 
@@ -605,81 +707,6 @@ func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollectio
 func (session *changeSession) report(evidence string) {
 	session.transcript = append(session.transcript, inputMessage{Role: "user", Content: evidence})
 }
-
-// produce runs tool rounds until the model returns a change.
-func (session *changeSession) produce(ctx context.Context, progress Progress) (Change, error) {
-	for round := 0; round < maxToolRounds; round++ {
-		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
-		started := time.Now()
-		response, err := session.runner.client.create(callCtx, responseRequest{
-			Instructions: changeInstructions,
-			Input:        session.transcript,
-			Tools:        repositoryTools(session.runner.recall),
-			ToolChoice:   "auto",
-			Text:         strictSchema("code_change", changeSchema()),
-		})
-		spent := time.Since(started)
-		cancel()
-		session.runner.profile.record(StepThink, spent)
-		if err != nil {
-			return Change{}, err
-		}
-		progress.Log("  thought · " + formatDuration(spent))
-		session.runner.usage = session.runner.usage.add(response.usage())
-		calls := response.calls()
-		if len(calls) == 0 {
-			text, err := response.text()
-			if err != nil {
-				return Change{}, err
-			}
-			var change Change
-			if err := decodeJSON(text, &change); err != nil {
-				return Change{}, fmt.Errorf("decode the change: %w", err)
-			}
-			salvageChange(&change, text)
-			if strings.TrimSpace(change.Diff) == "" && strings.TrimSpace(change.Answer) == "" {
-				// Repairable, not fatal: the model described a change
-				// and then did not produce one, which is a slip it can
-				// answer for — and it has already read the files, so
-				// making it try again costs the evidence and nothing
-				// else. Failing the turn here threw away everything the
-				// conversation had gathered over a missing field.
-				return change, fmt.Errorf("%w; it replied: %s", errNoDiff, snippet(text))
-			}
-			return change, nil
-		}
-		for _, call := range calls {
-			// Described before the tool runs, not after: describeCall
-			// reports which paths were already shown by consulting the
-			// same served map that answering a read_files call updates,
-			// so asking afterwards would report every file as a re-read.
-			described := session.runner.describeCall(call)
-			progress.Status(described)
-			toolStarted := time.Now()
-			session.readPaths = append(session.readPaths, readFilePaths(call)...)
-			output := session.runner.runTool(ctx, call)
-			toolSpent := time.Since(toolStarted)
-			// Recall is recorded as its own step rather than lumped in
-			// with the rest: whether a turn reached for history at all
-			// is the measurement this design rests on, and it is lost
-			// the moment it is averaged in with reading files.
-			step := StepTools
-			if call.Name == "recall" {
-				step = StepRecall
-				session.runner.profile.Recall.Spent += toolSpent
-			}
-			session.runner.profile.record(step, toolSpent)
-			progress.Log("  " + described + " · " + formatDuration(toolSpent))
-			session.transcript = append(session.transcript, call)
-			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
-		}
-	}
-	return Change{}, fmt.Errorf("the model exceeded %d repository tool rounds", maxToolRounds)
-}
-
-// errNoDiff marks a reply that promised a change and carried neither a
-// diff nor an answer. Run recognizes it and repairs rather than giving up.
-var errNoDiff = errors.New("the model returned no diff")
 
 // rewrite asks for one file's complete new contents, used when no diff
 // would apply.
@@ -850,6 +877,11 @@ func (runner *Runner) describeCall(call responseItem) string {
 		}
 	case "search":
 		return "search " + strconv.Quote(arguments.Query)
+	case "apply_diff":
+		if paths := repo.PatchPaths(arguments.Patch); len(paths) > 0 {
+			return "edit " + strings.Join(paths, ", ")
+		}
+		return "apply an edit"
 	case "recall":
 		if reason := strings.TrimSpace(arguments.Reason); reason != "" {
 			return "recall earlier turns: " + reason
@@ -909,19 +941,6 @@ func plural(count int, one, many string) string {
 	return many
 }
 
-// missingFiles are the paths a change said it would touch that still
-// aren't there, which is how a patch that silently omitted the new files
-// it promised gives itself away.
-func (runner *Runner) missingFiles(claimed []string) []string {
-	var missing []string
-	for _, path := range claimed {
-		if path = strings.TrimSpace(path); path != "" && !runner.repository.Exists(path) {
-			missing = append(missing, path)
-		}
-	}
-	return missing
-}
-
 // alreadyShown reports whether path's current contents are the ones the
 // model was already given.
 func (runner *Runner) alreadyShown(path string) bool {
@@ -938,53 +957,6 @@ func (runner *Runner) alreadyShown(path string) bool {
 func logSummary(progress Progress, label, summary string) {
 	if summary = strings.TrimSpace(summary); summary != "" {
 		progress.Log("  " + label + ": " + summary)
-	}
-}
-
-// alternatePlan matches a shape providers return when they ignore the
-// requested schema, for example
-// {"plan":[{"file":"index.html","changes":[...]}],"notes":"..."}.
-type alternatePlan struct {
-	Plan []struct {
-		File string `json:"file"`
-		Path string `json:"path"`
-	} `json:"plan"`
-	// Spellings models reach for instead of files_to_modify. Missing one
-	// costs the file list silently: the trail loses its "will edit" line
-	// and the whole-file fallback loses its first choice of target.
-	Files         stringList `json:"files"`
-	FilesModified stringList `json:"files_modified"`
-	FilesChanged  stringList `json:"files_changed"`
-	ModifiedFiles stringList `json:"modified_files"`
-	Notes         string     `json:"notes"`
-}
-
-// salvageChange fills in a change whose file list came back empty because
-// the provider let the model answer in its own shape rather than the
-// schema that was asked for. Losing the file list is expensive: it costs
-// the whole-file fallback its target.
-func salvageChange(change *Change, text string) {
-	if len(change.FilesToModify) > 0 {
-		return
-	}
-	var alternate alternatePlan
-	if err := decodeJSON(text, &alternate); err != nil {
-		return
-	}
-	for _, entry := range alternate.Plan {
-		if path := firstNonEmpty(entry.File, entry.Path); path != "" {
-			change.FilesToModify = append(change.FilesToModify, path)
-		}
-	}
-	for _, group := range []stringList{alternate.Files, alternate.FilesModified, alternate.FilesChanged, alternate.ModifiedFiles} {
-		for _, path := range group {
-			if path != "" {
-				change.FilesToModify = append(change.FilesToModify, path)
-			}
-		}
-	}
-	if change.Summary == "" {
-		change.Summary = alternate.Notes
 	}
 }
 
@@ -1041,6 +1013,9 @@ func repositoryTools(recall bool) []functionTool {
 		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
 		}},
+		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed.", Strict: true, Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"patch": map[string]any{"type": "string"}}, "required": []string{"patch"}, "additionalProperties": false,
+		}},
 	}
 	if recall {
 		// reason is required rather than the tool taking no arguments at
@@ -1052,15 +1027,6 @@ func repositoryTools(recall bool) []functionTool {
 		}})
 	}
 	return tools
-}
-
-func changeSchema() map[string]any {
-	return objectSchema(map[string]any{
-		"summary":         map[string]any{"type": "string"},
-		"files_to_modify": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"diff":            map[string]any{"type": "string"},
-		"answer":          map[string]any{"type": "string"},
-	}, []string{"summary", "files_to_modify", "diff", "answer"})
 }
 
 func rewriteSchema() map[string]any {
@@ -1077,45 +1043,70 @@ func objectSchema(properties map[string]any, required []string) map[string]any {
 const changeInstructions = `You are a small coding agent working in one folder.
 
 You are given the repository map and the user's message. The message may be a coding task,
-a question about the project, or ordinary conversation, and deciding which is part of your
-job: end in exactly one of these three ways.
+a question about the project, or ordinary conversation, and deciding which is part of your job.
 
-Nothing to read and nothing to change — a greeting, a thank-you, a remark, or a question you
-can already answer: put your reply in answer and call no tool at all. Do not go looking
-through the repository for a message that did not ask you to.
+Finish by replying in plain markdown, with no tool call. That reply is what the user reads, so
+answer what was actually asked: the real colors, values or structure when it was a question,
+a short note of what you changed when it was a change, an ordinary reply when it was neither.
+Do not describe a change you have not made — an edit only exists once apply_diff has accepted
+it. If you could not do something, say so plainly.
 
-A question the files can answer: read what you need, then put the answer in answer — the
-actual colors, values, structure, or whatever was asked, drawn from what you read, not a
-description that an answer exists — leaving summary, files_to_modify and diff empty.
+A message that needs nothing from the repository — a greeting, a thank-you, a remark, a
+question you can already answer — gets that reply straight away, with no tool call at all.
+Do not go looking through the files for a message that did not ask you to.
 
-A change: read what you need, then return a one-line summary, the files it modifies, and the
-diff that makes it, leaving answer empty. Make the smallest complete change, and include
-tests when the repository already has them. The summary is one short line and nothing more —
-it is written before the diff, so a long one spends the room the diff needs; describe the
-change in the diff, not in prose about it. A summary with an empty diff changes nothing at
-all, and is the one reply that is always wrong.
+TOOLS
 
-Reading: start from the repository map. Use read_files for the files you need, naming every
-file you want in one call rather than a call per file, and search only when the map is not
-enough. Read a file before changing it; never write a diff against contents you have not
-seen. The last few turns in this folder are already above; recall, when it is offered, reads what
-came before those, for a message that reaches back further than they go. Everything you have already
-read stays in this conversation, so do not read a file a second time or search for text you
-have already been shown; scroll up and use it. Avoid wandering beyond what the task needs.
+read_files — name every file you want in one call rather than a call per file.
+search — for when the map is not enough to find something.
+apply_diff — make the edit. Read a file before changing it; never write an edit against
+  contents you have not seen.
+recall, when it is offered — the turns before the few already above, for a message that
+  reaches back further than they go.
 
-The diff may be a unified diff or the "*** Begin Patch / *** Update File:" format; either is
-read by matching its text against the file, so line numbers and hunk counts are ignored and do
-not need to be correct.
-A file that does not exist yet is created by the same diff: use "*** Add File: <path>" followed
-by every line of its contents, or a unified diff whose header is "--- /dev/null". Every file you
-list as modified must appear in the diff with its full contents; describing a file you mean to
-add, or naming it without including it, leaves it uncreated.
-What must be exact is the text itself. Copy every context and removed line from the file
-character for character, including indentation, escapes and HTML entities such as &amp;. A line
-that differs by even one character cannot be located. Surround each change with a few unchanged
-lines so there is only one place it can go.
-If told a previous attempt failed, answer the evidence rather than repeating the same diff.
-Respond with only the JSON object, no other text before or after it.`
+Everything you have already read stays in this conversation. Do not read a file a second time
+or search for text you have been shown; scroll up and use it. Each tool has a limited number
+of uses per turn, so spend them on what the task needs.
+
+THE PATCH FORMAT
+
+apply_diff takes a patch and nothing else. Output patches only.
+
+@path            modify this file
+@+path           create this file; every following line is its literal content
+
+For modifications:
+
+ context before
+-old line
++new line
+ context after
+
+Context is optional and starts with a space. Use only enough of it to identify the edit
+uniquely. A blank line separates one edit from the next. No line numbers, no @@ markers, no
+counts — edits are placed by matching your text against the file, so none of that is read.
+
+Example:
+
+@src/app.py
+ def start():
+-    server.run(config)
++    server.run(config, debug=True)
+     return server
+
+@src/config.py
+-PORT = 8000
++PORT = 8080
+
+Preserve whitespace exactly. Copy every context line and every removed line from the file
+character for character, including indentation, escapes and HTML entities such as &amp;. A
+line that differs by even one character cannot be found, and nothing in the patch is written
+unless every edit in it can be placed.
+
+Make the smallest complete change, and include tests when the repository already has them.
+If an edit is rejected, the reply tells you which lines could not be found and what is in the
+file instead: fix every one it lists, not just the first, and do not send the same patch again.
+`
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.
 Your unified diff could not be applied, so supply the whole file instead.

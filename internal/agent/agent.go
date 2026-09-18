@@ -1177,21 +1177,27 @@ For modifications:
  context after
 
 Context is optional and starts with a space. Use only enough of it to identify the edit
-uniquely. A blank line separates one edit from the next, and so does a bare @@ if that is
+uniquely — prefer a short anchor that appears once over a long one, since every line you
+write is a line that has to match exactly. A blank line separates one edit from the next, and so does a bare @@ if that is
 what comes naturally. No line numbers and no counts — edits are placed by matching your text
 against the file, so none of that is read.
 
-Example:
+Two edits in one file, which is the common case:
 
 @src/app.py
  def start():
 -    server.run(config)
 +    server.run(config, debug=True)
      return server
-
-@src/config.py
+@@
 -PORT = 8000
 +PORT = 8080
+
+And a second file, under its own header:
+
+@src/config.py
+-DEBUG = False
++DEBUG = True
 
 Preserve whitespace exactly. Copy every context line and every removed line from the file
 character for character, including indentation, escapes and HTML entities such as &amp;. A
@@ -1208,7 +1214,7 @@ file instead: fix every one it lists, not just the first, and do not send the sa
 `
 
 const rewriteInstructions = `You are the repair phase of a small coding agent.
-Your unified diff could not be applied, so supply the whole file instead.
+Your edits could not be placed in the file, so supply the whole file instead.
 Return the named file's complete new contents in the content field, copied
 from the supplied current contents with only the required edit made.
 Never abbreviate, summarize, or elide any part of the file with comments

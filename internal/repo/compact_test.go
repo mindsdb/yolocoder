@@ -462,3 +462,77 @@ func TestALineThatReallyStartsWithAtAtIsStillContent(t *testing.T) {
 		t.Fatalf("notes.md = %q", got)
 	}
 }
+
+func TestABareRowOfStarsSeparatesEdits(t *testing.T) {
+	// Verbatim from a real run: the model divided its edits with "***"
+	// and the separator check wanted "*** " with a space, so the stars
+	// were read as a line of code to find. Reported as `expected: ***`
+	// against a real line, four patches in a row.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nfiller\nconst y = 2;\n"})
+	if err := repository.Apply("@a.ts\n-const x = 1;\n+const x = 9;\n***\n-const y = 2;\n+const y = 8;\n"); err != nil {
+		t.Fatalf("both edits should have placed: %v", err)
+	}
+	got := read(t, repository, "a.ts")
+	if got != "const x = 9;\nfiller\nconst y = 8;\n" {
+		t.Fatalf("a.ts = %q", got)
+	}
+	if strings.Contains(got, "***") {
+		t.Fatalf("a divider was written into the file:\n%s", got)
+	}
+}
+
+func TestStarsInsideAFileAreStillContent(t *testing.T) {
+	// Markdown emphasis at the start of a line survives, because a
+	// context line carries its leading space.
+	repository := project(t, map[string]string{"notes.md": "intro\n***bold***\ntrailer\n"})
+	if err := repository.Apply("@notes.md\n ***bold***\n-trailer\n+footer\n"); err != nil {
+		t.Fatalf("a real line of stars should still match: %v", err)
+	}
+	if got := read(t, repository, "notes.md"); got != "intro\n***bold***\nfooter\n" {
+		t.Fatalf("notes.md = %q", got)
+	}
+}
+
+func TestAStrayMarkerInAHunkIsNamed(t *testing.T) {
+	// The generic answer to a convention we have not met yet. Four of
+	// them have each cost a whole turn — "@@", "*** ", "***" and a
+	// missing blank line — and each was diagnosed by hand afterwards.
+	// A line with no relative anywhere in the file says so for itself.
+	repository := project(t, map[string]string{
+		"a.ts": "const first = 1;\nconst second = 2;\nconst third = 3;\n",
+	})
+	// "~~~~" is a divider this format has never heard of.
+	err := repository.Apply("@a.ts\n const first = 1;\n~~~~\n-const second = 2;\n+const second = 9;\n")
+	if err == nil {
+		t.Fatal("that hunk cannot be placed")
+	}
+	lines := strings.Join(Explain(err), "\n")
+	if !strings.Contains(lines, "nowhere in the file") {
+		t.Fatalf("the stray line should be called out:\n%s", lines)
+	}
+	if !strings.Contains(lines, "~~~~") {
+		t.Fatalf("it should say which line:\n%s", lines)
+	}
+	if !strings.Contains(err.Error(), "a blank line does that") {
+		t.Fatalf("and what to do about it:\n%s", err.Error())
+	}
+}
+
+func TestATranscriptionSlipStillGetsTheNearMiss(t *testing.T) {
+	// A line copied almost right is also absent, but for that the
+	// near-miss report says far more than "it is not there".
+	repository := project(t, map[string]string{
+		"a.ts": "const a = 1;\nconst board = useState(empty());\nconst c = 3;\n",
+	})
+	err := repository.Apply("@a.ts\n const a = 1;\n-const board = useState(() => empty());\n+const board = useState(fresh());\n const c = 3;\n")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	joined := strings.Join(Explain(err), "\n")
+	if strings.Contains(joined, "nowhere in the file") {
+		t.Fatalf("a near miss is not a stray marker:\n%s", joined)
+	}
+	if !strings.Contains(joined, "useState(empty())") {
+		t.Fatalf("it should show what is really there:\n%s", joined)
+	}
+}

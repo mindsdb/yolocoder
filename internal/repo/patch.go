@@ -23,7 +23,11 @@ type HunkError struct {
 	// empty when nothing in the file resembled the block at all.
 	Expected string
 	Found    string
-	Detail   string
+	// Extra is anything else worth putting on the progress line — the
+	// stray line a hunk carried, where each of its scattered lines sits.
+	// Detail always has it too; this is the short form.
+	Extra  []string
+	Detail string
 }
 
 func (failure *HunkError) Error() string {
@@ -43,7 +47,7 @@ func (failure *HunkError) Summary() []string {
 	if failure.Expected != "" {
 		lines = append(lines, "expected: "+clipLine(failure.Expected), "in file:  "+clipLine(failure.Found))
 	}
-	return lines
+	return append(lines, failure.Extra...)
 }
 
 // PatchError is every edit in one patch that could not be placed, rather
@@ -460,9 +464,21 @@ func locate(lines, block []string) (int, *HunkError) {
 		// prints expected and found as the same text and sends the model
 		// hunting for a difference that is not there. Traced from a real
 		// run that burned its whole edit budget on exactly that.
+		// One or two lines of the block are nowhere in the file while the
+		// rest are all there. Almost always a marker this format did not
+		// recognise — "@@", "***", "*** End Patch" have each cost a whole
+		// turn — or a line invented rather than copied. Naming it is the
+		// generic answer: it does not need us to have anticipated which
+		// convention the model would reach for next.
+		if absent := absentLines(lines, block); absent != "" {
+			reason := "this hunk has a line that is nowhere in the file"
+			return 0, &HunkError{Reason: reason, Extra: summaryOf(absent), Detail: reason + ":" + absent +
+				"\n\nEverything else in the hunk was found. If that line was meant to divide " +
+				"two edits, a blank line does that; otherwise copy it from the file exactly."}
+		}
 		if scattered := scatteredLines(lines, block); scattered != "" {
 			reason := "this hunk's lines are each in the file, but not next to each other"
-			return 0, &HunkError{Reason: reason, Detail: reason + ":" + scattered +
+			return 0, &HunkError{Reason: reason, Extra: summaryOf(scattered), Detail: reason + ":" + scattered +
 				"\n\nA hunk's lines have to be consecutive in the file. Separate edits go in " +
 				"separate hunks, each under its own header or separated by a blank line."}
 		}
@@ -580,6 +596,67 @@ func closestLine(lines, block []string) (expected, found string, at int) {
 		return "", "", 0
 	}
 	return want, lines[bestIndex], bestIndex + 1
+}
+
+// summaryOf turns one of the indented detail blocks above into the lines
+// a progress trail shows, capped so a long one cannot flood it.
+func summaryOf(detail string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimPrefix(detail, "\n"), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+		if len(lines) == 3 {
+			break
+		}
+	}
+	return lines
+}
+
+// absentLines names the few lines of a block that appear nowhere in the
+// file, when everything else in it does. Empty unless that is the case:
+// a block where half the lines are missing is an ordinary mismatch and
+// the near-miss report says more about it.
+func absentLines(lines, block []string) string {
+	present := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		present[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	counted := 0
+	for _, want := range block {
+		if strings.TrimSpace(want) == "" {
+			continue
+		}
+		counted++
+		if present[strings.TrimSpace(want)] {
+			continue
+		}
+		// Absent is not enough: a line transcribed almost right is also
+		// absent, and for that the near-miss report — which shows what is
+		// really there beside what was asked for — says far more. This is
+		// for a line with no relative in the file at all, which is what a
+		// stray "***" or "@@" looks like.
+		best := 0.0
+		for _, line := range lines {
+			if score := similarity(line, want); score > best {
+				best = score
+			}
+		}
+		if best < 0.5 {
+			missing = append(missing, want)
+		}
+	}
+	// Only worth saying when the block is mostly right and a line or two
+	// stands out. One missing line out of two is not a standout.
+	if len(missing) == 0 || len(missing) > 2 || counted-len(missing) < 2 {
+		return ""
+	}
+	var text strings.Builder
+	for _, line := range missing {
+		fmt.Fprintf(&text, "\n  not in the file: %s", clipLine(strings.TrimSpace(line)))
+	}
+	return text.String()
 }
 
 // scatteredLines reports where each of a block's lines actually sits,

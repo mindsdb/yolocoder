@@ -89,7 +89,11 @@ func looksLikePath(text string) bool {
 // line is written with a leading space, so a file that genuinely contains
 // "@@" or "*** " arrives here as " @@" and is still read as content.
 func isHunkSeparator(line string) bool {
-	return strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "*** ")
+	// "***" with no trailing space is its own case: a model writing a
+	// row of stars as a divider, which is neither "*** End Patch" nor
+	// anything this format asked for. Requiring the space cost a whole
+	// turn, reported as `expected: ***` against a line of real code.
+	return strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "***")
 }
 
 // parseCompact turns a compact patch into the same per-file hunks the

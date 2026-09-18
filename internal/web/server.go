@@ -127,6 +127,10 @@ type Server struct {
 	stateMutex sync.Mutex
 	busy       bool
 	phase      string
+	// settleUntil is when errors start being believed again after a turn
+	// changed files. Guarded by stateMutex with busy, because it is the
+	// same question asked about a slightly later moment.
+	settleUntil time.Time
 }
 
 // Serve starts the --web UI for the current folder and blocks until ctx is
@@ -553,7 +557,7 @@ func (server *Server) handleClientError(response http.ResponseWriter, request *h
 	// fix even had a chance to land and reload the page. The server-log
 	// path already avoids this by coalescing a burst into one report (see
 	// errorWatcher); this is the browser-error path's equivalent.
-	if server.isBusy() {
+	if server.isBusy() || server.settling() {
 		response.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -563,6 +567,27 @@ func (server *Server) handleClientError(response http.ResponseWriter, request *h
 
 // isBusy reports whether a task is currently running, so a browser error
 // that arrives mid-fix can be dropped instead of queuing a duplicate.
+// settling reports whether a turn has just changed files and the page
+// has not had time to reload and run them yet.
+//
+// An error arriving in that window is almost always about the state
+// before the fix: the dev server compiles every intermediate save, so a
+// turn that briefly breaks a file — a dropped tag on one edit, repaired
+// by the next — leaves a real parse error in the log that is already
+// untrue by the time anything reads it. Acting on one of those means
+// auto-fixing code that is no longer broken, which is exactly what
+// happened: a turn renamed a title, broke and re-fixed a JSX line along
+// the way, finished clean, and one second later the stale parse error
+// started a second turn that "fixed" a working file.
+//
+// isBusy already drops reports arriving *during* a turn. This is the
+// same guard for the moment just after one.
+func (server *Server) settling() bool {
+	server.stateMutex.Lock()
+	defer server.stateMutex.Unlock()
+	return time.Now().Before(server.settleUntil)
+}
+
 func (server *Server) isBusy() bool {
 	server.stateMutex.Lock()
 	defer server.stateMutex.Unlock()
@@ -573,6 +598,12 @@ func (server *Server) isBusy() bool {
 // unless the loop guard says this exact error has already had its fair
 // share of automatic attempts.
 func (server *Server) onError(source, text string) {
+	// The server-log path reaches here without passing handleClientError,
+	// and a Vite parse error from a half-finished edit is precisely the
+	// kind of line that lands late.
+	if server.isBusy() || server.settling() {
+		return
+	}
 	if !server.guard.allow(signature(text)) {
 		server.hub.publish("chat", chatMessage{Role: "system", Text: fmt.Sprintf(
 			"Still seeing the same %s error after %d fix attempts — leaving it for you:\n\n%s",
@@ -674,9 +705,21 @@ func (server *Server) runTask(ctx context.Context, task string, images []string,
 // another build → load → review cycle — if the change just applied
 // broke something.
 func (server *Server) reload() {
+	// Anything reported before the page has reloaded and re-run is about
+	// the code as it was, not as it is — see settling.
+	server.stateMutex.Lock()
+	server.settleUntil = time.Now().Add(settleWindow)
+	server.stateMutex.Unlock()
 	server.setPhase("load")
 	server.hub.publish("reload", map[string]bool{"reload": true})
 }
+
+// settleWindow is how long after a change errors are treated as stale.
+// Long enough for Vite to rebuild and the tab to reload and run, short
+// enough that a genuine error introduced by the change still gets caught
+// on the next throw — the page keeps throwing it, so one dropped report
+// costs nothing.
+const settleWindow = 5 * time.Second
 
 // setBusy and setPhase are the only way busy/phase change: they update
 // the ground truth (read back by handleState) and publish the matching

@@ -111,3 +111,45 @@ func TestSignatureIgnoresVolatileDetail(t *testing.T) {
 		t.Fatal("a genuinely different error should not share a signature")
 	}
 }
+
+func TestAnErrorArrivingJustAfterAFixIsTreatedAsStale(t *testing.T) {
+	// Seen on a real run: a turn renamed a title, broke a JSX line on one
+	// edit and repaired it on the next, and finished clean. Vite had
+	// compiled the broken moment and logged a parse error. One second
+	// after the turn ended that error arrived, busy was already false,
+	// and a second turn "fixed" a file that was no longer broken.
+	server := &Server{hub: newHub()}
+	if server.settling() {
+		t.Fatal("a server that has changed nothing should believe every error")
+	}
+
+	server.reload()
+	if !server.settling() {
+		t.Fatal("straight after a change, the page has not re-run yet — errors are about the old code")
+	}
+
+	// The window is a window, not a latch.
+	server.stateMutex.Lock()
+	server.settleUntil = time.Now().Add(-time.Millisecond)
+	server.stateMutex.Unlock()
+	if server.settling() {
+		t.Fatal("once the window passes, errors are believed again")
+	}
+}
+
+func TestSettlingDoesNotSwallowAPersistentError(t *testing.T) {
+	// A real error introduced by the change keeps being thrown, so
+	// dropping one report costs nothing. This just pins that the guard is
+	// time-based rather than per-incident.
+	server := &Server{hub: newHub()}
+	server.reload()
+	if !server.settling() {
+		t.Fatal("expected to be settling")
+	}
+	server.stateMutex.Lock()
+	server.settleUntil = time.Now().Add(-time.Second)
+	server.stateMutex.Unlock()
+	if server.settling() {
+		t.Fatal("the same server should accept the next throw of the same error")
+	}
+}

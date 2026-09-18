@@ -285,6 +285,14 @@ recent turns answer nearly everything on their own. A turn in that history
 is what was asked and what came of it, nothing else — around 280 bytes
 each on a real folder.
 
+An error reported in the few seconds after a change is treated as stale
+rather than acted on. The dev server compiles every intermediate save, so
+a turn that briefly breaks a file — a dropped tag on one edit, repaired by
+the next — leaves a real parse error in the log that is already untrue by
+the time anything reads it. Acting on one of those auto-fixes code that is
+no longer broken. A genuine error survives the wait, because the page
+keeps throwing it.
+
 The model never receives a shell tool. Local code exposes only bounded
 `read_files`, `search` and `apply_diff`, plus `recall` when it's switched
 on. Placing edits and running the check are deterministic local

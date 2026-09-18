@@ -30,3 +30,13 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Duplicate copies named "<file> 2.go", "<file> 3.py" and so on. Something
+# on this machine generates them across build output, virtualenvs and
+# source trees alike — 1,277 identical ones were cleaned out of
+# ~/Documents/GitHub in one pass. A stale copy beside a real .go file
+# breaks the build with redeclaration errors, so this keeps them out of
+# commits at least. It does not stop the build breaking: the file is still
+# on disk and the compiler still reads it. `find . -name '* [0-9]*'` finds
+# them when a build fails for no apparent reason.
+* [0-9]*

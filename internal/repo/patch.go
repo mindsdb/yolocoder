@@ -83,13 +83,31 @@ func (failure *PatchError) Summary() []string {
 	if len(failure.Failures) == 1 {
 		return failure.Failures[0].Summary()
 	}
+	// Grouped by what went wrong and where. Twelve hunks that all missed
+	// the same file produced twelve identical lines, of which the trail
+	// showed four and then "... and 8 more" — which says nothing that the
+	// count on the first line had not already said.
 	lines := []string{fmt.Sprintf("%d edits could not be placed", len(failure.Failures))}
-	for index, one := range failure.Failures {
+	seen := map[string]int{}
+	var order []*HunkError
+	for _, one := range failure.Failures {
+		key := one.Path + "\x00" + one.Reason
+		if seen[key] == 0 {
+			order = append(order, one)
+		}
+		seen[key]++
+	}
+	for index, one := range order {
 		if index == trailLimit {
-			lines = append(lines, fmt.Sprintf("... and %d more", len(failure.Failures)-trailLimit))
+			lines = append(lines, fmt.Sprintf("... and %d more kind%s", len(order)-trailLimit,
+				map[bool]string{true: "", false: "s"}[len(order)-trailLimit == 1]))
 			break
 		}
-		lines = append(lines, one.Summary()...)
+		group := one.Summary()
+		if count := seen[one.Path+"\x00"+one.Reason]; count > 1 {
+			group[0] += fmt.Sprintf("  ×%d", count)
+		}
+		lines = append(lines, group...)
 	}
 	return lines
 }

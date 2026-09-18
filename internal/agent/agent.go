@@ -391,7 +391,12 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			// same served map that answering a read_files call updates,
 			// so asking afterwards would report every file as a re-read.
 			described := runner.describeCall(call)
-			progress.Status(described)
+			// Deliberately not the same words as the line logged below.
+			// Setting the status to the text we are about to log meant
+			// the transient line and the permanent one said exactly the
+			// same thing a millisecond apart, which reads as the tool
+			// having run twice — reported as "why did it read twice?"
+			progress.Status(activityFor(call.Name))
 			toolStarted := time.Now()
 			output, detail := session.runTool(ctx, call)
 			toolSpent := time.Since(toolStarted)
@@ -712,6 +717,23 @@ var toolQuota = map[string]int{
 	"search":     5,
 	"apply_diff": 4,
 	"recall":     1,
+}
+
+// activityFor is what to show on the status line while a tool runs: what
+// is happening, where the log line that follows says what happened.
+func activityFor(tool string) string {
+	switch tool {
+	case "read_files":
+		return "Reading the files..."
+	case "search":
+		return "Searching the folder..."
+	case "apply_diff":
+		return "Applying the edit..."
+	case "recall":
+		return "Reading earlier turns..."
+	default:
+		return "Working..."
+	}
 }
 
 // stepFor is the profile step a tool's time belongs to. Recall is kept

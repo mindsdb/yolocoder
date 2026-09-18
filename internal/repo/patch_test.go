@@ -2,6 +2,7 @@ package repo
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -645,7 +646,10 @@ func TestASingleFailureStillReadsAsOne(t *testing.T) {
 	}
 }
 
-func TestTheTrailDoesNotPrintEveryFailureForever(t *testing.T) {
+func TestIdenticalFailuresCollapseIntoOneLine(t *testing.T) {
+	// Twelve hunks that all missed the same file used to produce twelve
+	// identical lines, of which the trail showed four and then "... and 8
+	// more" — saying nothing the count on the first line had not.
 	var many PatchError
 	for index := 0; index < 9; index++ {
 		many.Failures = append(many.Failures, &HunkError{Path: "a.ts", Reason: "could not find this hunk's lines in the file"})
@@ -654,7 +658,24 @@ func TestTheTrailDoesNotPrintEveryFailureForever(t *testing.T) {
 	if lines[0] != "9 edits could not be placed" {
 		t.Fatalf("led with %q", lines[0])
 	}
-	if last := lines[len(lines)-1]; last != "... and 5 more" {
-		t.Fatalf("trail should stop and say how many remain, got %q", last)
+	if len(lines) != 2 {
+		t.Fatalf("nine of the same thing is one line, not nine: %v", lines)
+	}
+	if !strings.HasSuffix(lines[1], "×9") {
+		t.Fatalf("the repeat should be counted, got %q", lines[1])
+	}
+}
+
+func TestTheTrailStopsAfterEnoughDistinctKinds(t *testing.T) {
+	var many PatchError
+	for index := 0; index < 7; index++ {
+		many.Failures = append(many.Failures, &HunkError{
+			Path:   fmt.Sprintf("file%d.ts", index),
+			Reason: "could not find this hunk's lines in the file",
+		})
+	}
+	lines := many.Summary()
+	if last := lines[len(lines)-1]; last != "... and 3 more kinds" {
+		t.Fatalf("trail should stop and say how many kinds remain, got %q", last)
 	}
 }

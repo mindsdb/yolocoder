@@ -391,3 +391,27 @@ func TestUsageAndProfileCoverEveryCallInTheTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestASuccessfulEditSaysNotToReadItBack(t *testing.T) {
+	// On the first real run the model applied an edit, was told only
+	// "Applied", and spent three further round trips reading the files
+	// back to see whether it had worked.
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	server, seen := scripted(t,
+		edits("c1", "@a.ts\n-const x = 1;\n+const x = 2;\n"),
+		finishes("Done."),
+	)
+	defer server.Close()
+
+	if _, _, err := run(t, repository, server, "bump x"); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal((*seen)[1]["input"])
+	result := string(encoded)
+	if !strings.Contains(result, "Do not read them again to check") {
+		t.Fatalf("a successful edit should say it is authoritative:\n%s", result)
+	}
+	if !strings.Contains(result, "a.ts") {
+		t.Fatalf("it should still say what changed:\n%s", result)
+	}
+}

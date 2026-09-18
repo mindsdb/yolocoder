@@ -497,7 +497,13 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 	for _, path := range changed {
 		session.applied = appendUnique(session.applied, path)
 	}
-	return "Applied. Changed: " + strings.Join(changed, ", "), nil
+	// Said plainly, because the alternative is what happened on the first
+	// real run: the model applied an edit, was told only "Applied", and
+	// spent three further round trips reading the files back to see
+	// whether it had worked.
+	return "Applied. Changed: " + strings.Join(changed, ", ") +
+		". Every edit in that patch was placed; the files contain them now. " +
+		"Do not read them again to check.", nil
 }
 
 // staleContents are the current contents of the files a failed patch
@@ -1070,10 +1076,12 @@ Do not go looking through the files for a message that did not ask you to.
 
 TOOLS
 
-read_files — name every file you want in one call rather than a call per file.
+read_files — one call, every file you want. Not one call per file. When search has just told
+  you four files carry the thing, read all four in that one call.
 search — for when the map is not enough to find something.
 apply_diff — make the edit. Read a file before changing it; never write an edit against
-  contents you have not seen.
+  contents you have not seen. When it says the patch applied, it applied: every edit was
+  placed and the file contains it. Do not read the file back to check.
 recall, when it is offered — the turns before the few already above, for a message that
   reaches back further than they go.
 
@@ -1115,6 +1123,10 @@ Preserve whitespace exactly. Copy every context line and every removed line from
 character for character, including indentation, escapes and HTML entities such as &amp;. A
 line that differs by even one character cannot be found, and nothing in the patch is written
 unless every edit in it can be placed.
+
+Long lines: copy the whole line. All of it, to the end. Do not stop halfway. Do not write "..."
+or leave the rest off. A cut line matches nothing in the file, so the edit is thrown away and
+you write it again. A 300-character line of JSX is still one line. Copy all 300.
 
 Make the smallest complete change, and include tests when the repository already has them.
 If an edit is rejected, the reply tells you which lines could not be found and what is in the

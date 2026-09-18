@@ -198,3 +198,33 @@ func writeFile(t *testing.T, root, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestMapLeavesOutYolocodersOwnDirectory(t *testing.T) {
+	// The dev server's log, pid and port are this tool's working state,
+	// not the project. Listing them invites the agent to read its own log
+	// looking for the project, which is what it did on a real run.
+	root := t.TempDir()
+	for path, body := range map[string]string{
+		"app.ts":                    "const x = 1;\n",
+		".yolocoder/web/server.log": "listening on 5173\n",
+		".yolocoder/web/server.pid": "40213\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mapText, err := (&Repository{Root: root}).Map()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mapText, "app.ts") {
+		t.Fatalf("the project's own files should be mapped:\n%s", mapText)
+	}
+	if strings.Contains(mapText, ".yolocoder") {
+		t.Fatalf("the agent's own state directory should not be mapped:\n%s", mapText)
+	}
+}

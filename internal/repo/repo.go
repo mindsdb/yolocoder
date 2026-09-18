@@ -25,7 +25,12 @@ const (
 // folder has no Git repository of its own to ask for a .gitignore-aware
 // listing.
 var ignoredDirectories = map[string]bool{
-	".git": true, "node_modules": true, "vendor": true, "dist": true, "build": true,
+	// .yolocoder is this tool's own working directory — the dev server's
+	// log, pid and port. Leaving it in the map invites the agent to read
+	// its own log file looking for the project, which is exactly what it
+	// did: one round trip spent on server.log.
+	".yolocoder": true,
+	".git":       true, "node_modules": true, "vendor": true, "dist": true, "build": true,
 	".next": true, ".nuxt": true, "target": true, "__pycache__": true, ".venv": true,
 	"venv": true, ".idea": true, ".vscode": true, ".cache": true, ".pytest_cache": true,
 	".mypy_cache": true, ".tox": true,

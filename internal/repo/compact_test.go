@@ -318,3 +318,70 @@ func TestContextStillHoldsAHunkTogether(t *testing.T) {
 		t.Fatalf("a.ts = %q, want %q", got, want)
 	}
 }
+
+func TestScatteredAnchorsAreNamedAsSuch(t *testing.T) {
+	// Verbatim shape from a real run: three anchors gathered from all over
+	// the file into one hunk. Every line is really there; none of them are
+	// adjacent. The old report said the first line differed from itself,
+	// and the model spent its whole edit budget hunting for a difference
+	// that did not exist.
+	repository := project(t, map[string]string{
+		"App.tsx": `type Language = "en" | "ru" | "pt";
+filler one
+filler two
+const translations = {
+filler three
+  return saved === "ru" ? saved : "en";
+`,
+	})
+	err := repository.Apply("@App.tsx\n" +
+		"-type Language = \"en\" | \"ru\" | \"pt\";\n" +
+		"+type Language = \"en\" | \"ru\" | \"pt\" | \"pl\";\n" +
+		" const translations = {\n" +
+		"   return saved === \"ru\" ? saved : \"en\";\n")
+	if err == nil {
+		t.Fatal("a hunk of scattered anchors cannot be placed")
+	}
+	lines := strings.Join(Explain(err), "\n")
+	if !strings.Contains(lines, "not next to each other") {
+		t.Fatalf("the report should name the real problem:\n%s", lines)
+	}
+	// And the full text tells the model where each line really is, and
+	// what to do about it.
+	detail := err.Error()
+	for _, want := range []string{"line 1:", "line 4:", "line 6:", "separate hunks"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail missing %q:\n%s", want, detail)
+		}
+	}
+}
+
+func TestANearMissNeverReportsALineAsDifferingFromItself(t *testing.T) {
+	repository := project(t, map[string]string{"a.ts": "const kept = 1;\nfiller\nconst other = 2;\n"})
+	err := repository.Apply("@a.ts\n-const kept = 1;\n-const other = 2;\n+merged;\n")
+	if err == nil {
+		t.Fatal("those two lines are not adjacent")
+	}
+	for _, line := range Explain(err) {
+		if strings.HasPrefix(line, "expected: ") {
+			t.Fatalf("a line cannot differ from itself; the report should say what is really wrong:\n%v", Explain(err))
+		}
+	}
+}
+
+func TestAPatchThatChangesNothingIsRefused(t *testing.T) {
+	// Pure context lines place perfectly and write the file back byte for
+	// byte. Reported as "Applied", that spent one of the turn's few edits
+	// and told the model its change had landed when nothing happened.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nconst y = 2;\n"})
+	err := repository.Apply("@a.ts\n const x = 1;\n const y = 2;\n")
+	if err == nil {
+		t.Fatal("a patch with no changes in it should be refused")
+	}
+	if !strings.Contains(err.Error(), "changes nothing") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := read(t, repository, "a.ts"); got != "const x = 1;\nconst y = 2;\n" {
+		t.Fatalf("the file should be untouched: %q", got)
+	}
+}

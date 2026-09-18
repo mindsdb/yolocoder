@@ -313,6 +313,13 @@ func (repository *Repository) applyByContent(patch string) error {
 	// Work out every file's new contents before writing anything, so a
 	// failure on the second file doesn't leave the first one changed.
 	updated := make(map[string]string, len(patches))
+	// originals is what each file said before, so a patch that places
+	// perfectly and changes nothing can be told apart from one that did
+	// something. A hunk of pure context lines is exactly that: it matches,
+	// it writes the file back byte for byte, and it used to be reported as
+	// "Applied" — which spent one of the turn's few edits and told the
+	// model its change had landed when nothing had happened at all.
+	originals := make(map[string]string, len(patches))
 	var failures []*HunkError
 	for _, file := range patches {
 		if len(file.hunks) == 0 {
@@ -329,6 +336,7 @@ func (repository *Repository) applyByContent(patch string) error {
 				return err
 			}
 			current = read
+			originals[file.path] = read
 		}
 		content, hunkFailures := applyHunks(current, file.hunks)
 		for _, failure := range hunkFailures {
@@ -351,6 +359,18 @@ func (repository *Repository) applyByContent(patch string) error {
 	}
 	if len(updated) == 0 {
 		return fmt.Errorf("patch changed nothing")
+	}
+	moved := false
+	for path, content := range updated {
+		if content != originals[path] {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		return fmt.Errorf("this patch places correctly but changes nothing — every line in it " +
+			"is already exactly as written. Check that the lines you meant to change are on " +
+			"\"-\" and \"+\" lines rather than context lines")
 	}
 	for path, content := range updated {
 		if err := repository.Write(path, content); err != nil {
@@ -414,6 +434,20 @@ func locate(lines, block []string) (int, *HunkError) {
 	}
 	switch {
 	case len(matches) == 0:
+		// Every line is in the file, just not together. This is a whole
+		// class of mistake on its own — anchors gathered from all over a
+		// file into one hunk — and it needs saying as such, because the
+		// near-miss report below is actively misleading about it: the
+		// closest line to "type Language = ..." is that very line, so it
+		// prints expected and found as the same text and sends the model
+		// hunting for a difference that is not there. Traced from a real
+		// run that burned its whole edit budget on exactly that.
+		if scattered := scatteredLines(lines, block); scattered != "" {
+			reason := "this hunk's lines are each in the file, but not next to each other"
+			return 0, &HunkError{Reason: reason, Detail: reason + ":" + scattered +
+				"\n\nA hunk's lines have to be consecutive in the file. Separate edits go in " +
+				"separate hunks, each under its own header or separated by a blank line."}
+		}
 		expected, found, at := nearMiss(lines, block)
 		reason := "could not find this hunk's lines in the file"
 		detail := fmt.Sprintf("%s:\n%s", reason, preview(block))
@@ -521,10 +555,43 @@ func closestLine(lines, block []string) (expected, found string, at int) {
 	}
 	// Below half matching, this is pointing at an unrelated line and
 	// saying "did you mean" about it would send the reader the wrong way.
-	if bestIndex == -1 || bestScore < 0.5 {
+	// An exact match is worse still: reporting a line as differing from
+	// itself is the most confusing thing this can say, and it means the
+	// trouble is elsewhere in the block rather than on this line.
+	if bestIndex == -1 || bestScore < 0.5 || lines[bestIndex] == want {
 		return "", "", 0
 	}
 	return want, lines[bestIndex], bestIndex + 1
+}
+
+// scatteredLines reports where each of a block's lines actually sits,
+// when every one of them is in the file but they are not consecutive.
+// Empty unless that is exactly the case: if any line is genuinely absent
+// the ordinary near-miss report is the more useful one.
+func scatteredLines(lines, block []string) string {
+	var text strings.Builder
+	counted := 0
+	for _, want := range block {
+		if strings.TrimSpace(want) == "" {
+			continue
+		}
+		at := -1
+		for index, line := range lines {
+			if line == want || strings.TrimSpace(line) == strings.TrimSpace(want) {
+				at = index + 1
+				break
+			}
+		}
+		if at == -1 {
+			return ""
+		}
+		counted++
+		fmt.Fprintf(&text, "\n  line %d: %s", at, clipLine(strings.TrimSpace(want)))
+	}
+	if counted < 2 {
+		return ""
+	}
+	return text.String()
 }
 
 // similarity scores two lines by how much of them agrees from each end,

@@ -436,3 +436,78 @@ func TestClientRetriesWithoutTheSchemaWhenRejected(t *testing.T) {
 		t.Fatalf("requests carried schema %v, want no repeat of the rejected form", withSchema)
 	}
 }
+
+func TestAnAsideJoinsTheToolCallItCameWith(t *testing.T) {
+	// The model said something and called a tool in the same breath. The
+	// Responses shape keeps those as two items, which is right for that
+	// dialect; passed straight through here they would become two
+	// assistant messages in a row.
+	converted, err := toChat(responseRequest{
+		Model: "m",
+		Input: []any{
+			inputMessage{Role: "user", Content: "TASK: rename it"},
+			inputMessage{Role: "assistant", Content: "The title is in two places. Reading both."},
+			responseItem{Type: "function_call", Name: "read_files", CallID: "call_1", Arguments: `{"paths":["a.ts"]}`},
+			toolOutput{Type: "function_call_output", CallID: "call_1", Output: "const x = 1;"},
+		},
+		Tools:      repositoryTools(false),
+		ToolChoice: "auto",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted.Messages) != 3 {
+		t.Fatalf("messages = %d, want user, assistant, tool: %+v", len(converted.Messages), converted.Messages)
+	}
+	assistant := converted.Messages[1]
+	if assistant.Role != "assistant" {
+		t.Fatalf("messages[1] = %+v", assistant)
+	}
+	content, _ := assistant.Content.(string)
+	if !strings.Contains(content, "The title is in two places") {
+		t.Fatalf("the words were lost: %+v", assistant)
+	}
+	if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("the tool call should ride in the same message: %+v", assistant)
+	}
+	if converted.Messages[2].Role != "tool" {
+		t.Fatalf("messages[2] = %+v, want the tool result", converted.Messages[2])
+	}
+}
+
+func TestAToolCallWithNoAsideIsUnchanged(t *testing.T) {
+	// Most rounds carry no words at all, and nothing should be folded.
+	converted, err := toChat(responseRequest{
+		Model: "m",
+		Input: []any{
+			inputMessage{Role: "user", Content: "TASK: rename it"},
+			responseItem{Type: "function_call", Name: "read_files", CallID: "call_1", Arguments: `{"paths":["a.ts"]}`},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted.Messages) != 2 {
+		t.Fatalf("messages = %d, want user then the tool call: %+v", len(converted.Messages), converted.Messages)
+	}
+	if converted.Messages[1].Content != nil {
+		t.Fatalf("nothing should have been folded in: %+v", converted.Messages[1])
+	}
+}
+
+func TestAUserMessageIsNeverFoldedIntoAToolCall(t *testing.T) {
+	// Repair evidence arrives as a user message and must stay one.
+	converted, err := toChat(responseRequest{
+		Model: "m",
+		Input: []any{
+			inputMessage{Role: "user", Content: "the patch did not apply"},
+			responseItem{Type: "function_call", Name: "read_files", CallID: "call_1", Arguments: `{"paths":["a.ts"]}`},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.Messages[0].Role != "user" || len(converted.Messages[0].ToolCalls) != 0 {
+		t.Fatalf("a user message was folded: %+v", converted.Messages[0])
+	}
+}

@@ -210,10 +210,35 @@ func chatMessages(input any) ([]chatMessage, error) {
 			}
 			messages = append(messages, message...)
 		}
-		return messages, nil
+		return joinAssistantTurn(messages), nil
 	default:
 		return nil, fmt.Errorf("cannot convert %T to chat messages", input)
 	}
+}
+
+// joinAssistantTurn folds what the model said into the same message as
+// the tool calls it said it beside, which is how it arrived and how this
+// dialect expects to be given it back: one assistant turn carrying both
+// content and tool_calls.
+//
+// They reach here as two items because the Responses shape keeps them
+// apart — an assistant message and a function_call are separate items
+// there, and that is correct for that dialect. Passed through unchanged
+// they become two assistant messages in a row, which providers mostly
+// accept and none of them should have to.
+func joinAssistantTurn(messages []chatMessage) []chatMessage {
+	var joined []chatMessage
+	for _, message := range messages {
+		previous := len(joined) - 1
+		if previous >= 0 &&
+			joined[previous].Role == "assistant" && len(joined[previous].ToolCalls) == 0 && joined[previous].Content != nil &&
+			message.Role == "assistant" && message.Content == nil && len(message.ToolCalls) > 0 {
+			joined[previous].ToolCalls = message.ToolCalls
+			continue
+		}
+		joined = append(joined, message)
+	}
+	return joined
 }
 
 func chatMessageFor(item any) ([]chatMessage, error) {

@@ -101,6 +101,11 @@ func parseCompact(patch string) ([]filePatch, error) {
 		active = nil
 	}
 
+	// added tracks whether the previous line was a "+". A "-" arriving
+	// straight after one, with no context between, is where one edit ends
+	// and the next begins — see the switch below.
+	added := false
+
 	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
 	for index := 0; index < len(lines); index++ {
 		line := strings.TrimRight(lines[index], "\r")
@@ -115,6 +120,7 @@ func parseCompact(patch string) ([]filePatch, error) {
 			case '>':
 				return nil, fmt.Errorf("the patch moves %s, which YoloCoder does not do", header.path)
 			}
+			added = false
 			patches = append(patches, filePatch{path: header.path})
 			current = &patches[len(patches)-1]
 
@@ -154,8 +160,27 @@ func parseCompact(patch string) ([]filePatch, error) {
 			// edits that should have been separate produces one block
 			// that matches nothing anywhere in the file.
 			flush()
+			added = false
 			continue
 		}
+
+		// A "-" straight after a "+", with no context line between them,
+		// ends the edit and starts the next. Models write two unrelated
+		// one-line changes under a single header this way constantly,
+		// leaving out the blank line the format asks for, and reading it
+		// as one hunk produces a block of lines that are nowhere near
+		// each other in the file — which then matches nothing and costs a
+		// whole round trip to a rule about punctuation.
+		//
+		// Splitting is safe where merging is not. A genuinely contiguous
+		// replacement writes its removals together and then its additions
+		// ("-a -b +x +y"), so it never hits this; and even split, each
+		// piece places on its own unless its line is ambiguous, which
+		// locate reports either way.
+		if line[0] == '-' && added {
+			flush()
+		}
+		added = line[0] == '+'
 
 		if active == nil {
 			active = &hunk{}

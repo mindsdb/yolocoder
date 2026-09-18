@@ -261,3 +261,60 @@ func TestSimilarityScoresATranscriptionSlip(t *testing.T) {
 		}
 	}
 }
+
+func TestTwoEditsUnderOneHeaderWithNoBlankLineBetween(t *testing.T) {
+	// Verbatim from a real run: two unrelated one-line changes written
+	// under a single header with the blank line left out. Read as one
+	// hunk, the two lines are nowhere near each other in the file and it
+	// matches nothing — which cost a round trip to a punctuation rule.
+	repository := project(t, map[string]string{
+		"App.tsx": "const a = 1;\n" +
+			"          <header><div><h1>tictacos</h1></div></header>\n" +
+			"          <section className=\"lobby-card\">\n" +
+			"          <header><div><p>ROOM</p><h1>tictacos</h1></div></header>\n" +
+			"const b = 2;\n",
+	})
+	err := repository.Apply("@App.tsx\n" +
+		"-          <header><div><h1>tictacos</h1></div></header>\n" +
+		"+          <header><div><h1>tacos tacos</h1></div></header>\n" +
+		"-          <header><div><p>ROOM</p><h1>tictacos</h1></div></header>\n" +
+		"+          <header><div><p>ROOM</p><h1>tacos tacos</h1></div></header>\n")
+	if err != nil {
+		t.Fatalf("both edits should have placed: %v", err)
+	}
+	got := read(t, repository, "App.tsx")
+	if strings.Contains(got, "tictacos") {
+		t.Fatalf("an edit was missed:\n%s", got)
+	}
+	if strings.Count(got, "tacos tacos") != 2 {
+		t.Fatalf("want both headings renamed:\n%s", got)
+	}
+	// The line between them is untouched and still in place.
+	if !strings.Contains(got, `<section className="lobby-card">`) {
+		t.Fatalf("the line between the two edits was disturbed:\n%s", got)
+	}
+}
+
+func TestAContiguousReplacementIsNotSplit(t *testing.T) {
+	// A genuine multi-line replacement writes its removals together and
+	// then its additions, so it never hits the split rule.
+	repository := project(t, map[string]string{"a.ts": "keep;\nfirst;\nsecond;\nkeep2;\n"})
+	if err := repository.Apply("@a.ts\n-first;\n-second;\n+only;\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "a.ts"), "keep;\nonly;\nkeep2;\n"; got != want {
+		t.Fatalf("a.ts = %q, want %q", got, want)
+	}
+}
+
+func TestContextStillHoldsAHunkTogether(t *testing.T) {
+	// The split only fires on a "-" straight after a "+". A context line
+	// between two changes keeps them in one hunk, where they belong.
+	repository := project(t, map[string]string{"a.ts": "one;\nmiddle;\ntwo;\n"})
+	if err := repository.Apply("@a.ts\n-one;\n+ONE;\n middle;\n-two;\n+TWO;\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "a.ts"), "ONE;\nmiddle;\nTWO;\n"; got != want {
+		t.Fatalf("a.ts = %q, want %q", got, want)
+	}
+}

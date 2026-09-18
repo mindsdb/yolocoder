@@ -1177,8 +1177,9 @@ For modifications:
  context after
 
 Context is optional and starts with a space. Use only enough of it to identify the edit
-uniquely. A blank line separates one edit from the next. No line numbers, no @@ markers, no
-counts — edits are placed by matching your text against the file, so none of that is read.
+uniquely. A blank line separates one edit from the next, and so does a bare @@ if that is
+what comes naturally. No line numbers and no counts — edits are placed by matching your text
+against the file, so none of that is read.
 
 Example:
 

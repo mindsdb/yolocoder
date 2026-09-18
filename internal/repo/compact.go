@@ -82,6 +82,16 @@ func looksLikePath(text string) bool {
 	return !strings.ContainsAny(text, " \t(){}[]\"';,")
 }
 
+// isHunkSeparator recognizes the markers a model writes between edits
+// when it slips into a format it knows better than this one.
+//
+// The check is anchored at the start of the line on purpose: a context
+// line is written with a leading space, so a file that genuinely contains
+// "@@" or "*** " arrives here as " @@" and is still read as content.
+func isHunkSeparator(line string) bool {
+	return strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "*** ")
+}
+
 // parseCompact turns a compact patch into the same per-file hunks the
 // unified-diff parser produces, so everything downstream — locate, the
 // three-tier matching, nearMiss, PatchError — is untouched by which
@@ -149,6 +159,22 @@ func parseCompact(patch string) ([]filePatch, error) {
 				continue
 			}
 			return nil, fmt.Errorf("an edit appears before any file header: %q", clipLine(line))
+		}
+
+		// "@@" is what a model reaches for between edits, because it is
+		// the separator in the one diff format everything has seen. This
+		// format asks for a blank line instead, and read as content a
+		// bare "@@" is a line to match — which is nowhere in any file, so
+		// every edit after the first one fails. Traced from a run that
+		// lost its whole edit budget and a 64-second whole-file rewrite
+		// to exactly this, reporting `expected: "@@"` over and over.
+		//
+		// "*** End Patch" and friends are the same mistake in the other
+		// borrowed format, and cost the same nothing to accept.
+		if isHunkSeparator(line) {
+			flush()
+			added = false
+			continue
 		}
 
 		if strings.TrimSpace(line) == "" {

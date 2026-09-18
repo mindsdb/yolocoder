@@ -385,3 +385,80 @@ func TestAPatchThatChangesNothingIsRefused(t *testing.T) {
 		t.Fatalf("the file should be untouched: %q", got)
 	}
 }
+
+func TestAtAtSeparatesEditsTheWayModelsWriteThem(t *testing.T) {
+	// Verbatim shape from a real run. The model separated its edits with
+	// "@@" — the marker in the one diff format everything has seen —
+	// rather than the blank line this format asks for. Read as content,
+	// "@@" is a line to match and is nowhere in any file, so every edit
+	// after the first failed. That turn spent its whole edit budget and a
+	// 64-second whole-file rewrite on it.
+	repository := project(t, map[string]string{
+		"tetrapong.ts": `export type TetrominoId = "i" | "o";
+export type Phase = "idle" | "playing";
+filler
+  private sfx: Sfx;
+  private onHud: (h: Hud) => void;
+more filler
+  setMouse(x: number | null) {
+    this.mouseX = x;
+  }
+`,
+	})
+	err := repository.Apply(`@tetrapong.ts
+ export type TetrominoId = "i" | "o";
++export type Language = "en" | "es";
+ export type Phase = "idle" | "playing";
+@@
+   private onHud: (h: Hud) => void;
++  private language: Language = "en";
+@@
+   setMouse(x: number | null) {
+     this.mouseX = x;
+   }
++
++  setLanguage(language: Language) {
++    this.language = language;
++  }
+`)
+	if err != nil {
+		t.Fatalf("all three edits should have placed: %v", err)
+	}
+	got := read(t, repository, "tetrapong.ts")
+	for _, want := range []string{
+		`export type Language = "en" | "es";`,
+		`private language: Language = "en";`,
+		"setLanguage(language: Language) {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "@@") {
+		t.Fatalf("a separator was written into the file:\n%s", got)
+	}
+}
+
+func TestApplyPatchMarkersAreSeparatorsToo(t *testing.T) {
+	// The same mistake in the other borrowed format: a compact patch that
+	// trails off into "*** End Patch".
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nconst y = 2;\n"})
+	if err := repository.Apply("@a.ts\n-const x = 1;\n+const x = 9;\n*** End Patch\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, repository, "a.ts"); got != "const x = 9;\nconst y = 2;\n" {
+		t.Fatalf("a.ts = %q", got)
+	}
+}
+
+func TestALineThatReallyStartsWithAtAtIsStillContent(t *testing.T) {
+	// The separator check is anchored at column zero, so a context line —
+	// which always carries a leading space — is never mistaken for one.
+	repository := project(t, map[string]string{"notes.md": "intro\n@@ this is content @@\ntrailer\n"})
+	if err := repository.Apply("@notes.md\n @@ this is content @@\n-trailer\n+footer\n"); err != nil {
+		t.Fatalf("a real line beginning with @@ should still match: %v", err)
+	}
+	if got := read(t, repository, "notes.md"); got != "intro\n@@ this is content @@\nfooter\n" {
+		t.Fatalf("notes.md = %q", got)
+	}
+}

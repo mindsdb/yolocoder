@@ -28,6 +28,10 @@ type HunkError struct {
 	// Detail always has it too; this is the short form.
 	Extra  []string
 	Detail string
+	// Block is the lines this hunk was looking for, kept so a caller
+	// holding the other files in the patch can check whether they are
+	// simply in one of those instead.
+	Block []string
 }
 
 func (failure *HunkError) Error() string {
@@ -377,6 +381,7 @@ func (repository *Repository) applyByContent(patch string) error {
 	// the same code that does the real work rather than a second opinion
 	// on it, so a patch that validates here cannot then fail to apply.
 	if len(failures) > 0 {
+		misrouted(failures, originals)
 		return &PatchError{Failures: failures}
 	}
 	if len(updated) == 0 {
@@ -488,7 +493,7 @@ func locate(lines, block []string) (int, *HunkError) {
 		if expected != "" {
 			detail += fmt.Sprintf("\n\nthe closest match is at line %d, where it differs:\n  expected: %q\n  in file:  %q", at, expected, found)
 		}
-		return 0, &HunkError{Reason: reason, Expected: expected, Found: found, Detail: detail}
+		return 0, &HunkError{Reason: reason, Expected: expected, Found: found, Detail: detail, Block: block}
 	case len(matches) > 1 && len(block) < 3:
 		reason := fmt.Sprintf("this hunk's lines appear %d times, too ambiguous to place", len(matches))
 		return 0, &HunkError{Reason: reason, Detail: fmt.Sprintf("%s:\n%s%s", reason, preview(block), disambiguate(lines, matches))}
@@ -596,6 +601,34 @@ func closestLine(lines, block []string) (expected, found string, at int) {
 		return "", "", 0
 	}
 	return want, lines[bestIndex], bestIndex + 1
+}
+
+// misrouted rewrites any failure whose lines are sitting, whole and
+// findable, in another file the same patch touches. An edit under the
+// wrong header is otherwise reported as lines that are simply not there,
+// which is true and says nothing: the model reads it as its own text
+// being wrong and rewrites text that was right all along. Seen when a
+// second file's header was written in a shape that got dropped, sending
+// nine edits to look for their lines in a file they had never been in.
+func misrouted(failures []*HunkError, contents map[string]string) {
+	for _, failure := range failures {
+		if len(failure.Block) == 0 {
+			continue
+		}
+		for path, content := range contents {
+			if path == failure.Path {
+				continue
+			}
+			if _, err := locate(strings.Split(content, "\n"), failure.Block); err != nil {
+				continue
+			}
+			failure.Reason = fmt.Sprintf("these lines are in %s, not in %s", path, failure.Path)
+			failure.Expected, failure.Found, failure.Extra = "", "", nil
+			failure.Detail = failure.Reason + ":\n" + preview(failure.Block) +
+				"\n\nPut this edit under a header naming " + path + "."
+			break
+		}
+	}
 }
 
 // summaryOf turns one of the indented detail blocks above into the lines

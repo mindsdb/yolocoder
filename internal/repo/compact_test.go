@@ -536,3 +536,86 @@ func TestATranscriptionSlipStillGetsTheNearMiss(t *testing.T) {
 		t.Fatalf("it should show what is really there:\n%s", joined)
 	}
 }
+
+func TestAFileHeaderBehindAMarkerIsStillAFileHeader(t *testing.T) {
+	// Verbatim from a real run: a second file introduced as
+	// "*** @path". Read as a plain separator that header is dropped, and
+	// every edit under it is attributed to the previous file — nine edits
+	// went looking for their lines in App.tsx, where they had never been.
+	repository := project(t, map[string]string{
+		"App.tsx":      "const app = 1;\n",
+		"tetrapong.ts": "export type Language = \"en\" | \"es\";\n",
+	})
+	err := repository.Apply("@App.tsx\n-const app = 1;\n+const app = 2;\n" +
+		"*** @tetrapong.ts\n-export type Language = \"en\" | \"es\";\n+export type Language = \"en\" | \"es\" | \"de\";\n")
+	if err != nil {
+		t.Fatalf("both files should have been edited: %v", err)
+	}
+	if got := read(t, repository, "App.tsx"); got != "const app = 2;\n" {
+		t.Fatalf("App.tsx = %q", got)
+	}
+	if got := read(t, repository, "tetrapong.ts"); !strings.Contains(got, `"de"`) {
+		t.Fatalf("tetrapong.ts = %q", got)
+	}
+}
+
+func TestAPathBehindAMarkerWithNoAtSignWorksToo(t *testing.T) {
+	repository := project(t, map[string]string{
+		"a.ts": "const a = 1;\n",
+		"b.ts": "const b = 1;\n",
+	})
+	if err := repository.Apply("@a.ts\n-const a = 1;\n+const a = 2;\n" +
+		"*** b.ts\n-const b = 1;\n+const b = 2;\n"); err != nil {
+		t.Fatalf("apply_patch's own header shape should route too: %v", err)
+	}
+	if got := read(t, repository, "b.ts"); got != "const b = 2;\n" {
+		t.Fatalf("b.ts = %q", got)
+	}
+}
+
+func TestEndPatchAndBareStarsAreStillSeparators(t *testing.T) {
+	// Neither remainder looks like a path, so neither is mistaken for a
+	// header — which is what keeps the previous fix working.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nfiller\nconst y = 2;\n"})
+	if err := repository.Apply("@a.ts\n-const x = 1;\n+const x = 9;\n***\n-const y = 2;\n+const y = 8;\n*** End Patch\n"); err != nil {
+		t.Fatalf("both edits should have placed: %v", err)
+	}
+	if got := read(t, repository, "a.ts"); got != "const x = 9;\nfiller\nconst y = 8;\n" {
+		t.Fatalf("a.ts = %q", got)
+	}
+	for _, stray := range []string{"End Patch", "***"} {
+		if _, err := os.Stat(filepath.Join(repository.Root, stray)); err == nil {
+			t.Fatalf("%q was taken for a file name", stray)
+		}
+	}
+}
+
+func TestEditsUnderTheWrongHeaderSayWhereTheyBelong(t *testing.T) {
+	// An edit under the wrong header reads as lines that are simply not
+	// there — true, and no help at all: the model takes its own text to
+	// be wrong and rewrites what was right. Naming the file they are
+	// really in ends that in one round trip.
+	repository := project(t, map[string]string{
+		"App.tsx":      "const app = 1;\n",
+		"tetrapong.ts": "export type Language = \"en\" | \"es\";\n",
+	})
+	// The patch names both files, and one edit sits under the wrong
+	// header — a section boundary missed rather than a file forgotten.
+	err := repository.Apply("@App.tsx\n-const app = 1;\n+const app = 2;\n\n" +
+		"-export type Language = \"en\" | \"es\";\n+export type Language = \"en\" | \"es\" | \"de\";\n" +
+		"\n@tetrapong.ts\n const unrelated = 1;\n")
+	if err == nil {
+		t.Fatal("the second edit is not in App.tsx")
+	}
+	joined := strings.Join(Explain(err), "\n")
+	if !strings.Contains(joined, "these lines are in tetrapong.ts, not in App.tsx") {
+		t.Fatalf("it should say where they really are:\n%s", joined)
+	}
+	if !strings.Contains(err.Error(), "header naming tetrapong.ts") {
+		t.Fatalf("and what to do about it:\n%s", err.Error())
+	}
+	// And nothing was written, as always.
+	if got := read(t, repository, "App.tsx"); got != "const app = 1;\n" {
+		t.Fatalf("App.tsx = %q", got)
+	}
+}

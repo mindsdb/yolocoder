@@ -50,6 +50,24 @@ type compactHeader_ struct {
 
 func compactHeader(line string) *compactHeader_ {
 	line = strings.TrimRight(line, "\r")
+	// A header a model prefixed with a marker from another format —
+	// "*** @path", or "*** path" in apply_patch's shape. Reading that as
+	// a plain separator drops the header, and every edit under it is then
+	// attributed to whichever file came before: nine edits meant for one
+	// file went looking for their lines in another, and the report said,
+	// accurately and uselessly, that they were not there.
+	//
+	// "*** End Patch" and a bare "***" survive as separators, because
+	// neither remainder looks like a path.
+	if rest, marked := strings.CutPrefix(line, "***"); marked {
+		rest = strings.TrimSpace(rest)
+		if strings.HasPrefix(rest, "@") || looksLikePath(rest) {
+			line = rest
+			if !strings.HasPrefix(line, "@") {
+				line = "@" + line
+			}
+		}
+	}
 	if !strings.HasPrefix(line, "@") {
 		return nil
 	}

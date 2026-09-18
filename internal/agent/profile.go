@@ -23,10 +23,12 @@ const (
 	// actually reaches for it is what says whether that was right.
 	StepRecall Step = "recall"
 	StepMap    Step = "map"
-	// StepThink is time inside a code_change call, StepTools the time
-	// spent answering the tool calls one came back with. Splitting them
-	// separates what the provider costs from what reading the repository
-	// costs, which are fixed by completely different things.
+	// StepThink is time waiting on the model, StepTools the time spent
+	// answering the tool calls it came back with. Splitting them
+	// separates what the provider costs from what reading and editing
+	// the repository costs, which are fixed by different things.
+	// StepPatch is broken out of StepTools for the same reason: placing
+	// an edit is the tool whose failures drive the turn's length.
 	StepThink   Step = "think"
 	StepTools   Step = "tools"
 	StepPatch   Step = "patch"

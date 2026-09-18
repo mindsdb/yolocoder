@@ -118,8 +118,8 @@ func TestRunProfilesTheTurn(t *testing.T) {
 		switch round {
 		case 1: // asks to read a file
 			fmt.Fprint(writer, `{"id":"r","output":[{"type":"function_call","name":"read_files","call_id":"c1","arguments":"{\"paths\":[\"a.txt\"]}"}]}`)
-		default: // answers without a diff
-			fmt.Fprint(writer, `{"id":"r","output":[{"type":"message","content":[{"type":"output_text","text":"{\"summary\":\"\",\"files_to_modify\":[],\"diff\":\"\",\"answer\":\"it says hello\"}"}]}]}`)
+		default: // finishes with a plain reply and no tool call
+			fmt.Fprint(writer, finishes("it says hello"))
 		}
 	}))
 	defer server.Close()

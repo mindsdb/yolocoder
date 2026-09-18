@@ -12,8 +12,6 @@ import (
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
-const maxToolRounds = 8
-
 // Timeouts for the model calls the agent loop makes. Both are generous
 // on purpose: a reasoning model that thinks before answering, or a
 // slower or more heavily loaded endpoint, can easily take longer than a
@@ -763,7 +761,7 @@ func (runner *Runner) rewrite(ctx context.Context, task, path, current, evidence
 // rewriteTargets are the files to rewrite, in descending order of
 // confidence: the ones the plan named, else the ones the model actually
 // opened, else the only file in the folder. A weak model often returns an
-// empty files_to_modify, and the file it read (or the single file there
+// named no file at all, and the file it read (or the single file there
 // is) is then the best evidence of what it meant to change.
 func rewriteTargets(named, readPaths, mapped []string) []string {
 	if len(mapped) != 1 {

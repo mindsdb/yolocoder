@@ -211,9 +211,10 @@ func (repository *Repository) Apply(patch string) error {
 	}
 	debug.Log("PATCH", patch)
 
-	// Git cannot read apply_patch format, so handing it over would only
-	// produce a confusing failure on the way to the applier that can.
-	if isApplyPatchFormat(patch) {
+	// Git cannot read the compact or apply_patch formats, so handing
+	// either over would only produce a confusing failure on the way to
+	// the applier that can.
+	if isApplyPatchFormat(patch) || isCompactPatch(patch) {
 		if err := repository.applyByContent(patch); err != nil {
 			debug.Logf("PATCH FAILED", "%v", err)
 			return err

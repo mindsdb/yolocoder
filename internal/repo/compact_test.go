@@ -1,0 +1,263 @@
+package repo
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func project(t *testing.T, files map[string]string) *Repository {
+	t.Helper()
+	root := t.TempDir()
+	for name, body := range files {
+		full := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &Repository{Root: root}
+}
+
+func read(t *testing.T, repository *Repository, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(repository.Root, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+func TestCompactAppliesTheDocumentedExample(t *testing.T) {
+	repository := project(t, map[string]string{
+		"src/app.py":    "def start():\n    server.run(config)\n    return server\n",
+		"src/config.py": "PORT = 8000\nHOST = \"localhost\"\n",
+	})
+
+	err := repository.Apply(`@src/app.py
+ def start():
+-    server.run(config)
++    server.run(config, debug=True)
+     return server
+
+@src/config.py
+-PORT = 8000
++PORT = 8080
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, repository, "src/app.py"); !strings.Contains(got, "debug=True") {
+		t.Fatalf("src/app.py = %q", got)
+	}
+	if got := read(t, repository, "src/config.py"); !strings.Contains(got, "PORT = 8080") {
+		t.Fatalf("src/config.py = %q", got)
+	}
+	// The untouched line survives.
+	if got := read(t, repository, "src/config.py"); !strings.Contains(got, `HOST = "localhost"`) {
+		t.Fatalf("an unrelated line was lost: %q", got)
+	}
+}
+
+func TestCompactCreatesAFileFromLiteralContent(t *testing.T) {
+	repository := project(t, map[string]string{"keep.txt": "x\n"})
+	err := repository.Apply("@+docs/notes.md\n# Notes\n\n- first\n- second\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Literal content: no prefixes stripped, and the blank line inside it
+	// is part of the file rather than an edit separator.
+	if got, want := read(t, repository, "docs/notes.md"), "# Notes\n\n- first\n- second"; got != want {
+		t.Fatalf("created file = %q, want %q", got, want)
+	}
+}
+
+func TestCompactCreatedContentMayBeginWithDiffCharacters(t *testing.T) {
+	// The reason created lines carry no prefix: a file whose own content
+	// starts with "+", "-" or a space would otherwise be unwritable.
+	repository := project(t, map[string]string{"keep.txt": "x\n"})
+	if err := repository.Apply("@+README.md\n- a bullet\n+ not an addition\n  indented\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "README.md"), "- a bullet\n+ not an addition\n  indented"; got != want {
+		t.Fatalf("created file = %q, want %q", got, want)
+	}
+}
+
+func TestCompactCreatedContentSurvivesAtRules(t *testing.T) {
+	// A CSS file full of at-rules must not be cut short and read as a
+	// series of new files named "media", "import" and so on.
+	repository := project(t, map[string]string{"keep.txt": "x\n"})
+	css := "@import url(\"x.css\");\n\n@media (max-width: 520px) {\n  body { color: red; }\n}\n"
+	if err := repository.Apply("@+styles/app.css\n" + css); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "styles/app.css"), strings.TrimRight(css, "\n"); got != want {
+		t.Fatalf("created file = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(repository.Root, "media")); err == nil {
+		t.Fatal("an at-rule was mistaken for a file header")
+	}
+}
+
+func TestCompactTakesSeveralEditsToOneFile(t *testing.T) {
+	repository := project(t, map[string]string{
+		"a.ts": "const first = 1;\nconst middle = 2;\nconst last = 3;\n",
+	})
+	err := repository.Apply("@a.ts\n-const first = 1;\n+const first = 10;\n\n-const last = 3;\n+const last = 30;\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, repository, "a.ts")
+	if !strings.Contains(got, "first = 10") || !strings.Contains(got, "last = 30") {
+		t.Fatalf("both edits should have landed: %q", got)
+	}
+	if !strings.Contains(got, "middle = 2") {
+		t.Fatalf("the line between them was lost: %q", got)
+	}
+}
+
+func TestCompactToleratesAContextLineThatLostItsSpace(t *testing.T) {
+	// Models strip trailing and leading whitespace constantly. An
+	// unprefixed line is read as context rather than refused.
+	repository := project(t, map[string]string{
+		"a.ts": "function go() {\n  const x = 1;\n}\n",
+	})
+	err := repository.Apply("@a.ts\nfunction go() {\n-  const x = 1;\n+  const x = 2;\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, repository, "a.ts"); !strings.Contains(got, "const x = 2") {
+		t.Fatalf("a.ts = %q", got)
+	}
+}
+
+func TestCompactRefusesDeleteAndMoveByName(t *testing.T) {
+	repository := project(t, map[string]string{"gone.txt": "x\n"})
+
+	err := repository.Apply("@-gone.txt\n")
+	if err == nil || !strings.Contains(err.Error(), "deletes gone.txt") {
+		t.Fatalf("delete should be refused by name, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(repository.Root, "gone.txt")); statErr != nil {
+		t.Fatal("the file should still be there")
+	}
+
+	err = repository.Apply("@>gone.txt\nelsewhere.txt\n")
+	if err == nil || !strings.Contains(err.Error(), "moves gone.txt") {
+		t.Fatalf("move should be refused by name, got %v", err)
+	}
+}
+
+func TestCompactFailuresCarryTheSameDiagnostics(t *testing.T) {
+	// The whole point of parsing into the existing hunk shape: the format
+	// changes, the reporting does not.
+	repository := project(t, map[string]string{
+		"a.ts": "const board = useState(empty());\n",
+		"b.ts": "const other = 1;\n",
+	})
+	err := repository.Apply("@a.ts\n-const board = useState(() => empty());\n+const board = useState(fresh());\n\n@b.ts\n-const other = 99;\n+const other = 2;\n")
+	if err == nil {
+		t.Fatal("neither edit can be placed")
+	}
+	lines := Explain(err)
+	if lines[0] != "2 edits could not be placed" {
+		t.Fatalf("Explain() led with %q", lines[0])
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "() => empty()") {
+		t.Fatalf("the near miss should still be reported:\n%v", lines)
+	}
+}
+
+func TestIsCompactPatchTellsTheFormatsApart(t *testing.T) {
+	compact := map[string]string{
+		"a plain modification": "@src/app.py\n-a\n+b\n",
+		"a create":             "@+src/new.py\nprint(1)\n",
+		"leading blank lines":  "\n\n@src/app.py\n-a\n+b\n",
+	}
+	for name, patch := range compact {
+		if !isCompactPatch(patch) {
+			t.Errorf("%s should read as compact: %q", name, patch)
+		}
+	}
+	others := map[string]string{
+		"a unified diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+		"a git diff":     "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@\n-a\n+b\n",
+		"an apply_patch": "*** Begin Patch\n*** Update File: x\n-a\n+b\n*** End Patch\n",
+		"a bare hunk":    "@@ -1,3 +1,3 @@\n-a\n+b\n",
+		"nothing at all": "",
+	}
+	for name, patch := range others {
+		if isCompactPatch(patch) {
+			t.Errorf("%s should not read as compact: %q", name, patch)
+		}
+	}
+}
+
+func TestCompactAndUnifiedStillCoexist(t *testing.T) {
+	// A model that reaches for a unified diff keeps working.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\n"})
+	if err := repository.Apply("--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, repository, "a.ts"); !strings.Contains(got, "x = 2") {
+		t.Fatalf("a.ts = %q", got)
+	}
+}
+
+func TestASingleLineEditStillGetsANearMiss(t *testing.T) {
+	// The compact format asks for only enough context to be unique, so
+	// one-line edits are the common case — and they used to be the ones
+	// reported with nothing but "could not find it".
+	repository := project(t, map[string]string{
+		"a.ts": "const board = useState(empty());\nconst other = 1;\n",
+	})
+	err := repository.Apply("@a.ts\n-const board = useState(() => empty());\n+const board = useState(fresh());\n")
+	if err == nil {
+		t.Fatal("that line is not in the file")
+	}
+	lines := Explain(err)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "expected: const board = useState(() => empty());") {
+		t.Fatalf("should say what the edit wanted:\n%s", joined)
+	}
+	if !strings.Contains(joined, "in file:  const board = useState(empty());") {
+		t.Fatalf("should say what is really there:\n%s", joined)
+	}
+}
+
+func TestNoNearMissWhenNothingResembles(t *testing.T) {
+	// Pointing at an unrelated line and calling it a near miss would send
+	// the reader hunting in the wrong place.
+	repository := project(t, map[string]string{"a.ts": "import fs from \"fs\";\n"})
+	err := repository.Apply("@a.ts\n-const completelyDifferent = compute(alpha, beta);\n+const x = 1;\n")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if joined := strings.Join(Explain(err), "\n"); strings.Contains(joined, "in file:") {
+		t.Fatalf("nothing in that file resembles the line:\n%s", joined)
+	}
+}
+
+func TestSimilarityScoresATranscriptionSlip(t *testing.T) {
+	cases := []struct {
+		name    string
+		a, b    string
+		atLeast float64
+		atMost  float64
+	}{
+		{"identical", "const x = 1;", "const x = 1;", 1, 1},
+		{"one word changed mid-line", "server.run(config)", "server.run(config, debug=True)", 0.5, 1},
+		{"nothing in common", "import fs from \"fs\";", "export default function App() {", 0, 0.4},
+		{"both empty", "", "", 1, 1},
+	}
+	for _, testCase := range cases {
+		got := similarity(testCase.a, testCase.b)
+		if got < testCase.atLeast || got > testCase.atMost {
+			t.Errorf("%s: similarity = %.2f, want between %.2f and %.2f", testCase.name, got, testCase.atLeast, testCase.atMost)
+		}
+	}
+}

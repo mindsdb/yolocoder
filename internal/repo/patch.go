@@ -150,6 +150,11 @@ type filePatch struct {
 // parsePatch pulls the per-file hunks out of a unified diff, keeping only
 // what is needed to locate and replace content.
 func parsePatch(patch string) ([]filePatch, error) {
+	// The compact format is its own parser, but it produces the same
+	// per-file hunks, so nothing past this line knows which one was used.
+	if isCompactPatch(patch) {
+		return parseCompact(patch)
+	}
 	var patches []filePatch
 	var current *filePatch
 	var active *hunk
@@ -477,16 +482,76 @@ func nearMiss(lines, block []string) (expected, found string, at int) {
 	}
 	// Require at least half the block to already line up, or this is
 	// pointing at an unrelated part of the file rather than a near miss.
-	if bestStart == -1 || bestScore*2 < len(block) {
-		return "", "", 0
-	}
-	for offset, want := range block {
-		got := lines[bestStart+offset]
-		if got != want {
-			return want, got, bestStart + offset + 1
+	if bestStart != -1 && bestScore*2 >= len(block) {
+		for offset, want := range block {
+			got := lines[bestStart+offset]
+			if got != want {
+				return want, got, bestStart + offset + 1
+			}
 		}
 	}
-	return "", "", 0
+	// A one-line block can never clear the half-match bar above: half of
+	// one line is a whole line, and a whole line matching is the case
+	// that did not happen. One-line edits are the common case in the
+	// compact format, which asks for only enough context to be unique,
+	// so without this the edits likeliest to be written are the ones
+	// reported with the least to go on.
+	return closestLine(lines, block)
+}
+
+// closestLine finds the line in the file most nearly the one the hunk
+// wanted, for when no run of lines aligned well enough to compare
+// position by position.
+func closestLine(lines, block []string) (expected, found string, at int) {
+	want := ""
+	for _, line := range block {
+		if strings.TrimSpace(line) != "" {
+			want = line
+			break
+		}
+	}
+	if want == "" {
+		return "", "", 0
+	}
+	bestIndex, bestScore := -1, 0.0
+	for index, line := range lines {
+		if score := similarity(line, want); score > bestScore {
+			bestIndex, bestScore = index, score
+		}
+	}
+	// Below half matching, this is pointing at an unrelated line and
+	// saying "did you mean" about it would send the reader the wrong way.
+	if bestIndex == -1 || bestScore < 0.5 {
+		return "", "", 0
+	}
+	return want, lines[bestIndex], bestIndex + 1
+}
+
+// similarity scores two lines by how much of them agrees from each end,
+// which is the shape of the mistake worth catching: a line transcribed
+// almost right, differing somewhere in the middle. It is deliberately not
+// a general edit distance — this runs against every line of every file in
+// a patch, and the cases it misses are ones where nothing close exists.
+func similarity(a, b string) float64 {
+	if a == b {
+		return 1
+	}
+	longest := len(a)
+	if len(b) > longest {
+		longest = len(b)
+	}
+	if longest == 0 {
+		return 0
+	}
+	prefix := 0
+	for prefix < len(a) && prefix < len(b) && a[prefix] == b[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(a)-prefix && suffix < len(b)-prefix && a[len(a)-1-suffix] == b[len(b)-1-suffix] {
+		suffix++
+	}
+	return float64(prefix+suffix) / float64(longest)
 }
 
 func findAll(lines, block []string, equal func(string, string) bool) []int {

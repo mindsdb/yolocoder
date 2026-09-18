@@ -257,6 +257,26 @@ func (runner *Runner) recentTurns() ([]Recollection, int) {
 	return runner.earlier[len(runner.earlier)-inlineTurns:], len(runner.earlier) - inlineTurns
 }
 
+// recallTurns bounds what the recall tool hands over. A window rather
+// than everything on record: the point of reaching back is to pick up a
+// thread, and ten turns is far enough to find one while staying small
+// enough that asking for it is cheap. Whatever the session store happens
+// to be holding is not a number this should inherit.
+const recallTurns = 10
+
+// recallable are the turns recall would serve — the ones just before the
+// window already carried inline, newest first in the file's order and
+// capped. Older than that is out of reach, which is deliberate: history
+// that far back is better re-stated than guessed at.
+func (runner *Runner) recallable() []Recollection {
+	_, beyond := runner.recentTurns()
+	older := runner.earlier[:beyond]
+	if len(older) > recallTurns {
+		older = older[len(older)-recallTurns:]
+	}
+	return older
+}
+
 // Run works the message out in one conversation: the model is given the
 // map and the message together and ends in whichever of three ways fits
 // — a direct reply, an answer drawn from files it read, or a diff.
@@ -274,8 +294,7 @@ func (runner *Runner) recentTurns() ([]Recollection, int) {
 func (runner *Runner) Run(ctx context.Context, task string, images []string, history []Recollection, progress Progress) (Outcome, error) {
 	notes, turns := split(history)
 	runner.earlier = turns
-	_, beyond := runner.recentTurns()
-	runner.profile.Recall.Available = beyond
+	runner.profile.Recall.Available = len(runner.recallable())
 
 	progress.Status("Mapping the folder...")
 	mapStarted := time.Now()
@@ -682,11 +701,11 @@ func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollectio
 		opening.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
 	}
 	fmt.Fprintf(&opening, "REPOSITORY MAP:\n%s\n", repoMap)
-	recent, beyond := runner.recentTurns()
+	recent, _ := runner.recentTurns()
 	if len(recent) > 0 {
 		opening.WriteString("EARLIER IN THIS FOLDER:\n" + renderHistory(recent) + "\n")
 	}
-	if beyond > 0 && runner.recall {
+	if beyond := len(runner.recallable()); beyond > 0 && runner.recall {
 		// Said out loud because the model cannot otherwise know there is
 		// anything behind what it was shown, and the tool would sit
 		// unused however far back the message actually reaches.
@@ -833,15 +852,14 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 // reason readFiles refuses to resend a file already shown: every copy
 // lands in a transcript that is resent in full on every following round.
 func (runner *Runner) recallEarlier() string {
-	_, beyond := runner.recentTurns()
-	if beyond == 0 {
+	older := runner.recallable()
+	if len(older) == 0 {
 		return "Nothing came before the turns you were already shown."
 	}
 	if runner.told {
 		return "(already recalled above)"
 	}
 	runner.told = true
-	older := runner.earlier[:beyond]
 	rendered := renderHistory(older)
 	runner.profile.Recall.Served = len(older)
 	runner.profile.Recall.Bytes = len(rendered)
@@ -901,9 +919,6 @@ func renderHistory(history []Recollection) string {
 		fmt.Fprintf(&text, "%d. asked: %s", turn.Number, strings.TrimSpace(turn.Message))
 		if turn.Summary != "" {
 			fmt.Fprintf(&text, "\n   result: %s", turn.Summary)
-		}
-		if len(turn.Files) > 0 {
-			fmt.Fprintf(&text, " (%s)", strings.Join(turn.Files, ", "))
 		}
 		text.WriteString("\n")
 	}

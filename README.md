@@ -278,10 +278,12 @@ be its own model call, shown every recorded turn to pick out a few; that
 cost a round trip on the coding model every turn to narrow a few kilobytes.
 
 Anything older than those three is not sent at all. `/recall` in a session
-turns on a `recall` tool that reads them on request, for a message that
-reaches back further than the turns it was shown. It's off by default: an
-unused tool is still a definition on every request, and the recent turns
-answer nearly everything on their own.
+turns on a `recall` tool that reads the ten turns below them on request,
+for a message that reaches back further than what it was shown. It's off
+by default: an unused tool is still a definition on every request, and the
+recent turns answer nearly everything on their own. A turn in that history
+is what was asked and what came of it, nothing else — around 280 bytes
+each on a real folder.
 
 The model never receives a shell tool. Local code exposes only bounded
 `read_files`, `search` and `apply_diff`, plus `recall` when it's switched

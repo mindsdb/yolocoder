@@ -29,7 +29,14 @@ import (
 // fiction.
 const (
 	MaxTurns = 20
-	MaxBytes = 8 << 10
+	// MaxBytes was 8 KiB, which quietly trimmed the window from the front
+	// long before MaxTurns did: on a real folder twenty turns render to
+	// around 16 KiB, so half of what the caller asked for never arrived.
+	// The agent now decides for itself how much history to carry and how
+	// much to hold back behind recall, and it cannot decide that about
+	// turns it was never given. This is a backstop against one runaway
+	// turn, not the budget.
+	MaxBytes = 64 << 10
 	MaxAge   = 48 * time.Hour
 )
 

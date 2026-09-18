@@ -247,3 +247,63 @@ func TestSuppliedNotesAreAlwaysCarried(t *testing.T) {
 		t.Fatalf("supplied notes must always be carried:\n%s", opening)
 	}
 }
+
+// longHistory is more turns than either window will take.
+func longHistory(count int) []Recollection {
+	var turns []Recollection
+	for index := 1; index <= count; index++ {
+		turns = append(turns, Recollection{
+			Number:  index,
+			Message: fmt.Sprintf("ask number %d", index),
+			Summary: fmt.Sprintf("did number %d", index),
+			Files:   []string{"App.tsx"},
+		})
+	}
+	return turns
+}
+
+func TestRecallServesAWindowRatherThanEverything(t *testing.T) {
+	runner := NewRunner(&Client{}, &repo.Repository{Root: t.TempDir()})
+	runner.earlier = longHistory(20)
+
+	served := runner.recallEarlier()
+	// Turns 18-20 are carried inline, so recall covers the ten below
+	// them: 8 through 17.
+	for _, want := range []int{8, 17} {
+		if !strings.Contains(served, fmt.Sprintf("ask number %d", want)) {
+			t.Fatalf("turn %d should be within reach:\n%s", want, served)
+		}
+	}
+	if strings.Contains(served, "ask number 7") {
+		t.Fatalf("recall reached further back than its window:\n%s", served)
+	}
+	if strings.Contains(served, "ask number 18") {
+		t.Fatalf("recall resent a turn already carried inline:\n%s", served)
+	}
+	if runner.profile.Recall.Served != recallTurns {
+		t.Fatalf("Recall.Served = %d, want %d", runner.profile.Recall.Served, recallTurns)
+	}
+}
+
+func TestAvailableCountsWhatRecallWouldActuallyGive(t *testing.T) {
+	// Not every turn on record: the offer in the opening message and the
+	// number in the session log both have to mean the same thing.
+	_, outcome := runOnce(t, longHistory(20), true, "keep going")
+	if outcome.Profile.Recall.Available != recallTurns {
+		t.Fatalf("Recall.Available = %d, want the %d recall would serve", outcome.Profile.Recall.Available, recallTurns)
+	}
+}
+
+func TestHistoryIsJustWhatWasAskedAndWhatCameOfIt(t *testing.T) {
+	rendered := renderHistory([]Recollection{
+		{Number: 4, Message: "add portuguese", Summary: "Added pt", Files: []string{"App.tsx", "index.css"}},
+	})
+	if !strings.Contains(rendered, "add portuguese") || !strings.Contains(rendered, "Added pt") {
+		t.Fatalf("a turn is the request and the answer:\n%s", rendered)
+	}
+	// The files a turn touched are a fact about the repository, and the
+	// map and the files themselves say it better than a stale note would.
+	if strings.Contains(rendered, "App.tsx") {
+		t.Fatalf("history should carry no file list:\n%s", rendered)
+	}
+}

@@ -18,6 +18,8 @@
   --term-tx: #d3dbe2;
   --term-dim: #7d8894;
   --term-ac: #3ddc84;
+  /* The green that carries on white, where --term-ac is too light. */
+  --prompt: #0a7d3b;
 }
 html, body { height: 100%; margin: 0; }
 body {
@@ -378,12 +380,14 @@ main {
   align-items: flex-start;
   gap: 8px;
   padding: 9px 10px;
-  background: var(--term-bg);
-  border-top: 1px solid var(--term-line);
+  background: #fff;
+  border-top: 1px solid var(--line);
 }
 #chat-prompt {
   flex: 0 0 auto;
-  color: var(--term-ac);
+  /* The terminal green reads on the dark panes; against white it needs
+     the darker one the focus ring already used. */
+  color: var(--prompt);
   font: 600 13px/1.5 var(--mono);
   padding-top: 7px;
   user-select: none;
@@ -396,11 +400,11 @@ main {
   border-radius: 0;
   padding: 7px 0;
   font: 13px/1.5 var(--mono);
-  color: var(--term-tx);
+  color: var(--ink);
   background: transparent;
-  caret-color: var(--term-ac);
+  caret-color: var(--prompt);
 }
-#chat-input::placeholder { color: var(--term-dim); }
+#chat-input::placeholder { color: var(--muted); }
 #chat-input:focus {
   outline: none;
   background: transparent;
@@ -409,19 +413,19 @@ main {
 #chat-form button {
   flex: 0 0 auto;
   align-self: stretch;
-  border: 1px solid var(--term-ac);
+  border: 1px solid var(--prompt);
   border-radius: 0;
   background: transparent;
-  color: var(--term-ac);
+  color: var(--prompt);
   padding: 0 14px;
   cursor: pointer;
   font: 600 11px var(--mono);
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
-#chat-form button:hover { background: var(--term-ac); color: var(--term-bg); }
+#chat-form button:hover { background: var(--prompt); color: #fff; }
 #chat-form button:disabled { opacity: 0.4; cursor: default; }
-#chat-form button:disabled:hover { background: transparent; color: var(--term-ac); }
+#chat-form button:disabled:hover { background: transparent; color: var(--prompt); }
 
 #input-footer {
   flex: 0 0 auto;

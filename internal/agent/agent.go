@@ -359,6 +359,19 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 		if len(calls) == 0 {
 			reply, err := response.text()
 			if err != nil {
+				// A reply cut off by the output cap decided nothing — the
+				// model ran out of room before it finished, so there is no
+				// finished text and no tool call to act on. Failing the
+				// turn over it ("LLM response contained no output text")
+				// is what a real trace showed: a read answered fine, then
+				// an incomplete reply with empty text ended everything.
+				// Ask again, shorter, in the same conversation instead.
+				if response.cutOff() {
+					progress.Log("  reply was cut off, asking again...")
+					session.report("Your last reply was cut off before it finished (you ran out of output room). " +
+						"Continue what you were doing, keeping this reply short: finish the tool call or message you started without repeating what is already above.")
+					continue
+				}
 				return Outcome{}, err
 			}
 			// The model believes it is finished. If it changed anything,

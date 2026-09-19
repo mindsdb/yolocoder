@@ -56,6 +56,13 @@ func finishes(text string) string {
 		strconv.Quote(text))
 }
 
+// cutOff is a reply the provider stopped before finishing: status
+// incomplete, reason max_output_tokens, and no usable text — the shape a
+// real trace showed ending the turn with "no output text".
+func cutOff() string {
+	return `{"id":"r","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":""}]}]}`
+}
+
 // scripted answers each request in turn with the replies given, and
 // records every request body it saw.
 func scripted(t *testing.T, replies ...string) (*httptest.Server, *[]map[string]any) {
@@ -624,5 +631,37 @@ func TestALongAsideIsCappedBeforeItIsCarried(t *testing.T) {
 		if len(line) > 140 {
 			t.Fatalf("a trail line ran to %d characters", len(line))
 		}
+	}
+}
+
+func TestACutOffReplyAsksAgainInsteadOfFailing(t *testing.T) {
+	// A real trace showed this: a read answered fine, then an incomplete
+	// reply with empty text ended the whole turn with "no output text".
+	// A reply cut off by the output cap decided nothing, so the turn asks
+	// again, shorter, in the same conversation.
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	server, seen := scripted(t,
+		reads("c1", "a.ts"),
+		cutOff(),
+		finishes("Done."),
+	)
+	defer server.Close()
+
+	outcome, progress, err := run(t, repository, server, "read it")
+	if err != nil {
+		t.Fatalf("a cut-off reply should retry, not fail: %v", err)
+	}
+	if outcome.Reply != "Done." {
+		t.Fatalf("reply = %q, want the finish after the retry", outcome.Reply)
+	}
+	if len(*seen) != 3 {
+		t.Fatalf("requests = %d, want read, cut-off, finish", len(*seen))
+	}
+	encoded, _ := json.Marshal((*seen)[2]["input"])
+	if !strings.Contains(string(encoded), "cut off") {
+		t.Fatalf("the retry should say the reply was cut off:\n%s", encoded)
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "cut off, asking again") {
+		t.Fatalf("the trail should show the retry:\n%s", trail)
 	}
 }

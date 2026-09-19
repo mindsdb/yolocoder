@@ -81,6 +81,11 @@ type chatEnvelope struct {
 
 type chatChoice struct {
 	Message chatMessage `json:"message"`
+	// FinishReason is why the model stopped. "length" means it ran out
+	// of output room before finishing — the chat dialect's version of
+	// the Responses API's incomplete_details.reason "max_output_tokens",
+	// mapped into that same shape by fromChat.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // chatUsage is /v1/chat/completions' own token accounting shape,
@@ -291,6 +296,12 @@ func fromChat(envelope chatEnvelope) responseEnvelope {
 		converted.Usage.InputTokensDetails.CachedTokens = envelope.Usage.PromptTokensDetails.CachedTokens
 	}
 	for _, choice := range envelope.Choices {
+		// "length" is this dialect's way of saying the model ran out of
+		// output room — the same condition as incomplete_details.reason
+		// "max_output_tokens", mapped here so the loop reads one shape.
+		if choice.FinishReason == "length" {
+			converted.IncompleteDetails = &incompleteDetails{Reason: "max_output_tokens"}
+		}
 		for _, call := range choice.Message.ToolCalls {
 			converted.Output = append(converted.Output, responseItem{
 				Type:      "function_call",

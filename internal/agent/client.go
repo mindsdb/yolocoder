@@ -63,9 +63,21 @@ type schemaFormat struct {
 
 type responseEnvelope struct {
 	ID     string         `json:"id"`
+	Status string         `json:"status,omitempty"`
 	Output []responseItem `json:"output"`
 	Error  *apiError      `json:"error,omitempty"`
 	Usage  *responseUsage `json:"usage,omitempty"`
+	// IncompleteDetails is why a response stopped before finishing. The
+	// case that matters here is the model running out of output room
+	// (reason "max_output_tokens" on the Responses API, finish_reason
+	// "length" on chat completions, mapped into this same shape by
+	// fromChat): the reply carries no usable text, and asking again,
+	// shorter, can still finish the turn.
+	IncompleteDetails *incompleteDetails `json:"incomplete_details,omitempty"`
+}
+
+type incompleteDetails struct {
+	Reason string `json:"reason"`
 }
 
 // responseUsage is the Responses API's own token accounting shape.
@@ -303,6 +315,17 @@ func (response responseEnvelope) calls() []responseItem {
 	return calls
 }
 
+// cutOff reports whether the model ran out of output room before it
+// finished, rather than deciding anything. The reply then carries no
+// usable text — an empty message, or none at all — and the turn should
+// ask again, shorter, instead of failing over it.
+func (response responseEnvelope) cutOff() bool {
+	if response.IncompleteDetails == nil {
+		return false
+	}
+	return response.IncompleteDetails.Reason == "max_output_tokens"
+}
+
 func (response responseEnvelope) text() (string, error) {
 	for _, item := range response.Output {
 		if item.Type != "message" {
@@ -313,6 +336,9 @@ func (response responseEnvelope) text() (string, error) {
 				return content.Text, nil
 			}
 		}
+	}
+	if response.cutOff() {
+		return "", fmt.Errorf("LLM reply was cut off: the model ran out of output room before it finished")
 	}
 	return "", fmt.Errorf("LLM response contained no output text")
 }

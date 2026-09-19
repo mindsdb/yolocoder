@@ -58,9 +58,18 @@ const phaseLabels = { build: "Building...", load: "Loading..." };
 
 function setBusy(isBusy) {
   busy = isBusy;
-  chatSend.disabled = busy;
+  updateSendState();
   progressEl.hidden = !isBusy;
 }
+
+// The send button is live only when there is something to send. It is
+// the same condition the submit handler already enforces by returning
+// early — stating it on the button means an empty press is not offered
+// in the first place, rather than silently doing nothing.
+function updateSendState() {
+  chatSend.disabled = busy || (chatInput.value.trim() === "" && pendingImages.length === 0);
+}
+chatInput.addEventListener("input", updateSendState);
 
 // There's no visible process-state pill: the dev server starts and
 // recovers on its own, so ordinary "starting"/"running" states aren't
@@ -228,6 +237,9 @@ function renderPendingImages() {
     chip.append(image, remove);
     pendingImagesEl.appendChild(chip);
   });
+  // An image on its own is enough to send, so the button follows the
+  // queue as well as the text.
+  updateSendState();
 }
 
 function firstLine(text) {
@@ -500,3 +512,8 @@ window.addEventListener("message", (event) => {
     body: JSON.stringify(data),
   });
 });
+
+// The composer is where every session starts, so it starts focused, with
+// the send button already reflecting an empty box.
+updateSendState();
+chatInput.focus();

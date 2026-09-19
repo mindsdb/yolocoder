@@ -24,7 +24,9 @@
     <form id="chat-form">
       <span id="chat-prompt" aria-hidden="true">&#10095;</span>
       <textarea id="chat-input" placeholder="ask for a change &middot; paste a screenshot to show it" rows="2"></textarea>
-      <button id="chat-send" type="submit">send &#9166;</button>
+      <button id="chat-send" type="submit" title="Send" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+      </button>
     </form>
     <div id="input-footer">
       <select id="model-select" title="Model"></select>

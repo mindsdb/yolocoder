@@ -10,6 +10,36 @@ const btnExpand = document.getElementById("btn-expand");
 const btnRecover = document.getElementById("btn-recover");
 const modelSelect = document.getElementById("model-select");
 const pendingImagesEl = document.getElementById("pending-images");
+const progressEl = document.getElementById("progress");
+const btnLatest = document.getElementById("btn-latest");
+
+// Sticky-scroll: the transcript is the only scroll container, so new output
+// should only pull the view down when the viewer is already at the bottom.
+// If they've scrolled up to read, we leave them there and offer a "latest"
+// pill instead of yanking them away mid-read.
+let pinned = true;
+const PIN_THRESHOLD = 64;
+
+function updateLatestBtn() {
+  btnLatest.hidden = pinned;
+}
+
+function scrollToLatest(force) {
+  if (pinned || force) {
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+  updateLatestBtn();
+}
+
+chatLog.addEventListener("scroll", () => {
+  pinned = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= PIN_THRESHOLD;
+  updateLatestBtn();
+});
+
+btnLatest.addEventListener("click", () => {
+  pinned = true;
+  scrollToLatest(true);
+});
 
 // Each turn (a user message or an auto-fix) gets its own collapsible
 // "Agent activity" block, open and live while it runs, collapsed once
@@ -27,6 +57,7 @@ const phaseLabels = { build: "Building...", load: "Loading..." };
 function setBusy(isBusy) {
   busy = isBusy;
   chatSend.disabled = busy;
+  progressEl.hidden = !isBusy;
 }
 
 // There's no visible process-state pill: the dev server starts and
@@ -93,7 +124,12 @@ function addMessage(role, text, usage, images, profile) {
   } else {
     chatLog.appendChild(wrapper);
   }
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (role === "user" || role === "auto-fix") {
+    pinned = true;
+    scrollToLatest(true);
+  } else {
+    scrollToLatest();
+  }
   return wrapper;
 }
 
@@ -193,13 +229,24 @@ function openActivity() {
   details.className = "activity running";
   details.open = true;
   const summary = document.createElement("summary");
-  summary.textContent = phaseLabels[currentPhase] || "Agent activity";
+  const label = document.createElement("span");
+  label.className = "sum-label";
+  label.textContent = phaseLabels[currentPhase] || "Agent activity";
+  const dot = document.createElement("span");
+  dot.className = "run-dot";
+  summary.append(label, dot);
   const log = document.createElement("div");
   log.className = "activity-log";
   details.append(summary, log);
   chatLog.appendChild(details);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  scrollToLatest();
   currentActivity = details;
+}
+
+function setSummaryLabel(details, text) {
+  const label = details.querySelector(".sum-label");
+  if (label) label.textContent = text;
+  else details.querySelector("summary").textContent = text;
 }
 
 // closeActivity collapses the current turn's activity block once its
@@ -208,16 +255,46 @@ function openActivity() {
 function closeActivity() {
   if (!currentActivity) return;
   currentActivity.classList.remove("running");
-  currentActivity.querySelector("summary").textContent = "Agent activity";
+  const dot = currentActivity.querySelector(".run-dot");
+  if (dot) dot.remove();
+  setSummaryLabel(currentActivity, "Agent activity");
   currentActivity.open = false;
   currentActivity = null;
+  scrollToLatest();
 }
 
-function addActivityLine(text) {
+// Status lines ("… Mapping the folder...") become step headers with a
+// green › mark; indented follow-ups render dimmer as continuations; raw
+// server output stays dim and unmarked. One scroll container for the
+// whole transcript — the log never scrolls on its own, so the wheel
+// can't get trapped inside a finished turn.
+function addActivityLine(text, kind) {
   if (!currentActivity) return;
   const log = currentActivity.querySelector(".activity-log");
-  log.textContent += text + "\n";
-  log.scrollTop = log.scrollHeight;
+  const line = document.createElement("div");
+  if (kind === "step") {
+    line.className = "alog-line";
+    const mark = document.createElement("span");
+    mark.className = "alog-mark";
+    mark.textContent = "›";
+    const body = document.createElement("span");
+    body.textContent = text;
+    line.append(mark, body);
+  } else if (kind === "cont") {
+    line.className = "alog-line";
+    const mark = document.createElement("span");
+    mark.className = "alog-mark";
+    mark.textContent = "·";
+    const body = document.createElement("span");
+    body.className = "alog-cont";
+    body.textContent = text;
+    line.append(mark, body);
+  } else {
+    line.className = "alog-raw";
+    line.textContent = text;
+  }
+  log.appendChild(line);
+  scrollToLatest();
 }
 
 function reloadApp() {
@@ -324,12 +401,12 @@ events.addEventListener("chat", (event) => {
 events.addEventListener("phase", (event) => {
   currentPhase = JSON.parse(event.data).phase;
   if (currentActivity) {
-    currentActivity.querySelector("summary").textContent = phaseLabels[currentPhase] || "Agent activity";
+    setSummaryLabel(currentActivity, phaseLabels[currentPhase] || "Agent activity");
   }
 });
 events.addEventListener("status", (event) => {
   const data = JSON.parse(event.data);
-  if (data.text) addActivityLine("… " + data.text);
+  if (data.text) addActivityLine(data.text.trim(), "step");
 });
 events.addEventListener("busy", (event) => {
   const isBusy = JSON.parse(event.data).busy;
@@ -342,10 +419,13 @@ events.addEventListener("busy", (event) => {
   if (!isBusy) closeActivity();
 });
 events.addEventListener("log", (event) => {
-  addActivityLine(JSON.parse(event.data).text);
+  const text = JSON.parse(event.data).text || "";
+  // Indented follow-ups ("  mapped 20 files · <1ms") render as dim
+  // continuations under their step; anything unindented is raw output.
+  addActivityLine(text.trim(), /^\s/.test(text) ? "cont" : "raw");
 });
 events.addEventListener("serverlog", (event) => {
-  addActivityLine(JSON.parse(event.data).text);
+  addActivityLine((JSON.parse(event.data).text || "").trim(), "raw");
 });
 // Fired after any applied change, whatever's running the dev server on
 // its own (Vite HMR, tsx watch) can't be relied on to have visibly

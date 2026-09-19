@@ -11,13 +11,15 @@
   <section id="sidebar">
     <header id="chat-header">
       <div id="brand-block">
-        <span id="brand">[^_^] YoloCoder</span>
+        <span id="brand"><span class="brand-face">[^_^]</span> YoloCoder</span>
         <div id="folder-indicator"></div>
       </div>
       <button id="btn-recover" type="button" hidden>Restart</button>
       <button id="btn-collapse" type="button" title="Collapse chat">&laquo;</button>
     </header>
+    <div id="progress" hidden></div>
     <div id="chat-log"></div>
+    <button id="btn-latest" type="button" hidden>&#9660; latest</button>
     <div id="pending-images" hidden></div>
     <form id="chat-form">
       <textarea id="chat-input" placeholder="Ask for a change... (paste a screenshot to show it)" rows="2"></textarea>

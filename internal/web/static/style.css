@@ -5,24 +5,57 @@
    win unconditionally, for every element, rather than fixing it one ID
    at a time. */
 [hidden] { display: none !important; }
+
+:root {
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --ink: #16181d;
+  --muted: #8a8f98;
+  --faint: #b9bec7;
+  --line: #e8e8e8;
+  --term-bg: #0d1117;
+  --term-line: #232d38;
+  --term-tx: #d3dbe2;
+  --term-dim: #7d8894;
+  --term-ac: #3ddc84;
+}
 html, body { height: 100%; margin: 0; }
 body {
-  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #1a1a1a;
+  font: 14px/1.5 var(--sans);
+  color: var(--ink);
   background: #fff;
   display: flex;
   flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
+/* Clamp the whole layout to the viewport so the page itself never grows:
+   only #chat-log scrolls. Without overflow:hidden here, tall chat content
+   can push main/body taller than the viewport and the inner scroll stops
+   working ("can't scroll down after a few messages"). */
+main {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
 
 #sidebar {
   width: 380px;
+  max-width: 100vw;
   flex: 0 0 380px;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #e3e3e3;
+  border-right: 1px solid var(--line);
   min-height: 0;
+  min-width: 0;
+  position: relative;
+  background: #fff;
 }
 #sidebar.collapsed { display: none; }
 
@@ -31,7 +64,7 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid #e3e3e3;
+  border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 #brand-block {
@@ -41,12 +74,13 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   min-width: 0;
   margin-right: auto;
 }
-#brand { font-weight: 600; white-space: nowrap; }
+#brand { font: 600 14px var(--mono); letter-spacing: -0.01em; white-space: nowrap; }
+#brand .brand-face { color: #0a7d3b; }
 #folder-indicator {
-  border-top: 1px solid #eee;
+  border-top: 1px solid #f0f0f0;
   padding-top: 3px;
-  font-size: 11px;
-  color: #999;
+  font: 11px var(--mono);
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -84,49 +118,123 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   border-radius: 6px;
   padding: 5px 10px;
   cursor: pointer;
-  font: inherit;
+  font: 600 13px var(--mono);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
 }
 #btn-expand:hover { background: #f0f0f0; }
 
-#chat-log {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* Thin CLI-style progress hairline, visible while a turn is running. */
+#progress {
+  flex: 0 0 auto;
+  height: 2px;
+  background: #f1f1f1;
+  overflow: hidden;
+}
+#progress::after {
+  content: "";
+  display: block;
+  height: 100%;
+  width: 32%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #0a7d3b, var(--term-ac));
+  animation: sweep 1.1s ease-in-out infinite;
+}
+@keyframes sweep {
+  0% { margin-left: -32%; }
+  100% { margin-left: 100%; }
 }
 
+/* The single scroll container for the whole transcript. min-height:0 lets
+   it shrink inside the column flex layout instead of pushing the composer
+   off-screen; overscroll containment keeps wheel gestures here instead of
+   chaining to the page. */
+#chat-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#chat-log::-webkit-scrollbar { width: 8px; }
+#chat-log::-webkit-scrollbar-thumb { background: #ddd; border-radius: 8px; }
+#chat-log::-webkit-scrollbar-track { background: transparent; }
+
+/* Floating "back to latest" pill: appears only when new output lands while
+   the viewer has scrolled up, so live turns never yank the scroll away. */
+#btn-latest {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 118px;
+  z-index: 2;
+  border: 1px solid #2a2f36;
+  background: #15171c;
+  color: #fff;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font: 11px var(--mono);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  white-space: nowrap;
+}
+#btn-latest:hover { background: #23272e; }
+
 .msg {
-  padding: 8px 10px;
-  border-radius: 8px;
+  padding: 9px 12px;
+  border-radius: 12px;
   max-width: 92%;
   white-space: pre-wrap;
   word-break: break-word;
+  line-height: 1.55;
 }
-.msg-user { align-self: flex-end; background: #1a1a1a; color: #fff; }
-.msg-assistant { align-self: flex-start; background: #f1f1f1; }
-.msg-system { align-self: stretch; background: #fff7e0; color: #6b5300; font-size: 13px; }
-.msg-auto-fix { align-self: stretch; background: #fde8e8; color: #7a1f1f; font-size: 13px; }
+/* The user's turn reads as the typed command... */
+.msg-user {
+  align-self: flex-end;
+  background: #15171c;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+/* ...and the agent's reply reads as plain transcript output, not another
+   bubble — that's what makes it feel like a terminal, not a chat app. */
+.msg-assistant {
+  align-self: stretch;
+  max-width: 100%;
+  background: transparent;
+  padding: 4px 2px;
+}
+.msg-system,
+.msg-auto-fix {
+  align-self: stretch;
+  max-width: 100%;
+  font: 12px var(--mono);
+  border-radius: 8px;
+}
+.msg-system { background: #fff7e0; color: #6b5300; }
+.msg-auto-fix { background: #fde8e8; color: #7a1f1f; }
 
-/* Groups an assistant bubble with its usage footer into one tight
-   column, so the footer reads as part of that reply rather than as
-   another line in the conversation with #chat-log's own full gap above
-   and below it. */
+/* Groups an assistant reply with its usage footer into one tight column,
+   so the footer reads as part of that reply rather than as another line
+   in the conversation. Stretched full-width to match the plain-text
+   assistant style above. */
 .msg-group {
   display: flex;
   flex-direction: column;
-  align-self: flex-start;
+  align-self: stretch;
+  max-width: 100%;
   gap: 3px;
-  max-width: 92%;
 }
 .msg-group .msg {
   max-width: 100%;
 }
 .usage-note {
-  font-size: 10px;
-  color: #bbb;
+  font: 10.5px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
   padding: 0 2px;
 }
 
@@ -136,57 +244,81 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 }
 .msg details pre {
   margin: 6px 0 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font: 12px var(--mono);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* Each turn's own activity/log trail: open (and live) while it runs,
-   collapsed once the reply lands — a standing global console is gone in
-   favor of this. */
+/* Each turn's own activity trail: a little terminal card, open (and live)
+   while it runs, collapsed once the reply lands. The log itself never
+   scrolls on its own — one scroll container for the transcript means no
+   nested scroll traps fighting the wheel. */
 .activity {
   align-self: stretch;
-  border: 1px solid #eee;
-  border-radius: 8px;
-  font-size: 12px;
-  color: #666;
+  border: 1px solid var(--term-line);
+  border-radius: 10px;
+  background: var(--term-bg);
+  color: var(--term-tx);
+  font: 12px/1.65 var(--mono);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
 }
 .activity summary {
   cursor: pointer;
-  padding: 6px 10px;
+  padding: 7px 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   list-style: none;
+  font-size: 10.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--term-dim);
 }
 .activity summary::-webkit-details-marker { display: none; }
 .activity summary::before {
   content: "▸";
   font-size: 10px;
-  color: #999;
+  color: var(--term-dim);
 }
 .activity[open] summary::before { content: "▾"; }
-.activity.running summary::after {
-  content: "";
-  width: 10px;
-  height: 10px;
-  margin-left: 2px;
+.activity summary .run-dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  border: 2px solid #d6d6d6;
-  border-top-color: #888;
-  animation: spin 0.7s linear infinite;
+  background: var(--term-ac);
+  flex: 0 0 auto;
+  animation: pulse 1.2s ease-in-out infinite;
 }
-@keyframes spin {
-  to { transform: rotate(360deg); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
 }
 .activity-log {
-  padding: 0 10px 8px 24px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 2px 12px 10px 26px;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
-  overflow-y: auto;
+}
+.alog-line { display: flex; gap: 7px; }
+.alog-mark { color: var(--term-ac); flex: 0 0 auto; }
+.alog-cont { color: var(--term-dim); padding-left: 15px; display: block; }
+.alog-raw { color: var(--term-dim); }
+/* The square block cursor: blinks at the end of the live log, and in the
+   header while running, so it's always obvious where progress is. */
+.activity.running .activity-log::after {
+  content: "▊";
+  color: var(--term-ac);
+  animation: blink 1s steps(1) infinite;
+}
+.activity.running summary::after {
+  content: "▊";
+  color: var(--term-ac);
+  margin-left: auto;
+  animation: blink 1s steps(1) infinite;
+}
+@keyframes blink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
 }
 
 /* Thumbnails for screenshots pasted into the composer, shown above the
@@ -242,25 +374,34 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   display: flex;
   gap: 8px;
   padding: 10px;
-  border-top: 1px solid #e3e3e3;
+  border-top: 1px solid var(--line);
 }
 #chat-input {
   flex: 1;
+  min-width: 0;
   resize: none;
   border: 1px solid #d6d6d6;
-  border-radius: 6px;
-  padding: 8px;
+  border-radius: 10px;
+  padding: 9px 10px;
   font: inherit;
+  background: #fafafa;
+}
+#chat-input:focus {
+  outline: none;
+  border-color: #0a7d3b;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(10, 125, 59, 0.12);
 }
 #chat-form button {
   border: none;
-  background: #1a1a1a;
+  background: #15171c;
   color: #fff;
-  border-radius: 6px;
-  padding: 0 16px;
+  border-radius: 10px;
+  padding: 0 18px;
   cursor: pointer;
-  font: inherit;
+  font: 600 13px var(--mono);
 }
+#chat-form button:hover { background: #262b33; }
 #chat-form button:disabled { opacity: 0.5; cursor: default; }
 
 #input-footer {
@@ -274,18 +415,30 @@ main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 #model-select {
   border: none;
   background: transparent;
-  color: #999;
-  font: inherit;
-  font-size: 11px;
+  color: var(--muted);
+  font: 11px var(--mono);
   max-width: 200px;
   cursor: pointer;
 }
 #model-select:disabled { cursor: default; opacity: 0.6; }
 #composer-hint {
-  color: #bbb;
-  font-size: 11px;
+  color: var(--faint);
+  font: 11px var(--mono);
   white-space: nowrap;
 }
 
-#preview { flex: 1 1 auto; min-width: 0; }
-#app-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+#preview { flex: 1 1 auto; min-width: 0; min-height: 0; }
+#app-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+
+@media (max-width: 760px) {
+  #sidebar { flex-basis: 100%; width: 100%; border-right: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #progress::after,
+  .activity summary .run-dot,
+  .activity.running .activity-log::after,
+  .activity.running summary::after {
+    animation: none;
+  }
+}

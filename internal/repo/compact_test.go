@@ -651,3 +651,36 @@ func TestEditsUnderTheWrongHeaderSayWhereTheyBelong(t *testing.T) {
 		t.Fatalf("App.tsx = %q", got)
 	}
 }
+
+func TestCreatedFileStripsDiffPrefixesAndTrailer(t *testing.T) {
+	// Verbatim shape from a real run: the model created doom.ts with every
+	// line diff-prefixed ("+export ...") and closed with "*** End Patch".
+	// Both were written into the file literally, poisoning it so every
+	// later repair burned the turn's edit budget scrubbing markers back
+	// out instead of making progress.
+	repository := project(t, map[string]string{"keep.txt": "x\n"})
+	err := repository.Apply("@+game/doom.ts\n" +
+		"+export type TetrominoId = \"i\" | \"o\";\n" +
+		"+export const VIEW_W = 480;\n" +
+		"*** End Patch\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "game/doom.ts"), "export type TetrominoId = \"i\" | \"o\";\nexport const VIEW_W = 480;"; got != want {
+		t.Fatalf("created file = %q, want %q", got, want)
+	}
+}
+
+func TestCreatedFileKeepsMixedPlusLinesAndBareStars(t *testing.T) {
+	// The stripping above only fires when every non-blank line carries the
+	// prefix, and only the wrapper lines count as trailers. A markdown file
+	// with some "+" bullets and a "***" rule is real content, not markers.
+	repository := project(t, map[string]string{"keep.txt": "x\n"})
+	err := repository.Apply("@+notes.md\n# Title\n\n+ a bullet\n\n***\n\ntext\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "notes.md"), "# Title\n\n+ a bullet\n\n***\n\ntext"; got != want {
+		t.Fatalf("created file = %q, want %q", got, want)
+	}
+}

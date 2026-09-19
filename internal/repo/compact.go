@@ -114,6 +114,51 @@ func isHunkSeparator(line string) bool {
 	return strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "***")
 }
 
+// isPatchTrailer is a borrowed-format wrapper line that must never become
+// file content. A model that closes a created file with "*** End Patch"
+// (apply_patch's shape) would otherwise have that marker written into the
+// file literally — traced from a real run where it did, poisoning the file
+// so every later repair burned the turn's edit budget scrubbing it back
+// out. Only the wrapper lines count here, not a bare "***": that is a
+// markdown horizontal rule a created file could genuinely contain, and in
+// modify hunks it is already a separator via isHunkSeparator.
+func isPatchTrailer(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "*** Begin Patch") ||
+		strings.HasPrefix(trimmed, "*** End Patch")
+}
+
+// stripUniformPlus undoes diff-style content inside a created file. A model
+// that writes a create block with every line prefixed ("+export type ...")
+// means diff lines, not literal plus signs — literal content where every
+// non-blank line starts with "+" is a file that is itself a diff, which has
+// never happened. Mixed content is left alone: a markdown file with some
+// "+" bullets is real content, not a missed prefix.
+func stripUniformPlus(content []string) []string {
+	uniform := false
+	for _, line := range content {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "+") {
+			return content
+		}
+		uniform = true
+	}
+	if !uniform {
+		return content
+	}
+	stripped := make([]string, len(content))
+	for index, line := range content {
+		if strings.HasPrefix(line, "+") {
+			stripped[index] = line[1:]
+			continue
+		}
+		stripped[index] = line
+	}
+	return stripped
+}
+
 // parseCompact turns a compact patch into the same per-file hunks the
 // unified-diff parser produces, so everything downstream — locate, the
 // three-tier matching, nearMiss, PatchError — is untouched by which
@@ -166,12 +211,18 @@ func parseCompact(patch string) ([]filePatch, error) {
 				// Blank lines are content here, not separators: there is
 				// only ever one edit per created file, so there is
 				// nothing for a blank line to separate.
+				//
+				// Borrowed-format trailers are not content, though. A
+				// model that closes with "*** End Patch" would otherwise
+				// have that marker written into the file — traced from a
+				// real run where it did, and every later repair then
+				// burned the turn's edit budget scrubbing it back out.
 				var content []string
-				for index+1 < len(lines) && compactHeader(lines[index+1]) == nil {
+				for index+1 < len(lines) && compactHeader(lines[index+1]) == nil && !isPatchTrailer(lines[index+1]) {
 					index++
 					content = append(content, strings.TrimRight(lines[index], "\r"))
 				}
-				current.hunks = append(current.hunks, hunk{after: content})
+				current.hunks = append(current.hunks, hunk{after: stripUniformPlus(content)})
 			}
 			continue
 		}

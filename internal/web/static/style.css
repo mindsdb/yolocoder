@@ -378,31 +378,54 @@ main {
   display: block;
 }
 
+/* The composer is two rows, not one: what you are writing gets the full
+   width above, and everything you can press sits on a bar beneath it. */
 #chat-form {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 9px 10px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
   background: #fff;
   border-top: 1px solid var(--line);
 }
-#chat-prompt {
-  flex: 0 0 auto;
-  /* The terminal green reads on the dark panes; against white it needs
-     the darker one the focus ring already used. */
-  color: var(--prompt);
-  font: 600 13px/1.5 var(--mono);
-  padding-top: 7px;
-  user-select: none;
+#composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+#btn-attach {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+#btn-attach svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+}
+#btn-attach:hover { background: #f2f3f5; color: var(--ink); }
+/* The hint takes the space between the two ends of the bar, which is
+   where a reference design leaves a gap and we have something to say. */
+#composer-hint { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 #chat-input {
   flex: 1;
   min-width: 0;
   resize: none;
   border: 0;
   border-radius: 0;
-  padding: 7px 0;
+  padding: 2px 0;
   font: 13px/1.5 var(--mono);
   color: var(--ink);
   background: transparent;
@@ -418,9 +441,8 @@ main {
    composer already says what Enter does, so the button only has to be
    the thing you press. Sits at the foot of the textarea so it lines up
    with the last line of what you are typing, not the first. */
-#chat-form button {
+#chat-send {
   flex: 0 0 auto;
-  align-self: flex-end;
   display: grid;
   place-items: center;
   width: 38px;
@@ -433,7 +455,7 @@ main {
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
-#chat-form button svg {
+#chat-send svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -442,21 +464,13 @@ main {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-#chat-form button:hover { background: var(--prompt); color: #fff; }
-#chat-form button:disabled { opacity: 0.45; cursor: default; }
-#chat-form button:disabled:hover { background: var(--send-rest); color: var(--prompt); }
+#chat-send:hover { background: var(--prompt); color: #fff; }
+#chat-send:disabled { opacity: 0.45; cursor: default; }
+#chat-send:disabled:hover { background: var(--send-rest); color: var(--prompt); }
 @media (prefers-reduced-motion: reduce) {
-  #chat-form button { transition: none; }
+  #chat-send { transition: none; }
 }
 
-#input-footer {
-  flex: 0 0 auto;
-  padding: 0 10px 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
 #model-select {
   border: none;
   background: transparent;

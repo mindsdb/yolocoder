@@ -10,6 +10,8 @@ const btnExpand = document.getElementById("btn-expand");
 const btnRecover = document.getElementById("btn-recover");
 const modelSelect = document.getElementById("model-select");
 const pendingImagesEl = document.getElementById("pending-images");
+const btnAttach = document.getElementById("btn-attach");
+const fileInput = document.getElementById("file-input");
 const progressEl = document.getElementById("progress");
 const btnLatest = document.getElementById("btn-latest");
 
@@ -165,6 +167,18 @@ chatInput.addEventListener("paste", (event) => {
   // text paste (which also shows up as a clipboard item) must still land
   // in the textarea normally.
   if (pastedImage) event.preventDefault();
+});
+
+// Picking a file goes through the same queue as pasting one: until now
+// a screenshot could only arrive by paste, which is fine when you have
+// just taken one and no help at all when it is already on disk.
+btnAttach.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  for (const file of fileInput.files || []) {
+    if (file.type && file.type.startsWith("image/")) queuePastedImage(file);
+  }
+  // Cleared so choosing the same file twice in a row still fires change.
+  fileInput.value = "";
 });
 
 function queuePastedImage(file) {

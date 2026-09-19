@@ -22,8 +22,9 @@
     <button id="btn-latest" type="button" hidden>&#9660; latest</button>
     <div id="pending-images" hidden></div>
     <form id="chat-form">
-      <textarea id="chat-input" placeholder="Ask for a change... (paste a screenshot to show it)" rows="2"></textarea>
-      <button id="chat-send" type="submit">Send</button>
+      <span id="chat-prompt" aria-hidden="true">&#10095;</span>
+      <textarea id="chat-input" placeholder="ask for a change &middot; paste a screenshot to show it" rows="2"></textarea>
+      <button id="chat-send" type="submit">send &#9166;</button>
     </form>
     <div id="input-footer">
       <select id="model-select" title="Model"></select>

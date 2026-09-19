@@ -107,19 +107,19 @@ function addMessage(role, text, usage, images, profile) {
   // The profile line is independent of usage: a provider that reports no
   // tokens at all still has a wall clock, so a turn can have one footer,
   // the other, both, or neither.
+  // One line, not a stack: tokens and time are the same kind of fact
+  // about the same turn, and two dim lines under a reply read as two
+  // separate remarks about it.
   const footers = [];
   if (usage) footers.push(formatUsage(usage));
   if (profile) footers.push(profile);
   if (footers.length) {
     const group = document.createElement("div");
     group.className = "msg-group";
-    group.appendChild(wrapper);
-    for (const footer of footers) {
-      const caption = document.createElement("div");
-      caption.className = "usage-note";
-      caption.textContent = footer;
-      group.appendChild(caption);
-    }
+    const caption = document.createElement("div");
+    caption.className = "usage-note";
+    caption.textContent = footers.join(" | ");
+    group.append(wrapper, caption);
     chatLog.appendChild(group);
   } else {
     chatLog.appendChild(wrapper);

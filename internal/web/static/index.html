@@ -22,13 +22,15 @@
     <button id="btn-latest" type="button" hidden>&#9660; latest</button>
     <div id="pending-images" hidden></div>
     <form id="chat-form">
-      <textarea id="chat-input" placeholder="Hi Boss, what are we coding?" rows="2"></textarea>
+      <div id="composer-input-row">
+        <span id="composer-prompt" aria-hidden="true">&#10095;</span>
+        <textarea id="chat-input" placeholder="Hi Boss, what are we coding?" rows="2"></textarea>
+      </div>
       <div id="composer-bar">
         <button id="btn-attach" type="button" title="Attach an image" aria-label="Attach an image">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button>
         <input id="file-input" type="file" accept="image/*" multiple hidden>
-        <span id="composer-hint">Shift+Enter for new line</span>
         <select id="model-select" title="Model"></select>
         <button id="chat-send" type="submit" title="Send" aria-label="Send">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>

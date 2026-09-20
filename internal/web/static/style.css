@@ -166,6 +166,11 @@ main {
   flex-direction: column;
   gap: 10px;
 }
+/* Flex items in a scrolling column container can shrink instead of
+   overflowing, which collapses the content and breaks the scroll. Pin
+   every transcript entry to its own height so the log always overflows
+   (and scrolls) properly. */
+#chat-log > * { flex-shrink: 0; }
 #chat-log::-webkit-scrollbar { width: 8px; }
 #chat-log::-webkit-scrollbar-thumb { background: #ddd; border-radius: 8px; }
 #chat-log::-webkit-scrollbar-track { background: transparent; }
@@ -198,11 +203,14 @@ main {
   word-break: break-word;
   line-height: 1.55;
 }
-/* The user's turn reads as the typed command... */
+/* The user's turn reads as the typed command: a pale green-tinted
+   bubble that sits in the same family as the terminal green, not a
+   dark slab dropped into a light transcript. */
 .msg-user {
   align-self: flex-end;
-  background: #15171c;
-  color: #fff;
+  background: #edf3ec;
+  color: var(--ink);
+  border: 1px solid #dbe4da;
   border-bottom-right-radius: 4px;
 }
 /* ...and the agent's reply reads as plain transcript output, not another
@@ -389,6 +397,22 @@ main {
   background: #fff;
   border-top: 1px solid var(--line);
 }
+/* The input row reads as a terminal line: a green prompt, then the text
+   with a block caret instead of the thin native |. caret-shape is what
+   draws the square; caret-color keeps it green where the property is not
+   supported yet and the caret stays a line. */
+#composer-input-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+#composer-prompt {
+  flex: 0 0 auto;
+  font: 13px/1.5 var(--mono);
+  color: var(--prompt);
+  padding: 2px 0;
+  user-select: none;
+}
 #composer-bar {
   display: flex;
   align-items: center;
@@ -416,9 +440,6 @@ main {
   stroke-linecap: round;
 }
 #btn-attach:hover { background: #f2f3f5; color: var(--ink); }
-/* The hint takes the space between the two ends of the bar, which is
-   where a reference design leaves a gap and we have something to say. */
-#composer-hint { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 #chat-input {
   flex: 1;
   min-width: 0;
@@ -429,6 +450,7 @@ main {
   font: 13px/1.5 var(--mono);
   color: var(--ink);
   background: transparent;
+  caret-shape: block;
   caret-color: var(--prompt);
 }
 #chat-input::placeholder { color: var(--muted); }
@@ -480,11 +502,9 @@ main {
   cursor: pointer;
 }
 #model-select:disabled { cursor: default; opacity: 0.6; }
-#composer-hint {
-  color: var(--faint);
-  font: 11px var(--mono);
-  white-space: nowrap;
-}
+/* Pushed to the right end of the bar, now the hint is gone: attach stays
+   left, model and send sit right. */
+#composer-bar #model-select { margin-left: auto; }
 
 #preview { flex: 1 1 auto; min-width: 0; min-height: 0; }
 #app-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }

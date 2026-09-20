@@ -244,7 +244,7 @@ func TestClientErrorIsIgnoredWhileBusy(t *testing.T) {
 	}
 }
 
-func TestClientErrorTriggersAutoFixWhenIdle(t *testing.T) {
+func TestClientErrorStagesOfferWhenIdle(t *testing.T) {
 	dir := t.TempDir()
 	hub := newHub()
 	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
@@ -257,14 +257,87 @@ func TestClientErrorTriggersAutoFixWhenIdle(t *testing.T) {
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d", recorder.Code)
 	}
+	// Ask-first: staging the card must not consume a guard attempt —
+	// only pressing Fix does.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if server.guard.attempts > 0 {
+		server.offerMutex.Lock()
+		n := len(server.offers)
+		server.offerMutex.Unlock()
+		if n == 1 {
+			if server.guard.attempts != 0 {
+				t.Fatalf("guard.attempts = %d, want staging to leave the fix budget untouched", server.guard.attempts)
+			}
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("expected the idle server to still trigger an auto-fix attempt")
+	t.Fatal("expected the idle server to stage an error offer")
+}
+
+func TestClientErrorDedupsRepeatsAndDismissal(t *testing.T) {
+	dir := t.TempDir()
+	hub := newHub()
+	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	post := func() {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/client-error", strings.NewReader(`{"error":{"message":"boom"}}`)))
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	}
+	count := func() int {
+		server.offerMutex.Lock()
+		defer server.offerMutex.Unlock()
+		return len(server.offers)
+	}
+	post()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && count() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if count() != 1 {
+		t.Fatalf("offers = %d, want 1 staged", count())
+	}
+	// A repeat of the same incident while its card is up is dropped.
+	post()
+	time.Sleep(20 * time.Millisecond)
+	if count() != 1 {
+		t.Fatalf("offers = %d, want repeats deduped to 1", count())
+	}
+
+	server.offerMutex.Lock()
+	var id string
+	for offerID := range server.offers {
+		id = offerID
+	}
+	server.offerMutex.Unlock()
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/error-offer/"+id+"/dismiss", nil))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("dismiss status = %d", recorder.Code)
+	}
+	if count() != 0 {
+		t.Fatalf("offers = %d, want dismiss to remove the card", count())
+	}
+	// A repeat after dismissal stays dropped until the user drives again.
+	post()
+	time.Sleep(20 * time.Millisecond)
+	if count() != 0 {
+		t.Fatalf("offers = %d, want dismissed errors to stay quiet", count())
+	}
+	server.clearDismissed()
+	post()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && count() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if count() != 1 {
+		t.Fatalf("offers = %d, want the error re-asked once the user drives again", count())
+	}
 }
 
 func TestLineStreamerSplitsAcrossArbitraryChunkBoundaries(t *testing.T) {

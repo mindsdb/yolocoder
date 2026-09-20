@@ -15,14 +15,40 @@ import (
 // same way a server-side one does, without the app's own source needing to
 // know anything about yolocoder. It reports to the parent window (this
 // page, not the iframe) via postMessage, which app.js listens for.
+//
+// window "error" and "unhandledrejection" alone miss the errors a person
+// actually sees while using the app: React logs a crashed render through
+// console.error (an error boundary catches it, so nothing ever throws to
+// the window), and Vite's overlay reports a failed import the same way.
+// The console.error wrapper forwards only what looks like a real error —
+// an Error object, or a string shaped like one — so ordinary logging,
+// HMR chatter and deprecation warnings never become chat cards.
 const errorShim = `<script>(function(){
+function report(type,err,extra){
+  var message="",stack="";
+  if(err&&err.stack){message=String(err.message||err);stack=String(err.stack);}
+  else{message=String((err&&err.message)||err);stack=(err&&err.stack)||"";}
+  var payload={message:message,stack:String(stack)};
+  if(extra){for(var key in extra){payload[key]=extra[key];}}
+  window.parent.postMessage({type:type,error:payload},"*");
+}
 window.addEventListener("error", function(event){
-  window.parent.postMessage({type:"APP_RUNTIME_ERROR",error:{message:event.message,filename:event.filename,lineno:event.lineno,colno:event.colno,stack:event.error&&event.error.stack}},"*");
+  if(event.message||event.error){report("APP_RUNTIME_ERROR",event.error||event.message,{filename:event.filename,lineno:event.lineno,colno:event.colno});}
 });
 window.addEventListener("unhandledrejection", function(event){
-  var reason=event.reason;
-  window.parent.postMessage({type:"APP_UNHANDLED_REJECTION",error:{message:String(reason&&reason.message||reason),stack:reason&&reason.stack}},"*");
+  report("APP_UNHANDLED_REJECTION",event.reason);
 });
+var origError=console.error.bind(console);
+console.error=function(){
+  try{
+    for(var i=0;i<arguments.length;i++){
+      var arg=arguments[i];
+      if(arg instanceof Error){report("APP_CONSOLE_ERROR",arg);break;}
+      if(typeof arg==="string"&&/[A-Za-z]*Error:/.test(arg)){report("APP_CONSOLE_ERROR",arg);break;}
+    }
+  }catch(e){}
+  return origError.apply(null,arguments);
+};
 })();</script>`
 
 // selfHealingPage is served in place of the app whenever the dev server

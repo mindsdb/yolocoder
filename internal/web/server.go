@@ -100,6 +100,19 @@ type Server struct {
 	watcher *errorWatcher
 	guard   autoFixGuard
 
+	// offers stages detected errors as ask-first cards instead of firing
+	// an auto-fix straight away: offers maps an offer ID to its pending
+	// fix, bySig dedups repeats of the same incident while its card is
+	// still up, and dismissed remembers what the user said no to until
+	// they drive again. Guarded by offerMutex, separate from stateMutex —
+	// offers are about what the user has been asked, not about what is
+	// running.
+	offerMutex sync.Mutex
+	offers     map[string]pendingOffer
+	bySig      map[string]string
+	dismissed  map[string]bool
+	nextOffer  int
+
 	// providerMutex guards provider: read by every runTask call, written
 	// by a model change from the UI while one may be in flight.
 	providerMutex sync.Mutex
@@ -133,6 +146,15 @@ type Server struct {
 	settleUntil time.Time
 }
 
+// pendingOffer is an error the UI has been asked about but the user
+// hasn't answered yet: Fix turns it into an auto-fix task, Dismiss drops
+// it and remembers the refusal until the user drives again.
+type pendingOffer struct {
+	source string
+	text   string
+	sig    string
+}
+
 // Serve starts the --web UI for the current folder and blocks until ctx is
 // cancelled, at which point it stops the dev server and shuts the HTTP
 // server down cleanly. initialTask, if non-empty, is submitted as the
@@ -162,7 +184,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	}
 
 	server := &Server{root: root, provider: provider, fromEnvironment: fromEnvironment, history: history, hub: newHub()}
-	server.watcher = newErrorWatcher(func(text string) { server.onError("server", text) })
+	server.watcher = newErrorWatcher(func(text string) { server.offerError("server", text) })
 	server.proc = newProcess(root, server.hub, server.watcher)
 
 	if err := server.prepareProject(ctx); err != nil {
@@ -354,6 +376,7 @@ func (server *Server) routes(mux *http.ServeMux) {
 	mux.Handle("/events", server.hub)
 	mux.HandleFunc("/chat", server.handleChat)
 	mux.HandleFunc("/client-error", server.handleClientError)
+	mux.HandleFunc("/error-offer/", server.handleErrorOffer)
 	mux.HandleFunc("/process/start", server.handleProcess("start"))
 	mux.HandleFunc("/process/restart", server.handleProcess("restart"))
 	mux.HandleFunc("/process/stop", server.handleProcess("stop"))
@@ -389,7 +412,29 @@ func (server *Server) handleState(response http.ResponseWriter, request *http.Re
 		"phase":   phase,
 		"process": server.proc.State(),
 		"port":    server.proc.Port(),
+		"offers":  server.pendingOfferInfos(),
 	})
+}
+
+// pendingOfferInfo is an unanswered error card's wire shape, so a tab
+// that (re)connects after the offer was staged can still render it
+// instead of never learning it existed.
+type pendingOfferInfo struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Text   string `json:"text"`
+}
+
+// pendingOfferInfos snapshots the unanswered cards under the offer lock,
+// so /state can include them without holding it while encoding.
+func (server *Server) pendingOfferInfos() []pendingOfferInfo {
+	server.offerMutex.Lock()
+	defer server.offerMutex.Unlock()
+	var infos []pendingOfferInfo
+	for id, offer := range server.offers {
+		infos = append(infos, pendingOfferInfo{ID: id, Source: offer.source, Text: offer.text})
+	}
+	return infos
 }
 
 const listModelsTimeout = 10 * time.Second
@@ -491,8 +536,10 @@ func (server *Server) handleChat(response http.ResponseWriter, request *http.Req
 		return
 	}
 	// A person sending a message of their own is a sign they're driving
-	// again, so the next auto-detected error earns a fresh set of attempts.
+	// again, so the next auto-detected error earns a fresh set of attempts —
+	// and anything they previously dismissed may be worth asking about again.
 	server.guard.reset()
+	server.clearDismissed()
 	go server.runTask(context.Background(), message, images, "user")
 	response.WriteHeader(http.StatusAccepted)
 }
@@ -549,20 +596,117 @@ func (server *Server) handleClientError(response http.ResponseWriter, request *h
 	if report.Error.Stack != "" {
 		fmt.Fprintln(&text, report.Error.Stack)
 	}
-	// A bug that's already being auto-fixed (or whose fix hasn't reached
-	// the still-open, not-yet-reloaded tab yet) keeps throwing until it
-	// does. Without this, every one of those repeats queued its own
-	// auto-fix task behind turnMutex — burning through the guard's
-	// attempt budget on duplicates of the same incident before the first
-	// fix even had a chance to land and reload the page. The server-log
-	// path already avoids this by coalescing a burst into one report (see
-	// errorWatcher); this is the browser-error path's equivalent.
-	if server.isBusy() || server.settling() {
-		response.WriteHeader(http.StatusAccepted)
+	server.offerError("browser", strings.TrimRight(text.String(), "\n"))
+	response.WriteHeader(http.StatusAccepted)
+}
+
+// offerError stages a detected error as an ask-first card instead of
+// firing a fix straight away. Repeats of the same incident while its card
+// is still up, or after the user dismissed it, are dropped — the card is
+// the dedup, not a guard attempt. Busy/settling drops stay: a bug mid-fix
+// (or about pre-fix code) keeps throwing until the fix lands, and each
+// repeat must not become its own card.
+func (server *Server) offerError(source, text string) {
+	if strings.TrimSpace(text) == "" {
 		return
 	}
-	go server.onError("browser", text.String())
-	response.WriteHeader(http.StatusAccepted)
+	if server.isBusy() || server.settling() {
+		return
+	}
+	sig := signature(text)
+	server.offerMutex.Lock()
+	if server.offers == nil {
+		server.offers = map[string]pendingOffer{}
+		server.bySig = map[string]string{}
+		server.dismissed = map[string]bool{}
+	}
+	if server.dismissed[sig] {
+		server.offerMutex.Unlock()
+		return
+	}
+	if _, dup := server.bySig[sig]; dup {
+		server.offerMutex.Unlock()
+		return
+	}
+	server.nextOffer++
+	id := fmt.Sprintf("err-%d", server.nextOffer)
+	server.offers[id] = pendingOffer{source: source, text: text, sig: sig}
+	server.bySig[sig] = id
+	server.offerMutex.Unlock()
+	server.hub.publish("error-offer", map[string]any{"id": id, "source": source, "text": text})
+}
+
+// handleErrorOffer answers the card's two buttons:
+// POST /error-offer/{id}/fix starts the fix turn, POST .../dismiss drops it.
+func (server *Server) handleErrorOffer(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(response, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(request.URL.Path, "/error-offer/")
+	slash := strings.LastIndex(rest, "/")
+	if slash < 0 {
+		http.Error(response, "want /error-offer/{id}/fix or /dismiss", http.StatusNotFound)
+		return
+	}
+	id, action := rest[:slash], rest[slash+1:]
+
+	server.offerMutex.Lock()
+	offer, ok := server.offers[id]
+	if !ok {
+		server.offerMutex.Unlock()
+		http.Error(response, "no such error offer", http.StatusNotFound)
+		return
+	}
+	switch action {
+	case "dismiss":
+		delete(server.offers, id)
+		delete(server.bySig, offer.sig)
+		server.dismissed[offer.sig] = true
+		server.offerMutex.Unlock()
+		server.hub.publish("error-offer-dismissed", map[string]any{"id": id})
+		response.WriteHeader(http.StatusAccepted)
+		return
+	case "fix":
+		delete(server.offers, id)
+		delete(server.bySig, offer.sig)
+		server.offerMutex.Unlock()
+		server.hub.publish("error-offer-dismissed", map[string]any{"id": id})
+		go server.runOfferFix(offer)
+		response.WriteHeader(http.StatusAccepted)
+		return
+	default:
+		server.offerMutex.Unlock()
+		http.Error(response, "want /fix or /dismiss", http.StatusNotFound)
+		return
+	}
+}
+
+// runOfferFix turns an accepted offer into the same auto-fix turn onError
+// used to fire on its own. Only accepting consumes a guard attempt —
+// merely showing the card never does — so the budget counts fixes, not
+// sightings.
+func (server *Server) runOfferFix(offer pendingOffer) {
+	if !server.guard.allow(offer.sig) {
+		server.hub.publish("chat", chatMessage{Role: "system", Text: fmt.Sprintf(
+			"Still seeing the same %s error after %d fix attempts — leaving it for you:\n\n%s",
+			offer.source, maxAutoFixAttempts, offer.text)})
+		return
+	}
+	task := fmt.Sprintf("A %s error occurred while the app was running:\n\n%s\n\nDiagnose and fix it.", offer.source, offer.text)
+	outcome, err := server.runTask(context.Background(), task, nil, "auto-fix")
+	if err == nil && shouldRestartAfterAutoFix(offer.source, outcome.Applied) {
+		_ = server.proc.Restart(context.Background())
+	}
+}
+
+// clearDismissed forgets what the user said no to, so the next thing they
+// send re-arms every error — they're driving again, and a refusal from
+// before may not hold for the code as it is now.
+func (server *Server) clearDismissed() {
+	server.offerMutex.Lock()
+	server.dismissed = map[string]bool{}
+	server.offerMutex.Unlock()
 }
 
 // isBusy reports whether a task is currently running, so a browser error
@@ -592,29 +736,6 @@ func (server *Server) isBusy() bool {
 	server.stateMutex.Lock()
 	defer server.stateMutex.Unlock()
 	return server.busy
-}
-
-// onError turns a detected server or browser error into an auto-fix task,
-// unless the loop guard says this exact error has already had its fair
-// share of automatic attempts.
-func (server *Server) onError(source, text string) {
-	// The server-log path reaches here without passing handleClientError,
-	// and a Vite parse error from a half-finished edit is precisely the
-	// kind of line that lands late.
-	if server.isBusy() || server.settling() {
-		return
-	}
-	if !server.guard.allow(signature(text)) {
-		server.hub.publish("chat", chatMessage{Role: "system", Text: fmt.Sprintf(
-			"Still seeing the same %s error after %d fix attempts — leaving it for you:\n\n%s",
-			source, maxAutoFixAttempts, text)})
-		return
-	}
-	task := fmt.Sprintf("A %s error occurred while the app was running:\n\n%s\n\nDiagnose and fix it.", source, text)
-	outcome, err := server.runTask(context.Background(), task, nil, "auto-fix")
-	if err == nil && shouldRestartAfterAutoFix(source, outcome.Applied) {
-		_ = server.proc.Restart(context.Background())
-	}
 }
 
 // shouldRestartAfterAutoFix reports whether an applied auto-fix should

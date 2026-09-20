@@ -409,6 +409,9 @@ function resyncState() {
       currentPhase = state.phase || null;
       setBusy(!!state.busy);
       if (state.process) setProcessState(state.process);
+      // A tab that (re)connects after an offer was staged still renders it:
+      // the offer event is one-shot, but /state carries the unanswered ones.
+      for (const offer of state.offers || []) addErrorOffer(offer.id, offer.source, offer.text);
     })
     .catch(() => {});
 }
@@ -462,6 +465,16 @@ events.addEventListener("process", (event) => {
   setProcessState(data.state);
   if (data.state === "running") reloadApp();
 });
+// A staged error arrives as its own event (not a chat message), so nothing
+// fires until the card's Fix button is pressed; a dismiss from another tab
+// removes the card here too.
+events.addEventListener("error-offer", (event) => {
+  const data = JSON.parse(event.data);
+  addErrorOffer(data.id, data.source, data.text || "");
+});
+events.addEventListener("error-offer-dismissed", (event) => {
+  removeErrorOffer(JSON.parse(event.data).id);
+});
 
 // Enter sends, Shift+Enter inserts a newline (the ordinary textarea
 // behavior, kept available for anyone who wants to draft a longer,
@@ -499,13 +512,97 @@ btnExpand.addEventListener("click", () => {
 });
 btnRecover.addEventListener("click", () => fetch("/process/restart", { method: "POST" }));
 
+// An error spotted while using the app becomes an ask-first card, not an
+// automatic turn: Fix sends it back as the fix it would have been,
+// Dismiss drops it (the server remembers the refusal until you drive
+// again, so a still-broken page doesn't re-ask on every throw).
+const errorOffers = new Map(); // id -> element, so a dismiss from another tab removes ours too
+
+function addErrorOffer(id, source, text) {
+  if (errorOffers.has(id)) return;
+  const card = document.createElement("div");
+  card.className = "error-offer";
+  card.dataset.offerId = id;
+
+  const head = document.createElement("div");
+  head.className = "error-offer-head";
+  const dot = document.createElement("span");
+  dot.className = "error-offer-dot";
+  const label = document.createElement("span");
+  label.className = "error-offer-label";
+  label.textContent = source === "server" ? "The app hit an error" : "Something broke in the app";
+  const ask = document.createElement("span");
+  ask.className = "error-offer-ask";
+  ask.textContent = " — want me to fix it?";
+  head.append(dot, label, ask);
+
+  const title = document.createElement("div");
+  title.className = "error-offer-title";
+  title.textContent = firstLine(text);
+
+  card.append(head, title);
+  if (text.split("\n").length > 1 || text.length > 120) {
+    const details = document.createElement("details");
+    details.className = "error-offer-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "show error";
+    const body = document.createElement("pre");
+    body.textContent = text;
+    details.append(summary, body);
+    card.appendChild(details);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "error-offer-actions";
+  const fix = document.createElement("button");
+  fix.type = "button";
+  fix.className = "error-offer-fix";
+  fix.textContent = "Fix it";
+  fix.addEventListener("click", () => {
+    fix.disabled = true;
+    fix.textContent = "Fixing…";
+    fetch("/error-offer/" + encodeURIComponent(id) + "/fix", { method: "POST" }).catch(() => {
+      fix.disabled = false;
+      fix.textContent = "Fix it";
+    });
+  });
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "error-offer-dismiss";
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", () => {
+    fetch("/error-offer/" + encodeURIComponent(id) + "/dismiss", { method: "POST" }).catch(() => {});
+    removeErrorOffer(id);
+  });
+  actions.append(fix, dismiss);
+  card.appendChild(actions);
+
+  chatLog.appendChild(card);
+  errorOffers.set(id, card);
+  pinned = true;
+  scrollToLatest(true);
+}
+
+function removeErrorOffer(id) {
+  const card = errorOffers.get(id);
+  if (!card) return;
+  errorOffers.delete(id);
+  card.remove();
+}
+
 // The shim injected into the proxied app reports crashes to us via
 // postMessage (it can't reach the yolocoder server directly: it doesn't
 // know about it, only about its own parent window). Relay it to the
-// backend the same way a server-side error arrives.
+// backend, which stages it as a card instead of firing a fix on its own.
 window.addEventListener("message", (event) => {
   const data = event.data;
-  if (!data || (data.type !== "APP_RUNTIME_ERROR" && data.type !== "APP_UNHANDLED_REJECTION")) return;
+  if (
+    !data ||
+    (data.type !== "APP_RUNTIME_ERROR" &&
+      data.type !== "APP_UNHANDLED_REJECTION" &&
+      data.type !== "APP_CONSOLE_ERROR")
+  )
+    return;
   fetch("/client-error", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

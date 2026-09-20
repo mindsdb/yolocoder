@@ -231,6 +231,97 @@ main {
 .msg-system { background: #fff7e0; color: #6b5300; }
 .msg-auto-fix { background: #fde8e8; color: #7a1f1f; }
 
+/* An error spotted while using the app: an ask-first card, not another
+   bubble. Light like the transcript (not a dark slab), with the terminal
+   green as its accent so it reads as family with the activity trail and
+   the composer — and a green left edge so it stands apart from the
+   yellow system and red auto-fix notes above. */
+.error-offer {
+  align-self: stretch;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--prompt);
+  border-radius: 10px;
+  background: #f6faf7;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.error-offer-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 11px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--prompt);
+}
+.error-offer-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--term-ac);
+  flex: 0 0 auto;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.error-offer-label { font-weight: 700; }
+.error-offer-ask {
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+.error-offer-title {
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.error-offer-details summary {
+  cursor: pointer;
+  font: 11px var(--mono);
+  color: var(--muted);
+}
+.error-offer-details pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--term-bg);
+  color: var(--term-tx);
+  font: 12px var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.error-offer-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.error-offer-fix {
+  border: none;
+  background: var(--prompt);
+  color: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font: 600 13px var(--sans);
+  cursor: pointer;
+}
+.error-offer-fix:hover:not(:disabled) { background: #086931; }
+.error-offer-fix:disabled { opacity: 0.6; cursor: default; }
+.error-offer-dismiss {
+  border: 1px solid #d6d6d6;
+  background: #fff;
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: 13px var(--sans);
+  cursor: pointer;
+}
+.error-offer-dismiss:hover { background: #f0f0f0; }
+
 /* Groups an assistant reply with its usage footer into one tight column,
    so the footer reads as part of that reply rather than as another line
    in the conversation. Stretched full-width to match the plain-text

@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mindsdb/yolocoder/internal/config"
 )
 
 func testProcess(t *testing.T) *process {
@@ -163,5 +166,50 @@ func TestAServerOnIPv6LoopbackIsReachable(t *testing.T) {
 	if direct, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second); err == nil {
 		direct.Close()
 		t.Skip("this machine maps 127.0.0.1 to the IPv6 listener too; the bug needs a stricter stack to show")
+	}
+}
+
+func TestTheDevServerIsGivenTheConnectedProvider(t *testing.T) {
+	env := inferenceEnv(config.LLM{
+		BaseURL: "https://api.mindshub.ai",
+		APIKey:  "sk-test",
+		Model:   "mindshub_air",
+	})
+	want := map[string]string{
+		"OPENAI_API_KEY":  "sk-test",
+		"OPENAI_BASE_URL": "https://api.mindshub.ai/v1",
+		"OPENAI_MODEL":    "mindshub_air",
+	}
+	got := map[string]string{}
+	for _, entry := range env {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Errorf("%s = %q, want %q", name, got[name], value)
+		}
+	}
+}
+
+func TestTheBaseURLGainsItsVersionExactlyOnce(t *testing.T) {
+	// The saved provider holds the host on its own, which is right for a
+	// config file and wrong for anything concatenating a path onto it.
+	for input, want := range map[string]string{
+		"https://api.mindshub.ai":     "https://api.mindshub.ai/v1",
+		"https://api.mindshub.ai/":    "https://api.mindshub.ai/v1",
+		"https://api.mindshub.ai/v1":  "https://api.mindshub.ai/v1",
+		"https://api.mindshub.ai/v1/": "https://api.mindshub.ai/v1",
+		"":                            "",
+	} {
+		if got := versionedBase(input); got != want {
+			t.Errorf("versionedBase(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestAProviderWithNothingSetContributesNothing(t *testing.T) {
+	if env := inferenceEnv(config.LLM{}); len(env) != 0 {
+		t.Fatalf("inferenceEnv({}) = %v, want nothing to override", env)
 	}
 }

@@ -186,6 +186,10 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	server := &Server{root: root, provider: provider, fromEnvironment: fromEnvironment, history: history, hub: newHub()}
 	server.watcher = newErrorWatcher(func(text string) { server.offerError("server", text) })
 	server.proc = newProcess(root, server.hub, server.watcher)
+	// Read through currentProvider rather than captured: a model changed
+	// from the UI should reach the next dev server start, not the one
+	// this closure was built beside.
+	server.proc.inference = func() []string { return inferenceEnv(server.currentProvider()) }
 
 	if err := server.prepareProject(ctx); err != nil {
 		return err
@@ -284,6 +288,14 @@ func (server *Server) prepareProject(ctx context.Context) error {
 				return fmt.Errorf("restore scripts: %w", err)
 			}
 			server.announce("Scripts restored.")
+		}
+		// A project scaffolded before a helper existed gets it now. Only
+		// the ones it is missing, and never over one that is there.
+		if missing := missingHelpers(server.root); len(missing) > 0 {
+			if err := restoreHelpers(server.root, missing); err != nil {
+				return fmt.Errorf("restore backend helpers: %w", err)
+			}
+			server.announce("Added backend/" + strings.Join(missing, ", backend/") + " for talking to inference.")
 		}
 		return nil
 	default:

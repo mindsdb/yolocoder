@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mindsdb/yolocoder/internal/config"
 )
 
 // States the dev server can be in, published to the UI as they change.
@@ -55,9 +57,12 @@ const (
 // discovers the outcome (port, log) through the state directory those
 // scripts write to.
 type process struct {
-	root    string
-	hub     *hub
-	watcher *errorWatcher
+	root string
+	hub  *hub
+	// inference reports the connected provider as environment entries,
+	// read fresh on every start because the model can change mid-session.
+	inference func() []string
+	watcher   *errorWatcher
 
 	// execMutex serializes actual script runs: Start/Restart/Stop calls
 	// arriving from an HTTP handler, and now also a health check
@@ -90,6 +95,36 @@ type process struct {
 	// that doesn't need real scripts to observe the detection logic in
 	// isolation.
 	onCrash func()
+}
+
+// inferenceEnv is a provider in the variable names every OpenAI client
+// already reads without being told: the SDK finds them with no arguments,
+// and so does backend/llm.ts. Naming them after the provider instead
+// would be a lie the moment someone connects a different one.
+func inferenceEnv(provider config.LLM) []string {
+	var env []string
+	if key := strings.TrimSpace(provider.APIKey); key != "" {
+		env = append(env, "OPENAI_API_KEY="+key)
+	}
+	if base := versionedBase(provider.BaseURL); base != "" {
+		env = append(env, "OPENAI_BASE_URL="+base)
+	}
+	if model := strings.TrimSpace(provider.Model); model != "" {
+		env = append(env, "OPENAI_MODEL="+model)
+	}
+	return env
+}
+
+// versionedBase is a base URL with the version segment a client expects
+// to append paths to. The saved provider holds the host on its own
+// ("https://api.mindshub.ai"), which is right for a config file and
+// wrong for anything that concatenates "/chat/completions" onto it.
+func versionedBase(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" || strings.HasSuffix(trimmed, "/v1") {
+		return trimmed
+	}
+	return trimmed + "/v1"
 }
 
 func newProcess(root string, hub *hub, watcher *errorWatcher) *process {
@@ -158,6 +193,13 @@ func (proc *process) runScript(ctx context.Context, script string) error {
 	}
 	command := exec.CommandContext(ctx, "sh", relative)
 	command.Dir = proc.root
+	// The dev server inherits our environment, plus the connected
+	// provider. Appended rather than prepended: a later entry wins, so
+	// these override an OPENAI_* already in the environment, which is
+	// where the provider came from in the first place when one is.
+	if proc.inference != nil {
+		command.Env = append(os.Environ(), proc.inference()...)
+	}
 	output, err := command.CombinedOutput()
 	for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
 		if line != "" {

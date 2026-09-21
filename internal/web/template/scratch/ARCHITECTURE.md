@@ -41,3 +41,13 @@ pass from the start rather than be invented mid-task. Replace it with a
 real test runner once there's something worth testing that a type check
 alone won't catch; just keep `npm test` meaning something, since every
 change is checked against it.
+
+## Inference
+
+`backend/llm.ts` — text, through the ordinary OpenAI chat-completions
+API. `backend/decisions.ts` — judgement that comes back with
+probabilities and a confidence, for routing, classifying and rating.
+Both read their key from the environment, which yolocoder fills in from
+the provider you connected: nothing to configure, nothing to commit.
+Each file explains itself at the top; `decisions.ts` is worth reading
+before use, because it is not an API you will have seen elsewhere.

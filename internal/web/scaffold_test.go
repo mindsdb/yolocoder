@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +111,67 @@ func TestScaffoldProjectWritesTheScriptsExecutable(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {
 		t.Fatal("scaffold should include package.json:", err)
+	}
+}
+
+func TestAProjectMadeBeforeTheHelpersExistedGetsThem(t *testing.T) {
+	// The reason this is a list of names rather than a copy of a
+	// directory: a project scaffolded last week has no llm.ts, and an
+	// upgrade should hand it one.
+	dir := t.TempDir()
+	if err := scaffoldProject(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range backendHelpers {
+		if err := os.Remove(filepath.Join(dir, "backend", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := missingHelpers(dir)
+	if len(missing) != len(backendHelpers) {
+		t.Fatalf("missingHelpers() = %v, want all of them", missing)
+	}
+	if err := restoreHelpers(dir, missing); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range backendHelpers {
+		body, err := os.ReadFile(filepath.Join(dir, "backend", name))
+		if err != nil {
+			t.Fatalf("%s was not restored: %v", name, err)
+		}
+		if !strings.Contains(string(body), "OPENAI_API_KEY") {
+			t.Fatalf("%s does not read the key from the environment", name)
+		}
+	}
+	if left := missingHelpers(dir); len(left) != 0 {
+		t.Fatalf("still missing %v", left)
+	}
+}
+
+func TestRestoringNeverOverwritesAHelperThatIsThere(t *testing.T) {
+	// A helper is an ordinary file of the project once it lands. An
+	// upgrade that reverted somebody's edits would be a worse bargain
+	// than the file was worth.
+	dir := t.TempDir()
+	if err := scaffoldProject(dir); err != nil {
+		t.Fatal(err)
+	}
+	edited := filepath.Join(dir, "backend", "llm.ts")
+	if err := os.WriteFile(edited, []byte("// mine now\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if missing := missingHelpers(dir); len(missing) != 0 {
+		t.Fatalf("nothing is missing, got %v", missing)
+	}
+	// And restoring what is genuinely missing leaves the edited one alone.
+	if err := os.Remove(filepath.Join(dir, "backend", "decisions.ts")); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreHelpers(dir, missingHelpers(dir)); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(edited)
+	if string(body) != "// mine now\n" {
+		t.Fatalf("llm.ts was overwritten: %q", body)
 	}
 }

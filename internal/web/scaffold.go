@@ -130,3 +130,51 @@ func restoreScripts(root string) error {
 	}
 	return nil
 }
+
+// backendHelpers are the files a project gets for talking to inference:
+// llm.ts for text, decisions.ts for judgement. They are listed here
+// rather than discovered so that a project scaffolded before either
+// existed picks them up on a later run — see missingHelpers.
+var backendHelpers = []string{"llm.ts", "decisions.ts"}
+
+// missingHelpers are the backend helpers this project does not have.
+//
+// A project started before a helper existed should get it, which is the
+// whole reason this is a list of names and not a copy of a directory.
+func missingHelpers(root string) []string {
+	var missing []string
+	for _, name := range backendHelpers {
+		if _, err := os.Stat(filepath.Join(root, "backend", name)); err != nil {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// restoreHelpers writes the named backend helpers from the embedded
+// template.
+//
+// Only ones that are missing, and never over one that is there: a helper
+// is an ordinary file of the project once it lands, free to be edited or
+// thrown away, and an upgrade that reverted somebody's edit would be a
+// worse bargain than the file was worth.
+func restoreHelpers(root string, names []string) error {
+	sub, err := fs.Sub(scratchTemplate, scratchTemplateRoot+"/backend")
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(root, "backend")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		return err
+	}
+	for _, name := range names {
+		data, err := fs.ReadFile(sub, name)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(destination, name), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}

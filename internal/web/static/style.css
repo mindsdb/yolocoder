@@ -326,6 +326,50 @@ main {
    so the footer reads as part of that reply rather than as another line
    in the conversation. Stretched full-width to match the plain-text
    assistant style above. */
+/* Rendered markdown inside an assistant reply. Tight vertical rhythm:
+   these sit in a chat bubble, not on a page, so the first and last
+   blocks must not push the bubble open. */
+.msg-assistant p,
+.msg-assistant ul,
+.msg-assistant ol,
+.msg-assistant pre { margin: 6px 0; }
+.msg-assistant > :first-child { margin-top: 0; }
+.msg-assistant > :last-child { margin-bottom: 0; }
+.msg-assistant h3,
+.msg-assistant h4,
+.msg-assistant h5,
+.msg-assistant h6 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.msg-assistant ul,
+.msg-assistant ol { padding-left: 20px; }
+.msg-assistant li { margin: 2px 0; }
+.msg-assistant code {
+  font: 12px var(--mono);
+  background: #f2f3f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.msg-assistant pre {
+  background: var(--term-bg);
+  color: var(--term-tx);
+  padding: 9px 11px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+/* A code block carries its own ground, so the inline chip styling has
+   to come back off inside one. */
+.msg-assistant pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.msg-assistant a { color: var(--prompt); }
+
 .msg-group {
   display: flex;
   flex-direction: column;

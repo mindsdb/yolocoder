@@ -109,13 +109,122 @@ function setProcessState(state) {
   btnRecover.hidden = state !== "error";
 }
 
+// Markdown, built as DOM nodes rather than parsed as HTML. Nothing here
+// ever touches innerHTML, so there is no path by which a reply — which
+// may be quoting a file that contains anything at all — becomes markup.
+// It covers what the agent actually writes: fenced code, lists, inline
+// code, bold and links. Anything else arrives as the text it was.
+function renderMarkdown(text, into) {
+  const lines = text.split("\n");
+  const starts = /^```|^\s*[-*]\s+|^\s*\d+\.\s+|^#{1,4}\s/;
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (/^```/.test(line)) {
+      const fenced = [];
+      index++;
+      while (index < lines.length && !/^```/.test(lines[index])) fenced.push(lines[index++]);
+      index++; // the closing fence, if it ever came
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = fenced.join("\n");
+      pre.appendChild(code);
+      into.appendChild(pre);
+      continue;
+    }
+
+    const bullet = /^\s*[-*]\s+/;
+    const numbered = /^\s*\d+\.\s+/;
+    for (const [pattern, tag] of [[bullet, "ul"], [numbered, "ol"]]) {
+      if (!pattern.test(line)) continue;
+      const list = document.createElement(tag);
+      while (index < lines.length && pattern.test(lines[index])) {
+        const item = document.createElement("li");
+        renderInline(lines[index].replace(pattern, ""), item);
+        list.appendChild(item);
+        index++;
+      }
+      into.appendChild(list);
+    }
+    if (bullet.test(line) || numbered.test(line)) continue;
+
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading) {
+      const element = document.createElement("h" + Math.min(6, heading[1].length + 2));
+      renderInline(heading[2], element);
+      into.appendChild(element);
+      index++;
+      continue;
+    }
+
+    if (line.trim() === "") {
+      index++;
+      continue;
+    }
+
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim() !== "" && !starts.test(lines[index])) {
+      paragraph.push(lines[index++]);
+    }
+    const element = document.createElement("p");
+    renderInline(paragraph.join("\n"), element);
+    into.appendChild(element);
+  }
+}
+
+// Code spans are matched first so that a ** inside one stays literal.
+function renderInline(text, into) {
+  const token = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+  let last = 0;
+  let match;
+  while ((match = token.exec(text)) !== null) {
+    if (match.index > last) into.appendChild(document.createTextNode(text.slice(last, match.index)));
+    const found = match[0];
+    if (found.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = found.slice(1, -1);
+      into.appendChild(code);
+    } else if (found.startsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = found.slice(2, -2);
+      into.appendChild(strong);
+    } else {
+      const split = found.indexOf("](");
+      const label = found.slice(1, split);
+      const href = found.slice(split + 2, -1);
+      // Only http(s). A javascript: or data: URL written into a reply
+      // must not become something clickable.
+      if (/^https?:\/\//i.test(href)) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = label;
+        into.appendChild(link);
+      } else {
+        into.appendChild(document.createTextNode(label));
+      }
+    }
+    last = match.index + found.length;
+  }
+  if (last < text.length) into.appendChild(document.createTextNode(text.slice(last)));
+}
+
 function addMessage(role, text, usage, images, profile) {
   const wrapper = document.createElement("div");
   wrapper.className = "msg msg-" + role;
   // Long messages (a stack trace, a wall of npm output relayed as an
   // error) are collapsed behind a one-line summary rather than dumped in
   // full — expand to read the whole thing.
-  if (text.length > 400 || text.split("\n").length > 6) {
+  // An assistant reply is written in markdown and rendered as such. It
+  // is never collapsed: the long ones are lists of what changed, which
+  // is the part worth reading, where the collapse exists for a stack
+  // trace or a wall of npm output arriving as an error.
+  if (role === "assistant") {
+    renderMarkdown(text, wrapper);
+  } else if (text.length > 400 || text.split("\n").length > 6) {
     const details = document.createElement("details");
     const summary = document.createElement("summary");
     summary.textContent = firstLine(text);

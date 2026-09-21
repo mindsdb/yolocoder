@@ -452,3 +452,55 @@ func TestSanitizeImagesRejectsOversizedImages(t *testing.T) {
 		t.Fatal("expected an error for an image over the size limit")
 	}
 }
+
+func TestPrepareProjectAddsTheHelpersToAnOlderProject(t *testing.T) {
+	// The shape of a project scaffolded before either helper existed: a
+	// real yolocoder project, backend/ present, neither file in it.
+	dir := t.TempDir()
+	if err := scaffoldProject(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range backendHelpers {
+		if err := os.Remove(filepath.Join(dir, "backend", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Something of its own, to be sure the upgrade is additive.
+	own := filepath.Join(dir, "backend", "index.ts")
+	before, err := os.ReadFile(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{root: dir, hub: newHub()}
+	if err := server.prepareProject(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range backendHelpers {
+		if _, err := os.Stat(filepath.Join(dir, "backend", name)); err != nil {
+			t.Fatalf("opening an older project should have added backend/%s: %v", name, err)
+		}
+	}
+	after, _ := os.ReadFile(own)
+	if string(before) != string(after) {
+		t.Fatal("the project's own backend file was touched")
+	}
+}
+
+func TestPrepareProjectIsTheOnlyWayHelpersArrive(t *testing.T) {
+	// The helpers are for the scaffold's Express backend, which only a
+	// --web project has. A terminal-only run never reaches prepareProject
+	// and must never grow files in someone's folder behind their back.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{root: dir, hub: newHub()}
+	if err := server.prepareProject(context.Background()); err == nil {
+		t.Fatal("a folder that is not a yolocoder project should be refused, not adopted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "backend")); err == nil {
+		t.Fatal("a refused folder should not have gained a backend/")
+	}
+}

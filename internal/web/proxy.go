@@ -120,7 +120,7 @@ func newAppProxy(portFn func() int) http.Handler {
 		Director: func(request *http.Request) {
 			port := portFn()
 			request.URL.Scheme = "http"
-			request.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
+			request.URL.Host = devServer(port)
 			// The proxy rewrites the body of an HTML response, so it must
 			// arrive uncompressed to rewrite; a real client's own
 			// Accept-Encoding would otherwise get a gzip stream back.

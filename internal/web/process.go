@@ -222,6 +222,23 @@ func (proc *process) stopHealthCheck() {
 	}
 }
 
+// devServer is the address the dev server is reached at.
+//
+// "localhost" rather than "127.0.0.1" because which of the two a dev
+// server binds is not ours to decide and is not consistent: Vite binds
+// IPv6 loopback only, so a process happily serving on [::1] looked, to a
+// dial at 127.0.0.1, exactly like a process that had not started —
+// "dev server is not reachable yet: dial tcp 127.0.0.1:5173: connection
+// refused", retried every couple of seconds, forever, against a server
+// that was answering the whole time. The name resolves to both families
+// and Go tries them in turn.
+//
+// Listening is the other way round and stays as it is: where we choose
+// the address, 127.0.0.1 is the right one to choose.
+func devServer(port int) string {
+	return fmt.Sprintf("localhost:%d", port)
+}
+
 func (proc *process) watchHealth(ctx context.Context, port int) {
 	ticker := time.NewTicker(proc.healthCheckInterval)
 	defer ticker.Stop()
@@ -232,7 +249,7 @@ func (proc *process) watchHealth(ctx context.Context, port int) {
 			return
 		case <-ticker.C:
 		}
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), proc.healthCheckDialTimeout)
+		conn, err := net.DialTimeout("tcp", devServer(port), proc.healthCheckDialTimeout)
 		if err == nil {
 			conn.Close()
 			failures = 0

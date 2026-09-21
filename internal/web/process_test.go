@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -120,5 +121,47 @@ func TestNextRecoveryAttemptResetsAfterTheWindowPasses(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	if attempt, ok := proc.nextRecoveryAttempt(); attempt != 1 || !ok {
 		t.Fatalf("attempt after the window passed = (%d, %v), want (1, true) again, a fresh loop", attempt, ok)
+	}
+}
+
+func TestDevServerIsReachedByNameNotByIPv4(t *testing.T) {
+	// Vite binds IPv6 loopback only. A dial at 127.0.0.1 then looks
+	// exactly like a server that never started — "connection refused",
+	// retried every couple of seconds, forever, against a dev server that
+	// was answering the whole time. The name resolves to both families.
+	if got := devServer(5173); got != "localhost:5173" {
+		t.Fatalf("devServer(5173) = %q, want a name rather than an address family", got)
+	}
+}
+
+func TestAServerOnIPv6LoopbackIsReachable(t *testing.T) {
+	// The real shape of the bug, end to end: listen on [::1] only, then
+	// dial the way the health check and the proxy do.
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("no IPv6 loopback on this machine")
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	conn, err := net.DialTimeout("tcp", devServer(port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("a server on [::1] should be reachable: %v", err)
+	}
+	conn.Close()
+
+	// And the dial that was there before is exactly the one that fails.
+	if direct, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second); err == nil {
+		direct.Close()
+		t.Skip("this machine maps 127.0.0.1 to the IPv6 listener too; the bug needs a stricter stack to show")
 	}
 }

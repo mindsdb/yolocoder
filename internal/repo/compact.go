@@ -100,6 +100,11 @@ func looksLikePath(text string) bool {
 	return !strings.ContainsAny(text, " \t(){}[]\"';,")
 }
 
+// isPatchTerminator recognizes a model declaring the patch over.
+func isPatchTerminator(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "*** End Patch")
+}
+
 // isHunkSeparator recognizes the markers a model writes between edits
 // when it slips into a format it knows better than this one.
 //
@@ -232,6 +237,16 @@ func parseCompact(patch string) ([]filePatch, error) {
 				continue
 			}
 			return nil, fmt.Errorf("an edit appears before any file header: %q", clipLine(line))
+		}
+
+		// An explicit end means the end. Anything after it is not part of
+		// the patch, whatever it looks like — seen in a real run as a
+		// burst of corrupted tokens after "*** End Patch", which we
+		// dutifully read as a hunk and could not place. The retry was the
+		// same patch without the garbage, so the whole round trip was
+		// spent on text the model had already said to stop at.
+		if isPatchTerminator(line) && !moreBlocksAfter(lines, index+1) {
+			break
 		}
 
 		// "@@" is what a model reaches for between edits, because it is

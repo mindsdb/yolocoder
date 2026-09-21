@@ -684,3 +684,37 @@ func TestCreatedFileKeepsMixedPlusLinesAndBareStars(t *testing.T) {
 		t.Fatalf("created file = %q, want %q", got, want)
 	}
 }
+
+func TestGarbageAfterTheEndMarkerIsNotPartOfThePatch(t *testing.T) {
+	// Verbatim from a real run: the model glitched and emitted corrupted
+	// tokens after "*** End Patch". Read as a hunk they could not be
+	// placed, so the whole patch was rejected — and the retry was the
+	// same patch without them. A round trip spent on text the model had
+	// already said to stop at.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\n"})
+	err := repository.Apply("@a.ts\n-const x = 1;\n+const x = 2;\n" +
+		"*** End Patch\n" +
+		"♀♀♀♀♀♀json pandurog? of k not valid? \n}ર્ય?\n")
+	if err != nil {
+		t.Fatalf("the patch before the end marker should have applied: %v", err)
+	}
+	if got := read(t, repository, "a.ts"); got != "const x = 2;\n" {
+		t.Fatalf("a.ts = %q", got)
+	}
+}
+
+func TestSeveralBlocksStillRunOnPastAnEndMarker(t *testing.T) {
+	// An end marker closes a block, and models write several blocks in
+	// one patch. Stopping at the first would discard every edit after it.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nfiller\nconst y = 2;\n"})
+	err := repository.Apply("@a.ts\n-const x = 1;\n+const x = 9;\n" +
+		"*** End Patch\n" +
+		"@a.ts\n-const y = 2;\n+const y = 8;\n" +
+		"*** End Patch\n")
+	if err != nil {
+		t.Fatalf("both blocks should have applied: %v", err)
+	}
+	if got := read(t, repository, "a.ts"); got != "const x = 9;\nfiller\nconst y = 8;\n" {
+		t.Fatalf("a.ts = %q", got)
+	}
+}

@@ -221,7 +221,8 @@ func parsePatch(patch string) ([]filePatch, error) {
 	// Trailing blank lines are an artifact of the patch text ending in a
 	// newline, not empty context lines, and counting them as context would
 	// make every last hunk unmatchable.
-	for _, line := range strings.Split(strings.TrimRight(patch, "\n"), "\n") {
+	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
+	for position, line := range lines {
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			active = nil
@@ -244,7 +245,18 @@ func parsePatch(patch string) ([]filePatch, error) {
 		// instead of a unified diff. It carries no line numbers at all,
 		// which suits placing hunks by content exactly, so the only thing
 		// missing was recognizing its headers.
-		case strings.HasPrefix(line, "*** Begin Patch"), strings.HasPrefix(line, "*** End Patch"):
+		case strings.HasPrefix(line, "*** End Patch"):
+			active = nil
+			// It closes a block, and models write several blocks in one
+			// patch, so another one after it carries on. Anything that is
+			// not another block is not part of the patch at all — seen as
+			// a burst of corrupted tokens after the end marker, read as a
+			// hunk and unplaceable, costing the round trip that the retry
+			// (the same patch without the garbage) then spent.
+			if !moreBlocksAfter(lines, position+1) {
+				return finish(patches)
+			}
+		case strings.HasPrefix(line, "*** Begin Patch"):
 			active = nil
 		case strings.HasPrefix(line, "*** Update File:"), strings.HasPrefix(line, "*** Add File:"):
 			_, raw, _ := strings.Cut(line, ":")
@@ -297,6 +309,30 @@ func parsePatch(patch string) ([]filePatch, error) {
 			active = nil
 		}
 	}
+	return finish(patches)
+}
+
+// moreBlocksAfter reports whether anything from here on is patch syntax
+// rather than whatever the model emitted once it had stopped writing one.
+func moreBlocksAfter(lines []string, from int) bool {
+	for _, line := range lines[min(from, len(lines)):] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "*** "), strings.HasPrefix(line, "diff --git "),
+			strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "),
+			compactHeader(line) != nil:
+			return true
+		}
+	}
+	return false
+}
+
+// finish drops the hunks that collected nothing and refuses a patch that
+// named no file. Called both at the end of the input and at an explicit
+// "*** End Patch", which is the same end reached sooner.
+func finish(patches []filePatch) ([]filePatch, error) {
 	if len(patches) == 0 {
 		return nil, fmt.Errorf("no file headers in patch")
 	}

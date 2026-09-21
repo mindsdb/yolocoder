@@ -24,6 +24,20 @@ func TestLooksLikeError(t *testing.T) {
 	}
 }
 
+func TestNonActionableBrowserError(t *testing.T) {
+	cases := map[string]bool{
+		"Canvas2D: Multiple readback operations":                true,
+		"[Violation] 'requestAnimationFrame' handler took 42ms": true,
+		"The dev server is not reachable yet: dial tcp refused": true,
+		"TypeError: Cannot read properties of undefined":        false,
+	}
+	for text, want := range cases {
+		if got := isNonActionableBrowserError(text); got != want {
+			t.Errorf("isNonActionableBrowserError(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
 func TestErrorWatcherCoalescesABurstIntoOneReport(t *testing.T) {
 	var mutex sync.Mutex
 	var fired []string

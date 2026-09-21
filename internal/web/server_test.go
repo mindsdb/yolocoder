@@ -244,6 +244,26 @@ func TestClientErrorIsIgnoredWhileBusy(t *testing.T) {
 	}
 }
 
+func TestClientErrorIgnoresBrowserDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	hub := newHub()
+	server := &Server{root: dir, hub: hub, proc: newProcess(dir, hub, newErrorWatcher(func(string) {}))}
+	mux := http.NewServeMux()
+	server.routes(mux)
+
+	body := `{"error":{"message":"[Violation] 'requestAnimationFrame' handler took 42ms"}}`
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/client-error", strings.NewReader(body)))
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	server.offerMutex.Lock()
+	defer server.offerMutex.Unlock()
+	if len(server.offers) != 0 {
+		t.Fatalf("offers = %d, want browser diagnostics ignored", len(server.offers))
+	}
+}
+
 func TestClientErrorStagesOfferWhenIdle(t *testing.T) {
 	dir := t.TempDir()
 	hub := newHub()

@@ -36,8 +36,11 @@ func TestAppProxyServesASelfHealingPageWhenNothingIsRunning(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("X-YoloCoder-Reconnecting"); got != "true" {
+		t.Fatalf("reconnecting header = %q, want true", got)
 	}
 	body := recorder.Body.String()
 	if !strings.Contains(body, "isn't running yet") {
@@ -52,15 +55,29 @@ func TestAppProxyServesASelfHealingPageWhenNothingIsRunning(t *testing.T) {
 
 func TestWriteSelfHealingPageSubstitutesTheMessage(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	writeSelfHealingPage(recorder, http.StatusBadGateway, "dev server is not reachable yet: dial tcp refused")
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadGateway)
+	writeSelfHealingPage(recorder, "dev server is not reachable yet: dial tcp refused")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Header().Get("X-YoloCoder-Reconnecting"); got != "true" {
+		t.Fatalf("reconnecting header = %q, want true", got)
 	}
 	body := recorder.Body.String()
 	if !strings.Contains(body, "dial tcp refused") {
 		t.Fatalf("body = %s, want the specific error message included", body)
 	}
+	if !strings.Contains(body, "maxAttempts=60") || !strings.Contains(body, "attempt+1") {
+		t.Fatalf("body = %s, want bounded retry logic", body)
+	}
 	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
 		t.Fatalf("Content-Type = %q, want text/html", got)
+	}
+}
+
+func TestErrorShimFiltersBrowserDiagnostics(t *testing.T) {
+	for _, marker := range []string{"willreadfrequently", "requestanimationframe", "forced reflow", "long task"} {
+		if !strings.Contains(errorShim, marker) {
+			t.Fatalf("error shim does not filter %q diagnostics", marker)
+		}
 	}
 }

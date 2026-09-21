@@ -24,10 +24,14 @@ import (
 // an Error object, or a string shaped like one — so ordinary logging,
 // HMR chatter and deprecation warnings never become chat cards.
 const errorShim = `<script>(function(){
+function isDiagnostic(text){
+  return /(?:\[violation\]|canvas2d:|willreadfrequently|requestanimationframe(?: handler)? took|forced reflow|long task)/i.test(String(text||""));
+}
 function report(type,err,extra){
   var message="",stack="";
   if(err&&err.stack){message=String(err.message||err);stack=String(err.stack);}
   else{message=String((err&&err.message)||err);stack=(err&&err.stack)||"";}
+  if(!message||isDiagnostic(message)||isDiagnostic(stack)){return;}
   var payload={message:message,stack:String(stack)};
   if(extra){for(var key in extra){payload[key]=extra[key];}}
   window.parent.postMessage({type:type,error:payload},"*");
@@ -65,19 +69,36 @@ const selfHealingPage = `<!doctype html>
 <head><meta charset="utf-8"><title>Reconnecting…</title></head>
 <body style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#666;background:#fff;padding:2rem;line-height:1.6">
 <p>%s</p>
-<p style="color:#999;font-size:0.85em">Checking again every couple of seconds — this reloads on its own once it's back.</p>
-<script>(function poll(){
-fetch(location.href,{cache:"no-store"}).then(function(response){
-  if(response.ok){location.reload();return;}
-  setTimeout(poll,2000);
-},function(){setTimeout(poll,2000);});
-})();</script>
+<p id="retry-status" style="color:#999;font-size:0.85em">Checking again every couple of seconds — this reloads on its own once it's back.</p>
+<script>(function poll(attempt){
+  var maxAttempts=60;
+  if(attempt>=maxAttempts){
+    document.getElementById("retry-status").textContent="The dev server is still unavailable. Reload this preview to try again.";
+    return;
+  }
+  fetch(location.href,{cache:"no-store"}).then(function(response){
+    if(response.headers.get("X-YoloCoder-Reconnecting")!=="true"){
+      location.reload();
+      return;
+    }
+    var delay=Math.min(10000,1000+attempt*250);
+    setTimeout(function(){poll(attempt+1);},delay);
+  },function(){
+    var delay=Math.min(10000,1000+attempt*250);
+    setTimeout(function(){poll(attempt+1);},delay);
+  });
+})(0);</script>
 </body>
 </html>`
 
-func writeSelfHealingPage(response http.ResponseWriter, status int, message string) {
+func writeSelfHealingPage(response http.ResponseWriter, message string) {
+	// This is a deliberate recovery document, not an application response.
+	// Returning 200 avoids a red 502 in DevTools during the normal few
+	// seconds when Vite or the supervised process is restarting. The private
+	// header lets the page distinguish itself from the real app on each poll.
 	response.Header().Set("Content-Type", "text/html; charset=utf-8")
-	response.WriteHeader(status)
+	response.Header().Set("X-YoloCoder-Reconnecting", "true")
+	response.WriteHeader(http.StatusOK)
 	fmt.Fprintf(response, selfHealingPage, message)
 }
 
@@ -117,7 +138,7 @@ func newAppProxy(portFn func() int) http.Handler {
 		Transport:      &http.Transport{DisableKeepAlives: true},
 		ModifyResponse: injectShim,
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
-			writeSelfHealingPage(response, http.StatusBadGateway, "dev server is not reachable yet: "+err.Error())
+			writeSelfHealingPage(response, "dev server is not reachable yet: "+err.Error())
 		},
 		// ErrorHandler above only runs for a failure before any response
 		// has gone out; one that happens partway through streaming a
@@ -129,7 +150,7 @@ func newAppProxy(portFn func() int) http.Handler {
 	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if portFn() == 0 {
-			writeSelfHealingPage(response, http.StatusServiceUnavailable, "The dev server isn't running yet.")
+			writeSelfHealingPage(response, "The dev server isn't running yet.")
 			return
 		}
 		proxy.ServeHTTP(response, request)

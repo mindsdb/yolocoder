@@ -26,17 +26,47 @@ function updateLatestBtn() {
   btnLatest.hidden = pinned;
 }
 
+let scrollFrame = 0;
+let scrollReadPending = false;
+let scrollWritePending = false;
+let scrollForcePending = false;
+
+// Scroll reads and writes are batched together. A build can publish many log
+// lines in one frame; doing a layout read and scroll write for each one makes
+// the chat compete with the app iframe for the same main thread. Reads happen
+// first so a user scroll in the same frame always wins over a non-forced write.
+function scheduleScrollFrame() {
+  if (scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => {
+    const readPending = scrollReadPending;
+    const writePending = scrollWritePending;
+    const forceScroll = scrollForcePending;
+    scrollReadPending = false;
+    scrollWritePending = false;
+    scrollForcePending = false;
+    scrollFrame = 0;
+
+    if (readPending) {
+      pinned = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= PIN_THRESHOLD;
+    }
+    if (writePending && (pinned || forceScroll)) {
+      chatLog.scrollTop = chatLog.scrollHeight;
+      if (forceScroll) pinned = true;
+    }
+    updateLatestBtn();
+  });
+}
+
 function scrollToLatest(force) {
-  if (pinned || force) {
-    chatLog.scrollTop = chatLog.scrollHeight;
-  }
-  updateLatestBtn();
+  scrollWritePending = true;
+  scrollForcePending = scrollForcePending || !!force;
+  scheduleScrollFrame();
 }
 
 chatLog.addEventListener("scroll", () => {
-  pinned = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= PIN_THRESHOLD;
-  updateLatestBtn();
-});
+  scrollReadPending = true;
+  scheduleScrollFrame();
+}, { passive: true });
 
 btnLatest.addEventListener("click", () => {
   pinned = true;

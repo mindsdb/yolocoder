@@ -83,6 +83,29 @@ func looksLikeError(line string) bool {
 	return false
 }
 
+// isNonActionableBrowserError filters diagnostics and the proxy's brief
+// reconnect state from /client-error. These are useful in DevTools, but they
+// are not bugs an agent can fix: forwarding them would turn a slow frame or a
+// normal dev-server restart into an ask-first card and invite a needless loop.
+func isNonActionableBrowserError(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"[violation]",
+		"canvas2d:",
+		"willreadfrequently",
+		"requestanimationframe",
+		"forced reflow",
+		"long task",
+		"dev server is not reachable",
+		"the dev server isn't running yet",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // autoFixGuard stops the same error from re-triggering an auto-fix
 // indefinitely. The runner's own patch/test loop already retries a single
 // attempt a few times; this bounds how many separate auto-fix *attempts*

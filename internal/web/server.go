@@ -596,7 +596,10 @@ func (server *Server) handleClientError(response http.ResponseWriter, request *h
 	if report.Error.Stack != "" {
 		fmt.Fprintln(&text, report.Error.Stack)
 	}
-	server.offerError("browser", strings.TrimRight(text.String(), "\n"))
+	clientError := strings.TrimRight(text.String(), "\n")
+	if !isNonActionableBrowserError(clientError) {
+		server.offerError("browser", clientError)
+	}
 	response.WriteHeader(http.StatusAccepted)
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mindsdb/yolocoder/internal/debug"
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
 
@@ -574,6 +575,7 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 			}
 		}
 		session.lastFailure = err
+		session.recordFailure(patch, err)
 		return "The patch did not apply and nothing was changed.\n\n" + err.Error() + session.staleContents(err),
 			repo.Explain(err)
 	}
@@ -592,6 +594,29 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 	return "Applied. Changed: " + strings.Join(changed, ", ") +
 		". Every edit in that patch was placed; the files contain them now. " +
 		"Do not read them again to check.", nil
+}
+
+// recordFailure writes a rejected patch where it can be read back later.
+//
+// This is the one thing worth keeping from a turn that went wrong, and
+// until now nothing kept it: the session log holds that a patch failed
+// and how many times, never the patch or what the rejection said. So
+// "why does this folder need a second attempt so often?" could only be
+// answered by counting, which says there is a problem and nothing about
+// what it is.
+//
+// Only failures are recorded. A turn that lands first time has already
+// told us everything by landing.
+func (session *changeSession) recordFailure(patch string, err error) {
+	debug.Record("patch_rejected", map[string]any{
+		"folder":  session.runner.repository.Root,
+		"task":    session.task,
+		"attempt": session.used["apply_diff"],
+		"reasons": repo.Explain(err),
+		"paths":   repo.PatchPaths(patch),
+		"patch":   patch,
+		"detail":  err.Error(),
+	})
 }
 
 // staleContents are the current contents of the files a failed patch
@@ -770,7 +795,10 @@ func (runner *Runner) runTests(ctx context.Context) (TestResult, time.Duration) 
 // in it from the tool calls, so a failed attempt costs only the evidence
 // appended to the end, not another copy of everything.
 type changeSession struct {
-	runner     *Runner
+	runner *Runner
+	// task is kept only so a failure record says what was being asked
+	// when a patch was rejected. Nothing reads it during the turn.
+	task       string
 	transcript []any
 	readPaths  []string
 	// applied are the files edits actually landed in, attempted the ones
@@ -864,6 +892,7 @@ func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollectio
 	fmt.Fprintf(&opening, "TASK:\n%s", task)
 	return &changeSession{
 		runner:     runner,
+		task:       task,
 		transcript: []any{inputMessage{Role: "user", Content: opening.String(), Images: images}},
 		used:       map[string]int{},
 	}
@@ -1259,9 +1288,20 @@ For modifications:
 +new line
  context after
 
-Context is optional and starts with a space. Use only enough of it to identify the edit
-uniquely — prefer a short anchor that appears once over a long one, since every line you
-write is a line that has to match exactly. A blank line separates one edit from the next, and so does a bare @@ if that is
+Context is optional and starts with a space. Use it to make the edit unique.
+
+A hunk is placed by finding its lines in the file. If those lines appear more than once, it
+cannot be placed at all — the patch is rejected as ambiguous and you write it again. This is
+one of the most common ways an edit fails. It bites on short lines: }, );, return null, an
+import, a closing tag, the same call in two handlers.
+
+So before you write a hunk, ask whether its lines appear only once in that file. If they do
+not, add a line of context above and a line below — the nearest line that is unique, such as
+a function signature, a distinctive string or a JSX tag. One line each side is usually enough.
+Do not pad with ten: every context line must match the file character for character, so long
+context fails a different way.
+
+A blank line separates one edit from the next, and so does a bare @@ if that is
 what comes naturally. No line numbers and no counts — edits are placed by matching your text
 against the file, so none of that is read.
 

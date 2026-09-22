@@ -711,13 +711,16 @@ func locate(lines, block []string) (int, *HunkError) {
 // failed repair attempts before falling back to a whole-file rewrite).
 func disambiguate(lines []string, matches []int) string {
 	var text strings.Builder
-	text.WriteString("\n\nadd a line of context right before it to tell them apart:")
+	text.WriteString("\n\nadd context above and below to tell them apart — here is what surrounds each:")
 	for _, index := range matches {
-		before := "(start of file)"
+		before, after := "(start of file)", "(end of file)"
 		if index > 0 {
 			before = strings.TrimSpace(lines[index-1])
 		}
-		fmt.Fprintf(&text, "\n  line %d, preceded by: %q", index+1, before)
+		if end := index + 1; end < len(lines) {
+			after = strings.TrimSpace(lines[end])
+		}
+		fmt.Fprintf(&text, "\n  line %d\n    above: %q\n    below: %q", index+1, before, after)
 	}
 	return text.String()
 }

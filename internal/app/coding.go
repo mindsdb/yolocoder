@@ -24,6 +24,7 @@ var SessionCommands = []terminal.Command{
 	{Name: "/setup", Description: "connect an LLM provider"},
 	{Name: "/model", Description: "choose the model to use"},
 	{Name: "/debug", Description: "show the raw model exchange"},
+	{Name: "/errors", Description: "show what recently failed to apply"},
 	{Name: "/recall", Description: "toggle reading turns older than the last few"},
 	{Name: "/preselect", Description: "toggle choosing a turn's files before asking"},
 	{Name: "/help", Description: "show these commands"},
@@ -146,4 +147,52 @@ func Folder() string {
 		}
 	}
 	return directory
+}
+
+// LooksLikeCommand reports whether a message was probably meant as a
+// command rather than said to the model, and names the closest one.
+//
+// "--ebug" cost a round trip and a puzzled reply: it is not slash-
+// prefixed, so it went to the model as a question, which answered it as
+// best it could. Anything short and punctuation-led is a better guess at
+// a mistyped command than at something worth asking.
+func LooksLikeCommand(input string) (string, bool) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" || len(strings.Fields(trimmed)) > 1 {
+		return "", false
+	}
+	word := strings.ToLower(strings.TrimLeft(trimmed, "-/"))
+	if word == "" || word == trimmed {
+		return "", false // no leading punctuation: ordinary words stay ordinary
+	}
+	best, distance := "", len(word)/2+2
+	for _, command := range SessionCommands {
+		name := strings.TrimPrefix(command.Name, "/")
+		if gap := editDistance(word, name); gap < distance {
+			best, distance = command.Name, gap
+		}
+	}
+	return best, best != ""
+}
+
+// editDistance is Levenshtein, over inputs short enough that the simple
+// full-matrix version costs nothing worth saving.
+func editDistance(a, b string) int {
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			current[j] = min(min(current[j-1]+1, previous[j]+1), previous[j-1]+cost)
+		}
+		previous, current = current, previous
+	}
+	return previous[len(b)]
 }

@@ -190,6 +190,10 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		toggleDebug()
 		fmt.Println()
 		return true, false
+	case "/errors":
+		printRecentFailures()
+		fmt.Println()
+		return true, false
 	case "/recall":
 		toggleRecall(fromEnvironment, provider)
 		fmt.Println()
@@ -218,6 +222,14 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		if code := app.RunModel(nil); code == 0 {
 			reloadProvider(provider)
 		}
+		fmt.Println()
+		return true, false
+	}
+	// A mistyped command, slash-led or otherwise. "--ebug" used to reach
+	// the model, which answered the question it appeared to be.
+	if nearest, ok := app.LooksLikeCommand(input); ok {
+		fmt.Printf("[*_*] %q isn't a command. Did you mean %s?\n", strings.TrimSpace(input), nearest)
+		app.PrintCommands()
 		fmt.Println()
 		return true, false
 	}
@@ -427,4 +439,35 @@ func record(history *session.Log, task string, outcome agent.Outcome) {
 // with jq and friends.
 func millis(spent time.Duration) int {
 	return int(spent.Round(time.Millisecond) / time.Millisecond)
+}
+
+// printRecentFailures shows the patches that were rejected lately, from
+// the record every run keeps. Short on purpose — enough to recognise the
+// problem, with the file named for anyone who wants the whole thing.
+func printRecentFailures() {
+	recent := debug.Recent(5)
+	if len(recent) == 0 {
+		fmt.Println("[^_^] Nothing has failed to apply. Records go to " + debug.RecordsPath())
+		return
+	}
+	for _, entry := range recent {
+		fmt.Printf("[*_*] %v  %v\n", entry["at"], entry["folder"])
+		if task, ok := entry["task"].(string); ok && task != "" {
+			fmt.Println("      task: " + firstLine(task))
+		}
+		if reasons, ok := entry["reasons"].([]any); ok {
+			for _, reason := range reasons {
+				fmt.Printf("      %v\n", reason)
+			}
+		}
+	}
+	fmt.Println("\n[^_^] Full records, patches included: " + debug.RecordsPath())
+}
+
+func firstLine(text string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	if len(line) > 100 {
+		return line[:100] + "..."
+	}
+	return line
 }

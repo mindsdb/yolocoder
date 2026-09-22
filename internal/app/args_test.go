@@ -152,3 +152,45 @@ func TestNotesCarryNoTurnNumber(t *testing.T) {
 		}
 	}
 }
+
+func TestAMistypedCommandIsRecognised(t *testing.T) {
+	// "--ebug" reached the model and was answered as a question, costing
+	// a round trip and a puzzled reply.
+	for input, want := range map[string]string{
+		"--ebug":    "/debug",
+		"-debug":    "/debug",
+		"/moddel":   "/model",
+		"//exit":    "/exit",
+		"--recal":   "/recall",
+		"/preselct": "/preselect",
+	} {
+		got, ok := LooksLikeCommand(input)
+		if !ok || got != want {
+			t.Errorf("LooksLikeCommand(%q) = %q, %v; want %q", input, got, ok, want)
+		}
+	}
+}
+
+func TestOrdinaryWordsAreNotCommands(t *testing.T) {
+	// Everything here is something a person might actually type, and
+	// answering any of it with a command list would be worse than the
+	// round trip the check exists to save.
+	for _, input := range []string{
+		"add a pause button",
+		"why is the build failing",
+		"debug",                      // no leading punctuation
+		"exit the fullscreen mode",   // more than one word
+		"--ebug the whole thing now", // ditto
+		"",
+	} {
+		if got, ok := LooksLikeCommand(input); ok {
+			t.Errorf("LooksLikeCommand(%q) = %q, want it left alone", input, got)
+		}
+	}
+}
+
+func TestSomethingNothingLikeACommandIsLeftAlone(t *testing.T) {
+	if got, ok := LooksLikeCommand("/qqqqqqzzzz"); ok {
+		t.Fatalf("LooksLikeCommand() = %q, want no guess at all", got)
+	}
+}

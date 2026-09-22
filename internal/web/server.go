@@ -808,6 +808,17 @@ func (server *Server) runTask(ctx context.Context, task string, images []string,
 
 	server.hub.publish("chat", chatMessage{Role: role, Text: task, Images: images})
 
+	// The web UI has no commands — the model picker and the buttons do
+	// what the terminal's slash commands do — so one typed here would go
+	// to the model, which answers it as the question it appears to be.
+	// Saying so costs nothing where that costs a turn.
+	if _, looks := app.LooksLikeCommand(task); looks && len(images) == 0 {
+		server.hub.publish("chat", chatMessage{Role: "system", Text: "That looks like a command. " +
+			"This window doesn't take them — the model is in the picker below, and the buttons above " +
+			"restart the app. Ask for a change in plain words instead."})
+		return agent.Outcome{}, nil
+	}
+
 	turns, _ := session.Recent(server.root)
 	outcome, err := app.RunTask(ctx, task, images, server.currentProvider(), app.Recollections(turns), hubProgress{server.hub})
 	if err != nil {

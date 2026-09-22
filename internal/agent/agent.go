@@ -76,6 +76,12 @@ type toolArguments struct {
 	// Comment is what the model would have said at the end of the turn,
 	// written with its last edit instead of in a round trip of its own.
 	Comment string `json:"response_comment_for_user"`
+	// Complete is the model saying this edit finishes the task. It used
+	// to be inferred from Comment being empty, which asked the model to
+	// signal a decision by the absence of a string — subtle, easy to get
+	// wrong, and wrong silently: a turn that guessed "not finished" paid
+	// a whole extra round saying "done" and was never told it had.
+	Complete bool `json:"turn_is_complete"`
 }
 
 // inputMessage is one message sent to the model. Images (data URLs pasted
@@ -586,7 +592,14 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 	}
 	// Recorded only now, after the edit actually landed: a note left on a
 	// patch that could not be placed would end the turn on a promise.
-	session.closing = strings.TrimSpace(arguments.Comment)
+	//
+	// Either signal ends the turn. The flag is the one the model is asked
+	// for, but a filled-in reply says the same thing and used to be the
+	// only signal there was, so honouring both costs nothing and keeps
+	// the saving when a model sets one and not the other.
+	if arguments.Complete || strings.TrimSpace(arguments.Comment) != "" {
+		session.closing = strings.TrimSpace(arguments.Comment)
+	}
 	// Said plainly, because the alternative is what happened on the first
 	// real run: the model applied an edit, was told only "Applied", and
 	// spent three further round trips reading the files back to see
@@ -1279,13 +1292,14 @@ func repositoryTools(recall bool) []functionTool {
 		// patch is named first, and required first, so a long comment
 		// cannot spend the output room the patch needs — which is the
 		// failure a summary field written ahead of a diff used to cause.
-		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. On your last edit, put your closing note to the user in response_comment_for_user and the turn ends there; leave it empty while you still have work to do.", Strict: true, Parameters: map[string]any{
+		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. Set turn_is_complete to true when this edit finishes the task, and put your reply to the user in response_comment_for_user; the turn ends there and you do not get asked again.", Strict: true, Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"patch":                     map[string]any{"type": "string"},
+				"turn_is_complete":          map[string]any{"type": "boolean"},
 				"response_comment_for_user": map[string]any{"type": "string"},
 			},
-			"required": []string{"patch", "response_comment_for_user"}, "additionalProperties": false,
+			"required": []string{"patch", "turn_is_complete", "response_comment_for_user"}, "additionalProperties": false,
 		}},
 	}
 	if recall {
@@ -1338,10 +1352,18 @@ files from the map but still have to find others. That is one round instead of t
 apply_diff — make the edit. Read a file before changing it; never write an edit against
   contents you have not seen. When it says the patch applied, it applied: every edit was
   placed and the file contains it. Do not read the file back to check.
-  response_comment_for_user — leave it empty while you still have work to do. On your last
-  edit, write there what you would have said at the end: what you changed, and anything the
-  user should know. If that edit applies and the project's check passes, your note is the
-  reply and the turn is over. It saves you a whole round trip spent saying "done".
+  turn_is_complete — true when this edit is the last one the task needs, false when you
+  still have more to do. Decide it on the task, not on how the edit went: an edit that
+  landed on the third attempt still finishes the task if nothing is left to change.
+  response_comment_for_user — when turn_is_complete is true this is your reply to the user,
+  so write it properly: what you changed, and anything they should know. The turn ends
+  there and you are not asked again, which saves a whole round trip spent saying "done".
+  Leave both empty and false while you still have work to do.
+  Set it on the assumption that this patch applies. If it does not, nothing is written,
+  the flag is ignored and you get another go — so a patch that was rejected before is no
+  reason to hold the turn open now.
+  Saying you are finished locks nothing in: the project's check still runs afterwards,
+  and if it fails the turn carries on and you fix it.
 recall, when it is offered — the turns before the few already above, for a message that
   reaches back further than they go.
 

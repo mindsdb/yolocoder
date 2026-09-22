@@ -22,7 +22,12 @@ const (
 	// demand rather than pushed into every turn, and how often a turn
 	// actually reaches for it is what says whether that was right.
 	StepRecall Step = "recall"
-	StepMap    Step = "map"
+	// StepFiles is choosing a turn's files before the model is asked for
+	// them. Its own step because the whole point of it is a comparison:
+	// it is worth keeping only while it costs less than the call it
+	// removes, and that is a number rather than an opinion.
+	StepFiles Step = "files"
+	StepMap   Step = "map"
 	// StepThink is time waiting on the model, StepTools the time spent
 	// answering the tool calls it came back with. Splitting them
 	// separates what the provider costs from what reading and editing

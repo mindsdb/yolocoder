@@ -194,6 +194,10 @@ func runCommand(input string, fromEnvironment bool, provider *config.LLM) (handl
 		toggleRecall(fromEnvironment, provider)
 		fmt.Println()
 		return true, false
+	case "/preselect":
+		togglePreselect(fromEnvironment, provider)
+		fmt.Println()
+		return true, false
 	case "/setup":
 		if fromEnvironment {
 			fmt.Println("[*_*] /setup can't change an OPENAI_* environment provider; restart without --llm-from-env-vars to use a saved one.")
@@ -246,6 +250,28 @@ func toggleRecall(fromEnvironment bool, provider *config.LLM) {
 	}
 	fmt.Printf("[*_*] Recall %s. The agent %s read turns older than the last %d it is shown.\n",
 		state, map[bool]string{true: "can now", false: "can no longer"}[provider.Recall], 3)
+}
+
+// togglePreselect turns file preselection on or off from here on, the
+// same way /recall does, and for the same reason: it is worth keeping
+// only while it costs less than the call it removes, so it has to be
+// possible to run a few turns each way.
+func togglePreselect(fromEnvironment bool, provider *config.LLM) {
+	provider.Preselect = !provider.Preselect
+	state := "off"
+	if provider.Preselect {
+		state = "on"
+	}
+	if fromEnvironment {
+		fmt.Printf("[*_*] File preselection %s for this session. An OPENAI_* environment provider can't be saved.\n", state)
+		return
+	}
+	if err := config.Save(*provider); err != nil {
+		fmt.Printf("[*_*] File preselection %s for this session, but it could not be saved: %v\n", state, err)
+		return
+	}
+	fmt.Printf("[*_*] File preselection %s. A turn %s the files it needs before asking the model for them.\n",
+		state, map[bool]string{true: "now picks", false: "no longer picks"}[provider.Preselect])
 }
 
 // openHistory starts or continues this folder's session log.

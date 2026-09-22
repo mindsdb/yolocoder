@@ -222,6 +222,9 @@ type Runner struct {
 	// few turns of it ride along in the opening message; the rest is held
 	// here for the recall tool to serve, when that tool is offered at all.
 	earlier []Recollection
+	// preselect reports whether the files a task needs are chosen before
+	// the model is asked, rather than by it.
+	preselect bool
 	// recall reports whether the recall tool is offered this run. Off by
 	// default (see config.LLM.Recall): the inline turns already answer
 	// almost every follow-up, and an unused tool is still a definition on
@@ -240,6 +243,10 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 // UseRecall offers (or withholds) the tool for reading further back than
 // the turns carried inline.
 func (runner *Runner) UseRecall(on bool) { runner.recall = on }
+
+// UsePreselect turns on choosing a turn's files before the model is
+// asked for them.
+func (runner *Runner) UsePreselect(on bool) { runner.preselect = on }
 
 // inlineTurns is how many of the most recent turns ride along in the
 // opening message. Measured on a real folder, three of them come to
@@ -310,6 +317,21 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 
 	progress.Status("Working out the change...")
 	session := runner.newChangeSession(task, repoMap, notes, images)
+
+	// The files first, if that is switched on. It is an optimization and
+	// behaves like one: anything at all going wrong leaves the turn
+	// exactly as it was, with the model asking for what it wants.
+	if runner.preselect {
+		progress.Status("Choosing the files...")
+		started := time.Now()
+		chosen := runner.chooseFiles(ctx, task, mapped)
+		spent := time.Since(started)
+		runner.profile.record(StepFiles, spent)
+		if len(chosen) > 0 {
+			session.preread(chosen, progress)
+		}
+		progress.Log("  chose files · " + formatDuration(spent))
+	}
 	outcome, err := session.work(ctx, progress)
 	// The whole-file fallback is for a model that ran out of room, not
 	// one that made up its mind. A turn that finished on its own saying

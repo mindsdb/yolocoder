@@ -28,6 +28,12 @@ type LLM struct {
 	// here because this is the one settings file there is, not because
 	// it has anything to do with the provider.
 	Recall bool
+	// Preselect chooses a turn's files with the decision model before
+	// the coding model is asked for them, removing the round trip that
+	// exists only to pick. Off by default: it is worth keeping only
+	// while it costs less than the call it removes, and that is
+	// measured per project rather than assumed.
+	Preselect bool
 }
 
 const (
@@ -36,12 +42,13 @@ const (
 )
 
 type settings struct {
-	Version  int    `json:"version"`
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
-	Model    string `json:"model,omitempty"`
-	API      string `json:"api,omitempty"`
-	Recall   bool   `json:"recall,omitempty"`
+	Version   int    `json:"version"`
+	Provider  string `json:"provider"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model,omitempty"`
+	API       string `json:"api,omitempty"`
+	Recall    bool   `json:"recall,omitempty"`
+	Preselect bool   `json:"preselect,omitempty"`
 }
 
 type credentials struct {
@@ -87,7 +94,7 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall}, true, nil
+	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect}, true, nil
 }
 
 func Save(provider LLM) error {
@@ -102,7 +109,7 @@ func Save(provider LLM) error {
 	if err != nil {
 		return err
 	}
-	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall}
+	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall, Preselect: provider.Preselect}
 	if err := writeJSON(filepath.Join(dir, "config.json"), public, 0o644); err != nil {
 		return fmt.Errorf("save configuration: %w", err)
 	}

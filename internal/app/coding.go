@@ -25,6 +25,7 @@ var SessionCommands = []terminal.Command{
 	{Name: "/model", Description: "choose the model to use"},
 	{Name: "/debug", Description: "show the raw model exchange"},
 	{Name: "/recall", Description: "toggle reading turns older than the last few"},
+	{Name: "/preselect", Description: "toggle choosing a turn's files before asking"},
 	{Name: "/help", Description: "show these commands"},
 	{Name: "/exit", Description: "end the session"},
 }
@@ -78,6 +79,7 @@ func RunTask(ctx context.Context, task string, images []string, provider config.
 	}
 	runner := agent.NewRunner(client, repository)
 	runner.UseRecall(provider.Recall)
+	runner.UsePreselect(provider.Preselect)
 	outcome, runErr := runner.Run(ctx, task, images, history, progress)
 	rememberDialect(provider, client)
 	return outcome, runErr

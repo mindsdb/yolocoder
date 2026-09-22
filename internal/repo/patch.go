@@ -572,7 +572,7 @@ func placeTruncated(lines []string, current hunk) ([]string, bool) {
 	}
 
 	tail := lines[index+len(head)][len(last):]
-	after := append(append([]string{}, current.after...))
+	after := append([]string{}, current.after...)
 	after[len(after)-1] += tail
 
 	placed := make([]string, 0, len(lines)-len(current.before)+len(after))

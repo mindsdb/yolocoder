@@ -1019,6 +1019,77 @@ func (runner *Runner) readFiles(paths []string) (string, error) {
 	return answer.String() + text, nil
 }
 
+// filesBehind are the contents of the files a search just matched in,
+// appended to its own output.
+//
+// Searching and then reading what was found is two round trips for one
+// intention, and the second one is pure latency: the model has the paths
+// already, it just has no way to say "and those" without another call.
+// A probe of the provider showed it will happily emit read_files and
+// search together in one response — so the parallel case already costs
+// nothing — but it cannot read what it has not yet searched for. That
+// sequence is the one still worth collapsing.
+//
+// Only when the search actually narrowed something. A query matching
+// nine files was exploratory and the model should pick from the list;
+// the files it wants get read next round either way, and sending all
+// nine costs more than the trip it saves. Files already shown are left
+// out, as everywhere else, because every copy is resent on every round
+// that follows.
+func (runner *Runner) filesBehind(output string) string {
+	paths := searchPaths(output)
+	var fresh []string
+	for _, path := range paths {
+		if !runner.alreadyShown(path) {
+			fresh = append(fresh, path)
+		}
+	}
+	if len(fresh) == 0 || len(fresh) > maxSearchFiles {
+		return ""
+	}
+	text, err := runner.readFiles(fresh)
+	if err != nil {
+		// Too large to be worth it, unreadable, whatever it was: the
+		// model still has the match list and reads what it wants.
+		return ""
+	}
+	return "\n\nThose matches are in " + strconv.Itoa(len(fresh)) + " " +
+		plural(len(fresh), "file", "files") + ", so here " +
+		plural(len(fresh), "it is", "they are") + " in full. " +
+		"Do not call read_files for " + plural(len(fresh), "it", "them") + ".\n\n" + text
+}
+
+// maxSearchFiles is how many files a search may hand back with it. Past
+// this the search did not narrow anything and the list is the answer.
+const maxSearchFiles = 4
+
+// searchPaths are the distinct files named in ripgrep output, in the
+// order they first appear. Lines are "path:line:text"; anything without
+// that shape (a truncation notice, "No matches.") is skipped.
+func searchPaths(output string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		path, rest, found := strings.Cut(line, ":")
+		if !found || path == "" || strings.HasPrefix(path, " ") {
+			continue
+		}
+		// The second field is the line number. Without it this is prose,
+		// not a match.
+		if number, _, ok := strings.Cut(rest, ":"); !ok {
+			continue
+		} else if _, err := strconv.Atoi(number); err != nil {
+			continue
+		}
+		path = strings.TrimPrefix(path, "./")
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
 // recallEarlier answers a recall call with everything older than the
 // turns already carried inline, unfiltered and in the recorded words.
 // There is no selection: choosing which turns matter was its own model
@@ -1189,7 +1260,7 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 		if err != nil {
 			return "ERROR: " + err.Error()
 		}
-		return output
+		return output + runner.filesBehind(output)
 	case "recall":
 		return runner.recallEarlier()
 	default:
@@ -1257,9 +1328,13 @@ Do not go looking through the files for a message that did not ask you to.
 
 TOOLS
 
-read_files — one call, every file you want. Not one call per file. When search has just told
-  you four files carry the thing, read all four in that one call.
-search — for when the map is not enough to find something.
+read_files — one call, every file you want. Not one call per file.
+search — for when the map is not enough to find something. When the matches land in a few
+  files, it hands you those files whole along with the match list, so you already have them:
+  do not follow a search with read_files for the files it just gave you.
+
+You can call read_files and search in the same reply, and should when you already know some
+files from the map but still have to find others. That is one round instead of two.
 apply_diff — make the edit. Read a file before changing it; never write an edit against
   contents you have not seen. When it says the patch applied, it applied: every edit was
   placed and the file contains it. Do not read the file back to check.

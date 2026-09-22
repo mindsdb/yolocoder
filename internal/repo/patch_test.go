@@ -140,7 +140,7 @@ func TestAmbiguousHunkErrorPointsAtEachMatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an ambiguous hunk to be refused")
 	}
-	for _, want := range []string{"line 2", "line 5", "above: \"function a() {\"", "above: \"function b() {\"", "below: \"}\""} {
+	for _, want := range []string{"at line 2", "at line 5", "function a() {", "function b() {", "> "} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want it to contain %q", err, want)
 		}

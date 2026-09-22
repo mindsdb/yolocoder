@@ -469,10 +469,37 @@ func (repository *Repository) applyByContent(patch string) error {
 // A hunk that fails is skipped rather than aborting the pass, so the rest
 // are still checked against the content as it stands — which is what lets
 // one validation pass find every problem in the patch.
+// changesNothing reports a hunk that would write the file back exactly
+// as it found it.
+func changesNothing(current hunk) bool {
+	if len(current.before) != len(current.after) || len(current.before) == 0 {
+		return false
+	}
+	for index := range current.before {
+		if current.before[index] != current.after[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 	lines := strings.Split(content, "\n")
 	var failures []*HunkError
 	for _, current := range hunks {
+		// A hunk of pure context changes nothing — its before and after
+		// are the same lines — so placing it can only fail, never help.
+		// Models emit them constantly as a way of pointing at where the
+		// next edit goes ("@@ .game-intro-screen__panel { @@"), and one
+		// of those killed a whole patch in a real run: the selector
+		// appeared twice in the stylesheet, the no-op hunk was rejected
+		// as ambiguous, and five real edits in the same patch were
+		// thrown away with it. Twice more, because the repair then
+		// invented context trying to disambiguate something that was
+		// never an edit.
+		if changesNothing(current) {
+			continue
+		}
 		if len(current.before) == 0 {
 			// A pure insertion with no context could go anywhere.
 			if strings.TrimSpace(content) == "" {
@@ -695,34 +722,82 @@ func locate(lines, block []string) (int, *HunkError) {
 		return 0, &HunkError{Reason: reason, Expected: expected, Found: found, Detail: detail, Block: block}
 	case len(matches) > 1 && len(block) < 3:
 		reason := fmt.Sprintf("this hunk's lines appear %d times, too ambiguous to place", len(matches))
-		return 0, &HunkError{Reason: reason, Detail: fmt.Sprintf("%s:\n%s%s", reason, preview(block), disambiguate(lines, matches))}
+		return 0, &HunkError{Reason: reason, Detail: fmt.Sprintf("%s:\n%s%s", reason, preview(block), disambiguate(lines, matches, block))}
 	default:
 		return matches[0], nil
 	}
 }
 
-// disambiguate reports where each ambiguous match actually sits in the
-// file, plus the line immediately before it, so a repair attempt can add
-// that as distinguishing context and land on the right one directly —
-// without this, "appears twice" tells the model nothing it doesn't
-// already know from writing the hunk itself, and a repair is just as
-// likely to reproduce the same ambiguity as fix it (seen in practice: a
-// short call-site line repeated verbatim in two handlers took three
-// failed repair attempts before falling back to a whole-file rewrite).
-func disambiguate(lines []string, matches []int) string {
-	var text strings.Builder
-	text.WriteString("\n\nadd context above and below to tell them apart — here is what surrounds each:")
-	for _, index := range matches {
-		before, after := "(start of file)", "(end of file)"
-		if index > 0 {
-			before = strings.TrimSpace(lines[index-1])
+// disambiguate shows each place the hunk could go, with enough of the
+// real file around it to tell them apart.
+//
+// One line of context above was not enough, and the way it failed was
+// expensive: a stylesheet had ".game-intro-screen__panel {" twice, both
+// preceded by "}", so the report offered the model the same string for
+// both candidates. Having nothing to copy, it invented surrounding
+// lines on the next attempt and failed differently — "these lines are
+// each in the file, but not next to each other" — burning a second
+// round on a hunk that was never an edit.
+//
+// So the window widens until the candidates genuinely differ, and what
+// is printed is the file's own text, to be copied rather than recalled.
+func disambiguate(lines []string, matches []int, block []string) string {
+	span := 1
+	for ; span < maxDisambiguate; span++ {
+		if distinctAround(lines, matches, span, len(block)) {
+			break
 		}
-		if end := index + 1; end < len(lines) {
-			after = strings.TrimSpace(lines[end])
-		}
-		fmt.Fprintf(&text, "\n  line %d\n    above: %q\n    below: %q", index+1, before, after)
 	}
+	var text strings.Builder
+	text.WriteString("\n\nit could go in either place below. Add context until only one matches, " +
+		"copying these lines exactly as they appear here:")
+	for _, index := range matches {
+		fmt.Fprintf(&text, "\n\n  at line %d:", index+1)
+		low, high := window(lines, index, len(block), span)
+		for at := low; at < high; at++ {
+			marker := "    "
+			if at >= index && at < index+len(block) {
+				marker = "  > "
+			}
+			fmt.Fprintf(&text, "\n%s%s", marker, lines[at])
+		}
+	}
+	text.WriteString("\n\nThe lines marked > are the ones you already wrote; the rest is what " +
+		"surrounds them. Lines above and below go in as context, each starting with a space.")
 	return text.String()
+}
+
+// maxDisambiguate bounds how far the report reaches for something that
+// distinguishes the candidates. Past this they are genuinely alike and
+// more lines only make the message harder to use.
+const maxDisambiguate = 6
+
+// window is the span of lines to print around one candidate.
+func window(lines []string, index, height, span int) (int, int) {
+	low := index - span
+	if low < 0 {
+		low = 0
+	}
+	high := index + height + span
+	if high > len(lines) {
+		high = len(lines)
+	}
+	return low, high
+}
+
+// distinctAround reports whether the given span makes every candidate
+// read differently from the others.
+func distinctAround(lines []string, matches []int, span, height int) bool {
+	seen := make(map[string]bool, len(matches))
+	for _, index := range matches {
+		low, high := window(lines, index, height, span)
+		key := strings.Join(lines[low:high], "\n")
+		if seen[key] {
+			return false
+		}
+		seen[key] = true
+	}
+	return true
 }
 
 var entityReplacer = strings.NewReplacer(

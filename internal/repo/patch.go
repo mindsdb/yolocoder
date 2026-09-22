@@ -491,6 +491,13 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 			// is mechanically recoverable: each part places on its own,
 			// and doing it here costs nothing where sending it back
 			// costs a round trip and a whole patch regenerated.
+			// Or the model ran out of room mid-line and stopped. A
+			// 300-character line of JSX has to be reproduced whole to
+			// change eight characters of it, and sometimes it is not.
+			if placed, ok := placeTruncated(lines, current); ok {
+				lines = placed
+				continue
+			}
 			if parts := splitByAnchor(lines, current); parts != nil {
 				placed, partFailures := applyHunks(strings.Join(lines, "\n"), parts)
 				if len(partFailures) == 0 {
@@ -508,6 +515,71 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		lines = replaced
 	}
 	return strings.Join(lines, "\n"), failures
+}
+
+// truncatedFloor is how much of a line has to be present before a prefix
+// is treated as one. Long enough that it cannot plausibly be the start of
+// some other line by accident, which is the whole risk here.
+const truncatedFloor = 40
+
+// placeTruncated applies a hunk whose last removed line was cut off
+// part-way through, keeping the part of the real line the model never
+// got to.
+//
+// This is the failure that survived every other fix: to change eight
+// characters in the middle of a 300-character line of JSX, the format
+// asks for all 300 twice, and a model that stops at 280 produces a line
+// matching nothing. Seen three times in real runs, each costing a round
+// trip and a regenerated patch.
+//
+// The reading is narrow on purpose. Every line but the last must match
+// exactly; the last must be a long prefix of exactly one candidate; and
+// the hunk must add something, because the tail has to go somewhere. The
+// tail is then carried onto the last added line, which is where the
+// model would have written it had it kept going.
+func placeTruncated(lines []string, current hunk) ([]string, bool) {
+	if len(current.before) == 0 || len(current.after) == 0 {
+		return nil, false
+	}
+	head := current.before[:len(current.before)-1]
+	last := current.before[len(current.before)-1]
+	if len(last) < truncatedFloor {
+		return nil, false
+	}
+
+	index, found := -1, 0
+	for start := 0; start+len(current.before) <= len(lines); start++ {
+		matched := true
+		for offset, want := range head {
+			if lines[start+offset] != want {
+				matched = false
+				break
+			}
+		}
+		candidate := lines[start+len(head)]
+		// A prefix, and a real one: a line it matches entirely is an
+		// ordinary match and would have been placed already.
+		if !matched || len(candidate) <= len(last) || !strings.HasPrefix(candidate, last) {
+			continue
+		}
+		if found++; found > 1 {
+			return nil, false
+		}
+		index = start
+	}
+	if found != 1 {
+		return nil, false
+	}
+
+	tail := lines[index+len(head)][len(last):]
+	after := append(append([]string{}, current.after...))
+	after[len(after)-1] += tail
+
+	placed := make([]string, 0, len(lines)-len(current.before)+len(after))
+	placed = append(placed, lines[:index]...)
+	placed = append(placed, after...)
+	placed = append(placed, lines[index+len(current.before):]...)
+	return placed, true
 }
 
 // splitByAnchor breaks a hunk into the separate edits it was probably

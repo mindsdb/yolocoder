@@ -718,3 +718,62 @@ func TestSeveralBlocksStillRunOnPastAnEndMarker(t *testing.T) {
 		t.Fatalf("a.ts = %q", got)
 	}
 }
+
+func TestALineTruncatedMidWayStillPlaces(t *testing.T) {
+	// The real shape, from the run that renamed a title: one 300-character
+	// line of JSX, eight characters to change, and the model stopped at
+	// `className="reset"`. The line matched nothing and the patch was
+	// rejected; the retry was the same edit written out further.
+	line := `          <header><div><p className="eyebrow">ROOM 7</p><h1>tictataco</h1>` +
+		`<p className="subtitle">your turn</p></div><div><button className="reset"` +
+		` onClick={() => reset()}>{t("leave")}</button></div></header>`
+	repository := project(t, map[string]string{
+		"App.tsx": "const before = 1;\n" + line + "\nconst after = 2;\n",
+	})
+
+	cut := `          <header><div><p className="eyebrow">ROOM 7</p><h1>tictataco</h1>` +
+		`<p className="subtitle">your turn</p></div><div><button className="reset"`
+	fixed := strings.Replace(cut, "tictataco", "tictacos", 1)
+	if err := repository.Apply("@App.tsx\n-" + cut + "\n+" + fixed + "\n"); err != nil {
+		t.Fatalf("a truncated line should still place: %v", err)
+	}
+
+	got := read(t, repository, "App.tsx")
+	want := "const before = 1;\n" + strings.Replace(line, "tictataco", "tictacos", 1) + "\nconst after = 2;\n"
+	if got != want {
+		t.Fatalf("the tail was not kept:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestAShortPrefixIsNotTreatedAsATruncation(t *testing.T) {
+	// A few characters could be the start of anything. Only a line long
+	// enough to be unmistakable is read as one that was cut off.
+	repository := project(t, map[string]string{"a.ts": "const x = 1;\nconst y = 2;\n"})
+	if err := repository.Apply("@a.ts\n-const\n+let\n"); err == nil {
+		t.Fatal("a five-character prefix should not match two different lines")
+	}
+}
+
+func TestATruncationMustBeUnambiguous(t *testing.T) {
+	long := "        this is a long line of configuration that goes on for a while"
+	repository := project(t, map[string]string{
+		"a.ts": long + " and ends here;\n" + long + " and ends differently;\n",
+	})
+	if err := repository.Apply("@a.ts\n-" + long + "\n+" + long + " changed\n"); err == nil {
+		t.Fatal("a prefix matching two lines gives no honest answer about which")
+	}
+}
+
+func TestAPureDeletionIsNeverTruncated(t *testing.T) {
+	// The tail has to go somewhere. With nothing added there is nowhere
+	// to put it, and silently dropping the rest of a line is the one
+	// outcome worse than refusing.
+	line := "        const somethingVeryLongIndeed = configure({ alpha: 1, beta: 2 });"
+	repository := project(t, map[string]string{"a.ts": line + " // keep me\n"})
+	if err := repository.Apply("@a.ts\n-" + line + "\n"); err == nil {
+		t.Fatal("a truncated deletion should be refused, not guessed at")
+	}
+	if got := read(t, repository, "a.ts"); !strings.Contains(got, "keep me") {
+		t.Fatalf("the tail was dropped: %q", got)
+	}
+}

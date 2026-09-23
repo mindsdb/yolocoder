@@ -69,10 +69,15 @@ type Rewrite struct {
 }
 
 type toolArguments struct {
-	Paths  []string `json:"paths"`
-	Query  string   `json:"query"`
-	Reason string   `json:"reason"`
-	Patch  string   `json:"patch"`
+	Paths []string `json:"paths"`
+	// Matching is a pattern on file contents. Files that match are read
+	// along with Paths, so knowing what the code says is enough — the
+	// model no longer has to search, wait, and then ask for what the
+	// search found.
+	Matching string `json:"matching"`
+	Query    string `json:"query"`
+	Reason   string `json:"reason"`
+	Patch    string `json:"patch"`
 	// Comment is what the model would have said at the end of the turn,
 	// written with its last edit instead of in a round trip of its own.
 	Comment string `json:"response_comment_for_user"`
@@ -1113,6 +1118,66 @@ func searchPaths(output string) []string {
 	return paths
 }
 
+// pathsMatching is the files a read should answer with: the ones asked
+// for by name, plus the ones whose contents match the pattern.
+//
+// Searching and then reading what was found is two round trips for one
+// intention. Handing the files back with a search fixes half of it, but
+// only half: a model that also wants three files it already knew about
+// still spends a round asking, so the trip only disappears when both
+// can be named at once. This is that — the paths it knows and the
+// pattern for what it does not, in one call.
+//
+// It never fails. A pattern matching half the repository comes back as
+// the list of names with the explicit paths read, which is exactly what
+// a search would have given — no worse than before, and the model picks
+// from it.
+func (runner *Runner) pathsMatching(ctx context.Context, asked []string, pattern string) ([]string, string) {
+	chosen := append([]string{}, asked...)
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return chosen, ""
+	}
+	found, err := runner.repository.Search(ctx, pattern)
+	if err != nil {
+		return chosen, "That pattern could not be searched for (" + err.Error() + "), so only the named files are below.\n\n"
+	}
+	matched := searchPaths(found)
+	if len(matched) == 0 {
+		return chosen, "Nothing matched " + strconv.Quote(pattern) + ".\n\n"
+	}
+	var extra []string
+	for _, path := range matched {
+		if !contains(chosen, path) && !runner.alreadyShown(path) {
+			extra = append(extra, path)
+		}
+	}
+	// Room is what read_files will take at once, minus what was named.
+	room := repo.MaxReadFiles - len(chosen)
+	if room < 0 {
+		room = 0
+	}
+	if len(extra) > room {
+		return chosen, "That pattern matched " + strconv.Itoa(len(matched)) +
+			" files, too many to read at once. Here is where it matched; ask again for the ones you want.\n\n" +
+			found + "\n\n"
+	}
+	chosen = append(chosen, extra...)
+	if len(extra) == 0 {
+		return chosen, ""
+	}
+	return chosen, "Also read, for matching " + strconv.Quote(pattern) + ": " + strings.Join(extra, ", ") + "\n\n"
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // recallEarlier answers a recall call with everything older than the
 // turns already carried inline, unfiltered and in the recorded words.
 // There is no selection: choosing which turns matter was its own model
@@ -1148,6 +1213,11 @@ func (runner *Runner) describeCall(call responseItem) string {
 	}
 	switch call.Name {
 	case "read_files":
+		if pattern := strings.TrimSpace(arguments.Matching); pattern != "" && len(arguments.Paths) == 0 {
+			return "read files matching " + strconv.Quote(pattern)
+		} else if pattern != "" {
+			return "read " + strings.Join(arguments.Paths, ", ") + " and files matching " + strconv.Quote(pattern)
+		}
 		var fresh, seen []string
 		for _, path := range arguments.Paths {
 			if runner.alreadyShown(path) {
@@ -1273,10 +1343,15 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 	}
 	switch call.Name {
 	case "read_files":
-		output, err := runner.readFiles(arguments.Paths)
+		paths, note := runner.pathsMatching(ctx, arguments.Paths, arguments.Matching)
+		if len(paths) == 0 {
+			return note + "Nothing to read: no paths were given and nothing matched."
+		}
+		output, err := runner.readFiles(paths)
 		if err != nil {
 			return "ERROR: " + err.Error()
 		}
+		output = note + output
 		return output
 	case "search":
 		output, err := runner.repository.Search(ctx, arguments.Query)
@@ -1293,8 +1368,11 @@ func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
 
 func repositoryTools(recall bool) []functionTool {
 	tools := []functionTool{
-		{Type: "function", Name: "read_files", Description: "Read one or more repository files after choosing them from the map.", Strict: true, Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 12}}, "required": []string{"paths"}, "additionalProperties": false,
+		{Type: "function", Name: "read_files", Description: "Read repository files. Give the paths you know from the map, and optionally a regular expression in matching to also read every file whose contents match it — so you do not have to search first and then read what the search found.", Strict: true, Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"paths":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 12},
+				"matching": map[string]any{"type": "string"},
+			}, "required": []string{"paths", "matching"}, "additionalProperties": false,
 		}},
 		{Type: "function", Name: "search", Description: "Search repository text with ripgrep when the map and files are insufficient.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}, "additionalProperties": false,
@@ -1353,6 +1431,11 @@ Do not go looking through the files for a message that did not ask you to.
 TOOLS
 
 read_files — one call, every file you want. Not one call per file.
+  matching — a regular expression, optional. Every file whose contents match it is read
+  too, along with the paths you named. Use it when you know what the code says but not
+  which file says it: read_files(paths: ["src/App.tsx"], matching: "accent") gets you the
+  file you knew about and the ones you did not, in one call instead of a search and then a
+  read. Leave it "" when you already know every path you want.
 search — for when the map is not enough to find something. When the matches land in a few
   files, it hands you those files whole along with the match list, so you already have them:
   do not follow a search with read_files for the files it just gave you.

@@ -890,6 +890,16 @@ func (runner *Runner) newChangeSession(task, repoMap string, notes []Recollectio
 		opening.WriteString("PROJECT CONTEXT:\n" + renderNotes(notes) + "\n")
 	}
 	fmt.Fprintf(&opening, "REPOSITORY MAP:\n%s\n", repoMap)
+	// Beside the map, because it is the same kind of thing — what the
+	// folder is, rather than what this message wants — and because both
+	// stay put while the task changes, which is what the prefix cache
+	// needs. Recorded as shown so a later read_files answers with a
+	// sentence instead of another copy.
+	if path, text := runner.repository.Architecture(); text != "" {
+		fmt.Fprintf(&opening, "%s — the project's own account of how it fits together, "+
+			"already read for you:\n%s\n\n", path, text)
+		runner.served[path] = text
+	}
 	recent, _ := runner.recentTurns()
 	if len(recent) > 0 {
 		opening.WriteString("EARLIER IN THIS FOLDER:\n" + renderHistory(recent) + "\n")

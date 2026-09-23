@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,10 +17,23 @@ import (
 )
 
 const (
-	maxReadFiles = 12
+	// MaxReadFiles is how many files one read answers with.
+	MaxReadFiles = 12
+	maxReadFiles = MaxReadFiles
 	maxReadBytes = 256 << 10
 	maxSearchOut = 64 << 10
+
+	// maxArchitectureBytes is how large a project's own description can
+	// be and still ride along with the map. Past this it is skipped
+	// rather than cut: half an architecture note is worse than none,
+	// because the half that is missing is invisible.
+	maxArchitectureBytes = 8 << 10
 )
+
+// architectureNames are the files a project uses to explain itself,
+// most specific first. Only the top level: a doc buried three folders
+// down is documentation, not orientation.
+var architectureNames = []string{"ARCHITECTURE.md", "architecture.md", "Architecture.md"}
 
 // ignoredDirectories filters the plain-folder map fallback used when a
 // folder has no Git repository of its own to ask for a .gitignore-aware
@@ -179,10 +193,46 @@ func (repository *Repository) Read(paths []string) (string, error) {
 	return result.String(), nil
 }
 
+// Architecture is the project's own account of how it fits together,
+// and the path it came from. Empty when there is no such file, or it is
+// too large to ride along.
+//
+// Two real traces spent a whole round trip fetching this — one of them
+// on nothing else, after it had already read five files. It is under two
+// kilobytes in the project those traces came from, and it goes in ahead
+// of the task where the prefix cache holds it, so carrying it costs
+// about nothing and saves the trip.
+func (repository *Repository) Architecture() (string, string) {
+	for _, name := range architectureNames {
+		full, err := repository.safePath(name)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(full)
+		if err != nil || info.IsDir() || info.Size() == 0 || info.Size() > maxArchitectureBytes {
+			continue
+		}
+		text, err := os.ReadFile(full)
+		if err != nil {
+			continue
+		}
+		return name, string(text)
+	}
+	return "", ""
+}
+
 func (repository *Repository) Search(ctx context.Context, query string) (string, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return "", fmt.Errorf("search query is required")
+	}
+	// Ripgrep is not always there. It is not a dependency anyone was
+	// told to install, and when it is missing every search has been
+	// failing instantly with "executable file not found" — a whole tool
+	// silently gone, and the model left guessing which files to read.
+	// Found on a machine that had been running this for weeks.
+	if _, err := exec.LookPath("rg"); err != nil {
+		return repository.searchWithoutRipgrep(query)
 	}
 	command := exec.CommandContext(ctx, "rg", "-n", "--hidden", "--glob", "!.git", "--", query, ".")
 	command.Dir = repository.Root
@@ -197,6 +247,65 @@ func (repository *Repository) Search(ctx context.Context, query string) (string,
 		output = append(output[:maxSearchOut], []byte("\n... output truncated ...\n")...)
 	}
 	return string(bytes.TrimSpace(output)), nil
+}
+
+// searchWithoutRipgrep is the same search done in Go, for when ripgrep
+// is not installed. Slower on a large tree and without ripgrep's
+// ignore-file handling, but a search that runs beats one that does not.
+//
+// The output is shaped exactly like ripgrep's, "path:line:text", because
+// everything downstream reads it — the model, and the code that decides
+// which files to hand back with the result.
+func (repository *Repository) searchWithoutRipgrep(query string) (string, error) {
+	pattern, err := regexp.Compile(query)
+	if err != nil {
+		return "", fmt.Errorf("search: %w", err)
+	}
+	var out strings.Builder
+	walkErr := filepath.WalkDir(repository.Root, func(full string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if full != repository.Root && ignoredDirectories[entry.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if out.Len() > maxSearchOut {
+			return fs.SkipAll
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() > maxReadBytes {
+			return nil
+		}
+		data, err := os.ReadFile(full)
+		if err != nil || bytes.IndexByte(data, 0) >= 0 {
+			// A null byte means binary; ripgrep skips those too.
+			return nil
+		}
+		relative, err := filepath.Rel(repository.Root, full)
+		if err != nil {
+			return nil
+		}
+		for number, line := range strings.Split(string(data), "\n") {
+			if pattern.MatchString(line) {
+				fmt.Fprintf(&out, "%s:%d:%s\n", filepath.ToSlash(relative), number+1, line)
+				if out.Len() > maxSearchOut {
+					out.WriteString("\n... output truncated ...\n")
+					return fs.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return "", fmt.Errorf("search: %w", walkErr)
+	}
+	if out.Len() == 0 {
+		return "No matches.", nil
+	}
+	return strings.TrimSpace(out.String()), nil
 }
 
 // Apply patches files with `git apply`, which works against a plain folder

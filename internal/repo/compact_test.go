@@ -777,3 +777,38 @@ func TestAPureDeletionIsNeverTruncated(t *testing.T) {
 		t.Fatalf("the tail was dropped: %q", got)
 	}
 }
+
+func TestCompactKeepsAFilesCRLFLineEndings(t *testing.T) {
+	// A Windows checkout with core.autocrlf (Git for Windows' default)
+	// has CRLF on every line. The patch is written with plain newlines,
+	// and matching already tolerates that; what it wrote back did not,
+	// leaving every line the hunk touched with LF in an otherwise CRLF
+	// file.
+	repository := project(t, map[string]string{
+		"app.py": "import os\r\n\r\ndef start():\r\n    server.run(config)\r\n    return server\r\n",
+	})
+	err := repository.Apply("@app.py\n def start():\n-    server.run(config)\n+    server.run(config, debug=True)\n     return server\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "import os\r\n\r\ndef start():\r\n    server.run(config, debug=True)\r\n    return server\r\n"
+	if got := read(t, repository, "app.py"); got != want {
+		t.Fatalf("line endings not kept:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestApplyPatchFormatKeepsAFilesCRLFLineEndings(t *testing.T) {
+	// The same kind of file edited through the apply_patch format, whose
+	// lines may carry the CR themselves when the model copied them from
+	// the file byte for byte.
+	repository := project(t, map[string]string{
+		"a.txt": "one\r\ntwo\r\nthree\r\n",
+	})
+	err := repository.Apply("*** Begin Patch\n*** Update File: a.txt\n@@\n one\r\n-two\r\n+TWO\r\n three\n*** End Patch\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := read(t, repository, "a.txt"), "one\r\nTWO\r\nthree\r\n"; got != want {
+		t.Fatalf("line endings not kept:\n got %q\nwant %q", got, want)
+	}
+}

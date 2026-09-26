@@ -422,7 +422,7 @@ func (repository *Repository) applyByContent(patch string) error {
 			current = read
 			originals[file.path] = read
 		}
-		content, hunkFailures := applyHunks(current, file.hunks)
+		content, hunkFailures := applyKeepingLineEndings(current, file.hunks)
 		for _, failure := range hunkFailures {
 			// The file is known here and not where the failure was
 			// raised, so it is filled in on the way past.
@@ -481,6 +481,36 @@ func changesNothing(current hunk) bool {
 		}
 	}
 	return true
+}
+
+// applyKeepingLineEndings is applyHunks for a file that may use CRLF.
+// Hunks are written with plain newlines, so in a CRLF file every line
+// only matched through locate's whitespace-insensitive pass, and the
+// lines put back in its place came from the hunk without their CR: each
+// edit left the lines it touched with LF inside an otherwise CRLF file.
+// A file whose every line ends in CRLF is edited as LF and converted
+// back; anything else (LF, mixed, a new file) is applied as it stands.
+func applyKeepingLineEndings(content string, hunks []hunk) (string, []*HunkError) {
+	breaks := strings.Count(content, "\n")
+	if breaks == 0 || strings.Count(content, "\r\n") != breaks {
+		return applyHunks(content, hunks)
+	}
+	withoutCR := func(lines []string) []string {
+		trimmed := make([]string, len(lines))
+		for index, line := range lines {
+			trimmed[index] = strings.TrimSuffix(line, "\r")
+		}
+		return trimmed
+	}
+	trimmed := make([]hunk, len(hunks))
+	for index, current := range hunks {
+		trimmed[index] = hunk{before: withoutCR(current.before), after: withoutCR(current.after)}
+		for _, op := range current.ops {
+			trimmed[index].ops = append(trimmed[index].ops, patchOp{kind: op.kind, text: strings.TrimSuffix(op.text, "\r")})
+		}
+	}
+	placed, failures := applyHunks(strings.ReplaceAll(content, "\r\n", "\n"), trimmed)
+	return strings.ReplaceAll(placed, "\n", "\r\n"), failures
 }
 
 func applyHunks(content string, hunks []hunk) (string, []*HunkError) {

@@ -2,6 +2,7 @@ package debug
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -10,8 +11,9 @@ import (
 // than writing into the real one.
 func useTemporaryHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("YOLOCODER_TEST_RECORDS", "1")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("YOLOCODER_TEST_RECORDS", "1")
 }
 
@@ -66,13 +68,16 @@ func TestNoRecordsIsNotAnError(t *testing.T) {
 
 // Nothing here may fail a run, so an unwritable home is silent.
 func TestAnUnwritableHomeIsSurvived(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("YOLOCODER_TEST_RECORDS", "1")
-	if err := os.Chmod(home, 0o500); err != nil {
-		t.Skip("cannot make the directory unwritable here")
+	useTemporaryHome(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer os.Chmod(home, 0o700)
+	// A file blocks creation of the config directory on every platform,
+	// including Windows and privileged users that ignore Unix mode bits.
+	if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	Record("patch_rejected", map[string]any{"folder": "x"})
 	if recent := Recent(5); recent != nil {

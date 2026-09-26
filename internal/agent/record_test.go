@@ -11,7 +11,9 @@ import (
 // being asked, in which folder, on which attempt, and why the patch was
 // turned down. All four have to survive the trip.
 func TestARejectedPatchIsRecorded(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("YOLOCODER_TEST_RECORDS", "1")
 	session := &changeSession{
 		runner: &Runner{repository: &repo.Repository{Root: "/tmp/project"}},

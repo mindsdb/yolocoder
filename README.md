@@ -168,9 +168,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/mindsdb/yolocoder/main/install.ps1 | iex
 ```
 
-## Muse + Jev review build
+## Muse + Jev build
 
-See [the build and integration notes](docs/jev-muse.md) for the optimized review configuration and the distinction from the frozen benchmark.
+See [the Muse + Jev guide](docs/jev-muse.md) for build instructions and model configuration.
 
 ## Develop
 

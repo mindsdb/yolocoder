@@ -27,7 +27,7 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 	var paths []string
 	for _, path := range mapped {
 		clean := filepath.Clean(filepath.FromSlash(path))
-		if !utf8.ValidString(path) || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != path {
+		if !utf8.ValidString(path) || !filepath.IsLocal(clean) || filepath.ToSlash(clean) != path {
 			return false
 		}
 		if wholeContextPath(path) {

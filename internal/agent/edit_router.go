@@ -187,7 +187,7 @@ func (runner *Runner) prefetchEdit(ctx context.Context, session *changeSession, 
 // actual read and commits nothing if the file changes beyond these bounds.
 func prefetchFileSize(root, path string) (int64, bool) {
 	clean := filepath.Clean(filepath.FromSlash(path))
-	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if !filepath.IsLocal(clean) {
 		return 0, false
 	}
 	full := filepath.Join(root, clean)
@@ -217,10 +217,10 @@ func (runner *Runner) completePrefetch(session *changeSession, selected, mapped 
 	}
 	for _, path := range selected {
 		clean := filepath.Clean(filepath.FromSlash(path))
-		if !available[path] || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		if !available[path] || !filepath.IsLocal(clean) {
 			return false
 		}
-		for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
 			for _, name := range []string{"package.json", "tsconfig.json"} {
 				candidate := filepath.ToSlash(filepath.Join(dir, name))
 				if available[candidate] {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,9 @@ func TestNormalCompletionCancellationCannotReportSuccess(t *testing.T) {
 			defer cancel()
 			progress := &cancellingProgress{cancel: cancel, when: when}
 			if when == "during check" {
+				if runtime.GOOS == "windows" {
+					t.Skip("this cancellation fixture requires a POSIX executable script")
+				}
 				// A real detected command marks its start, then waits to be
 				// canceled. No provider or application process is involved.
 				bin := t.TempDir()

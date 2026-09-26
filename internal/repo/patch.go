@@ -507,7 +507,10 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 				continue
 			}
 			const reason = "a hunk has no context to place it by"
-			failures = append(failures, &HunkError{Reason: reason, Detail: reason})
+			const detail = reason + ". Added lines alone do not locate an insertion in this nonempty file. " +
+				"Include a short, unique unchanged line copied from the current file, prefixed with a space, " +
+				"and place the added lines before or after it. For a replacement, include the exact old lines prefixed with '-'."
+			failures = append(failures, &HunkError{Reason: reason, Detail: detail})
 			continue
 		}
 		index, err := locate(lines, current.before)

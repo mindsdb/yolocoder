@@ -168,6 +168,10 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/mindsdb/yolocoder/main/install.ps1 | iex
 ```
 
+## Muse + Jev build
+
+See [the Muse + Jev guide](docs/jev-muse.md) for build instructions and model configuration.
+
 ## Develop
 
 Requires Go 1.24 or newer.

@@ -22,16 +22,16 @@ func calls(name, id, arguments string) string {
 }
 
 // edits is a model reply that calls apply_diff with a compact patch and
-// no closing note, so the turn carries on.
+// task_complete=false, so the turn carries on.
 func edits(id, patch string) string {
-	arguments, _ := json.Marshal(map[string]string{"patch": patch, "response_comment_for_user": ""})
+	arguments, _ := json.Marshal(map[string]any{"patch": patch, "response_comment_for_user": "", "task_complete": false})
 	return calls("apply_diff", id, string(arguments))
 }
 
-// editsAndFinishes is the same call carrying the model's closing note,
-// which ends the turn if the edit lands and the check passes.
+// editsAndFinishes declares completion on an edit, with an optional note.
+// The turn ends only if the edit lands and the project check passes.
 func editsAndFinishes(id, patch, comment string) string {
-	arguments, _ := json.Marshal(map[string]string{"patch": patch, "response_comment_for_user": comment})
+	arguments, _ := json.Marshal(map[string]any{"patch": patch, "response_comment_for_user": comment, "task_complete": true})
 	return calls("apply_diff", id, string(arguments))
 }
 
@@ -440,7 +440,7 @@ func TestASuccessfulEditSaysNotToReadItBack(t *testing.T) {
 	}
 }
 
-func TestAnEditCarryingItsOwnClosingNoteEndsTheTurn(t *testing.T) {
+func TestACompleteEditEndsTheTurn(t *testing.T) {
 	// The round trip this removes existed only to hear "done": the whole
 	// transcript resent to generate forty words.
 	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
@@ -456,7 +456,7 @@ func TestAnEditCarryingItsOwnClosingNoteEndsTheTurn(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("requests = %d, want the edit to have been the whole turn", len(*seen))
 	}
-	if outcome.Reply != "Bumped `x` to 42." {
+	if outcome.Reply != "Bumped `x` to 42.\n\nNo project check was detected." {
 		t.Fatalf("reply = %q, want the note written with the edit", outcome.Reply)
 	}
 	if !outcome.Applied || !outcome.Coding {
@@ -468,9 +468,8 @@ func TestAnEditCarryingItsOwnClosingNoteEndsTheTurn(t *testing.T) {
 	}
 }
 
-func TestAnEmptyNoteLetsTheTurnCarryOn(t *testing.T) {
-	// Only a filled-in note means "finished". An edit with none is just
-	// an edit, and the model goes on working.
+func TestAnIncompleteEditLetsTheTurnCarryOn(t *testing.T) {
+	// An incomplete edit continues until the complete request is implemented.
 	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n", "b.ts": "const y = 2;\n"})
 	server, seen := scripted(t,
 		edits("c1", "@a.ts\n-const x = 1;\n+const x = 9;\n"),
@@ -485,7 +484,7 @@ func TestAnEmptyNoteLetsTheTurnCarryOn(t *testing.T) {
 	if len(*seen) != 2 {
 		t.Fatalf("requests = %d, want the first edit not to have ended the turn", len(*seen))
 	}
-	if outcome.Reply != "Changed both." {
+	if outcome.Reply != "Changed both.\n\nNo project check was detected." {
 		t.Fatalf("reply = %q", outcome.Reply)
 	}
 	if len(outcome.Files) != 2 {

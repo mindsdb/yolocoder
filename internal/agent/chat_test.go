@@ -191,6 +191,13 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		// Normal request timing follows the intact conversation in either
+		// dialect; inspect the original tool result immediately before it.
+		notes := timingNotes(t, body.Messages)
+		if len(notes) != 1 || body.Messages[len(body.Messages)-1].Content != notes[0] {
+			t.Fatal("missing or accumulated normal timing metadata")
+		}
+		body.Messages = body.Messages[:len(body.Messages)-1]
 		requests++
 		writer.Header().Set("Content-Type", "application/json")
 		reply := func(message chatMessage) {
@@ -214,16 +221,21 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 				t.Fatalf("tool result did not carry the file: %q", content)
 			}
 			patch := "@index.html\n-<title>Old</title>\n+<title>New</title>\n"
-			arguments, _ := json.Marshal(map[string]string{"patch": patch})
+			arguments, _ := json.Marshal(map[string]any{"patch": patch, "response_comment_for_user": "", "task_complete": false})
 			reply(chatMessage{Role: "assistant", ToolCalls: []chatToolCall{{
 				ID: "call_2", Type: "function",
 				Function: chatCallFunction{Name: "apply_diff", Arguments: string(arguments)},
 			}}})
 		case 3:
-			// And the edit's own result comes back the same way.
+			// Preserve the edit's tool result before the diagnostic user message.
 			last := body.Messages[len(body.Messages)-1]
-			if last.Role != "tool" || last.ToolCallID != "call_2" {
-				t.Fatalf("last message = %+v, want the edit's result", last)
+			content, _ := last.Content.(string)
+			if last.Role != "user" || !strings.Contains(content, "Diagnostic checkpoint skipped") {
+				t.Fatalf("last message = %+v, want the honest skipped diagnostic", last)
+			}
+			tool := body.Messages[len(body.Messages)-2]
+			if tool.Role != "tool" || tool.ToolCallID != "call_2" {
+				t.Fatalf("preceding message = %+v, want the edit's result", tool)
 			}
 			reply(chatMessage{Role: "assistant", Content: "Retitle"})
 		default:

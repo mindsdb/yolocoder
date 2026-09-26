@@ -81,12 +81,6 @@ type toolArguments struct {
 	// Comment is what the model would have said at the end of the turn,
 	// written with its last edit instead of in a round trip of its own.
 	Comment string `json:"response_comment_for_user"`
-	// Complete is the model saying this edit finishes the task. It used
-	// to be inferred from Comment being empty, which asked the model to
-	// signal a decision by the absence of a string — subtle, easy to get
-	// wrong, and wrong silently: a turn that guessed "not finished" paid
-	// a whole extra round saying "done" and was never told it had.
-	Complete bool `json:"turn_is_complete"`
 }
 
 // inputMessage is one message sent to the model. Images (data URLs pasted
@@ -216,8 +210,10 @@ type Progress interface {
 }
 
 type Runner struct {
-	client     *Client
-	repository *repo.Repository
+	client          *Client
+	repository      *repo.Repository
+	editRouterModel string
+	smallEditModel  string
 	// served is the contents already handed to the model, so asking for
 	// the same unchanged file again costs a sentence instead of another
 	// copy of it in a transcript that is resent on every turn.
@@ -249,7 +245,7 @@ type Runner struct {
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
-	return &Runner{client: client, repository: repository, served: map[string]string{}}
+	return &Runner{client: client, repository: repository, served: map[string]string{}, editRouterModel: editRouterModel, smallEditModel: smallEditModel}
 }
 
 // UseRecall offers (or withholds) the tool for reading further back than
@@ -301,12 +297,14 @@ func (runner *Runner) recallable() []Recollection {
 // map and the message together and ends in whichever of three ways fits
 // — a direct reply, an answer drawn from files it read, or a diff.
 //
-// There is deliberately no separate routing call ahead of this. One used
+// Normal builds have no separate routing call ahead of this. One used
 // to decide "question or change?" before anything was read, but it had no
 // tools and so could not actually settle it for any message that needed
 // the files to answer; it said "change" and deferred, costing a serial
 // round trip to reach a foregone conclusion. The same judgement is made
 // here instead, by the call that can act on it.
+// An experimental edit router can prefetch context; it never decides the
+// outcome or replaces the normal conversation.
 //
 // images are data URLs (screenshots pasted into the web UI) attached to
 // the message, nil when there are none — most models the terminal talks
@@ -327,13 +325,12 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	mapped := mappedPaths(repoMap)
 	progress.Log(fmt.Sprintf("  mapped %d files · %s", len(mapped), formatDuration(mapSpent)))
 
-	progress.Status("Working out the change...")
 	session := runner.newChangeSession(task, repoMap, notes, images)
 
 	// The files first, if that is switched on. It is an optimization and
 	// behaves like one: anything at all going wrong leaves the turn
 	// exactly as it was, with the model asking for what it wants.
-	if runner.preselect {
+	if runner.editRouterModel == "" && runner.preselect {
 		progress.Status("Choosing the files...")
 		started := time.Now()
 		chosen := runner.chooseFiles(ctx, task, mapped)
@@ -344,6 +341,10 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 		progress.Log("  chose files · " + formatDuration(spent))
 	}
+	if len(images) == 0 {
+		runner.prefetchEdit(ctx, session, mapped, progress)
+	}
+	progress.Status("Working out the change...")
 	outcome, err := session.work(ctx, progress)
 	// The whole-file fallback is for a model that ran out of room, not
 	// one that made up its mind. A turn that finished on its own saying
@@ -363,28 +364,33 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	return outcome, nil
 }
 
-// work is the whole turn: one conversation that reads, edits and finally
-// says something. It ends when the model replies without calling a tool
-// — there is no schema and no finishing tool, because a plain message
-// with no tool call is the one shape every provider agrees on, and
-// asking for tools and a response_format together is what produced both
-// of the provider workarounds in client.go.
+// work is one conversation that reads, edits and replies. An accepted
+// final edit can signal completion; otherwise a plain reply ends the turn.
+// Both completion paths run the project's check after changes.
 func (session *changeSession) work(ctx context.Context, progress Progress) (Outcome, error) {
 	runner := session.runner
+	workStarted := time.Now()
 	for round := 0; round < maxRounds; round++ {
+		input := session.timedInput(ctx, workStarted, time.Now())
+		if !session.prefetched {
+			progress.Log("  normal timing feedback attached")
+		}
 		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
 		started := time.Now()
-		response, err := runner.client.create(callCtx, responseRequest{
-			Instructions: changeInstructions,
-			Input:        session.transcript,
-			Tools:        repositoryTools(runner.recall),
+		response, err := session.create(callCtx, responseRequest{
+			Instructions: session.instructions(),
+			Input:        input,
+			Tools:        session.tools(),
 			ToolChoice:   "auto",
-		})
+		}, progress)
 		spent := time.Since(started)
 		cancel()
 		runner.profile.record(StepThink, spent)
 		if err != nil {
 			return Outcome{}, err
+		}
+		if !session.prefetched && ctx.Err() != nil {
+			return Outcome{}, ctx.Err()
 		}
 		runner.usage = runner.usage.add(response.usage())
 		progress.Log("  thought · " + formatDuration(spent))
@@ -392,6 +398,14 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 		calls := response.calls()
 		if len(calls) == 0 {
 			reply, err := response.text()
+			if !session.prefetched && response.cutOff() && err == nil {
+				// Partial text is not a terminal answer, even when nonempty.
+				session.complete = false
+				session.closing = ""
+				progress.Log("  completion deferred: max_output_tokens before plain reply")
+				session.report("Your last reply was cut off before it finished. Continue the remaining work without repeating completed edits, then give a complete reply.")
+				continue
+			}
 			if err != nil {
 				// A reply cut off by the output cap decided nothing — the
 				// model ran out of room before it finished, so there is no
@@ -415,6 +429,9 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			// it just broke.
 			if len(session.applied) > 0 {
 				result, testSpent := runner.runTests(ctx)
+				if !session.prefetched && ctx.Err() != nil {
+					return Outcome{}, ctx.Err()
+				}
 				switch {
 				case result.Skipped:
 					progress.Log("  no check command detected")
@@ -445,7 +462,11 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 				inputMessage{Role: "assistant", Content: clip(aside, maxAside)})
 		}
 
+		batchOK := true
 		for _, call := range calls {
+			if !session.prefetched && ctx.Err() != nil {
+				return Outcome{}, ctx.Err()
+			}
 			// Described before the tool runs, not after: describeCall
 			// reports which paths were already shown by consulting the
 			// same served map that answering a read_files call updates,
@@ -458,7 +479,11 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			// having run twice — reported as "why did it read twice?"
 			progress.Status(activityFor(call.Name))
 			toolStarted := time.Now()
-			output, detail := session.runTool(ctx, call)
+			output, detail, ok := session.runTool(ctx, call)
+			batchOK = batchOK && ok
+			if !session.prefetched && ctx.Err() != nil {
+				return Outcome{}, ctx.Err()
+			}
 			toolSpent := time.Since(toolStarted)
 			runner.profile.record(stepFor(call.Name), toolSpent)
 			if call.Name == "recall" {
@@ -475,18 +500,47 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			session.transcript = append(session.transcript, toolOutput{Type: "function_call_output", CallID: call.CallID, Output: output})
 		}
 
-		// An edit that landed and carried a closing note is the model
-		// saying it is finished, in the same breath as its last change.
-		// Believing it saves the round trip that existed only to hear
-		// "done" — the whole transcript resent to generate forty words,
-		// two seconds for a sentence it could have written already.
-		//
-		// The check still runs, and still has the final say: if it fails
-		// the note is dropped and the conversation continues, because a
-		// model cannot declare victory over a build it just broke by
-		// declaring it slightly earlier.
-		if session.closing != "" {
+		if !session.prefetched && response.cutOff() {
+			// Keep every tool result, but an incomplete envelope cannot finish
+			// the turn. Accepted edits must not be replayed on continuation.
+			session.complete = false
+			session.closing = ""
+			progress.Log("  completion deferred: max_output_tokens after tool batch")
+			session.report("Your last response was cut off. The tool calls above have been processed once; use their results, do not repeat accepted edits, and continue any remaining work before declaring completion.")
+			continue
+		}
+
+		if !session.prefetched && !session.complete && batchOK &&
+			calls[len(calls)-1].Name == "apply_diff" && !session.checkpointUsed && round+1 < maxRounds {
+			session.checkpointUsed = true
+			started := time.Now()
+			status, diagnostic := diagnosticCheckpoint(ctx, runner.repository.Root)
+			spent := time.Since(started)
+			if ctx.Err() != nil {
+				return Outcome{}, ctx.Err()
+			}
+			if status != "skipped" {
+				runner.profile.record(StepTest, spent)
+			}
+			progress.Log("  diagnostic checkpoint: " + status + " · " + formatDuration(spent))
+			session.report(diagnostic)
+		}
+
+		if !session.prefetched && !batchOK {
+			// The model declared completion before seeing this batch's results.
+			// Return every failure for review, even if its final edit landed.
+			session.complete = false
+			session.closing = ""
+		}
+
+		// Normal edits signal completion separately from their optional note.
+		// Only the final tool can leave that signal pending; all calls above
+		// still run. The small-UI path keeps its closing-note contract.
+		if session.complete || (session.prefetched && session.closing != "") {
 			result, testSpent := runner.runTests(ctx)
+			if !session.prefetched && ctx.Err() != nil {
+				return Outcome{}, ctx.Err()
+			}
 			switch {
 			case result.Skipped:
 				progress.Log("  no check command detected")
@@ -496,12 +550,22 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 					progress.Log("    " + line)
 				}
 				session.closing = ""
+				session.complete = false
 				session.report("The edits applied, but the project's check failed. Fix it.\n" + result.Output)
 				continue
 			default:
 				progress.Log("  check passed · " + formatDuration(testSpent))
 			}
-			return session.outcome(session.closing), nil
+			reply := session.closing
+			if !session.prefetched {
+				if reply == "" {
+					reply = "Updated " + strings.Join(session.applied, ", ") + "."
+				}
+				if result.Skipped {
+					reply += "\n\nNo project check was detected."
+				}
+			}
+			return session.outcome(reply), nil
 		}
 	}
 	return Outcome{}, fmt.Errorf("%w after %d rounds", errOutOfRounds, maxRounds)
@@ -537,24 +601,44 @@ func (session *changeSession) outcome(reply string) Outcome {
 // of budget says so as its result rather than erroring, so the model can
 // still finish with what it has instead of the turn dying.
 // It returns the tool's result for the model, and any lines worth
-// showing the person watching underneath it.
-func (session *changeSession) runTool(ctx context.Context, call responseItem) (string, []string) {
-	quota, known := toolQuota[call.Name]
-	if !known {
-		return "ERROR: unknown tool " + call.Name, nil
+// showing the person watching underneath it. The success flag gates normal
+// batch completion; the small-UI path does not use it.
+func (session *changeSession) runTool(ctx context.Context, call responseItem) (string, []string, bool) {
+	if !session.prefetched {
+		// A later read, rejected edit or refused call cannot inherit an
+		// earlier edit's declaration that the whole task is complete.
+		session.complete = false
+		session.closing = ""
+		if err := ctx.Err(); err != nil {
+			return "ERROR: " + err.Error(), nil, false
+		}
 	}
-	if session.used[call.Name] >= quota {
+	budget := call.Name
+	if call.Name == "replace_text" && session.prefetched {
+		budget = "apply_diff"
+	}
+	quota, known := toolQuota[budget]
+	if !known {
+		return "ERROR: unknown tool " + call.Name, nil, false
+	}
+	if session.used[budget] >= quota {
 		return fmt.Sprintf("ERROR: %s has been used %d times, which is the limit for one turn. "+
 				"Work with what you already have, and say what you were unable to do.", call.Name, quota),
-			[]string{fmt.Sprintf("out of %s calls for this turn", call.Name)}
+			[]string{fmt.Sprintf("out of %s calls for this turn", call.Name)}, false
 	}
-	session.used[call.Name]++
+	session.used[budget]++
+	if call.Name == "replace_text" {
+		output, detail := session.replaceText(call)
+		// This tool is small-UI only; the batch-completion guard is unused.
+		return output, detail, false
+	}
 
 	if call.Name == "apply_diff" {
 		return session.applyDiff(call)
 	}
 	session.readPaths = append(session.readPaths, readFilePaths(call)...)
-	return session.runner.runTool(ctx, call), nil
+	output, ok := session.runner.runTool(ctx, call)
+	return output, nil, ok
 }
 
 // applyDiff places one patch and reports what happened in the terms the
@@ -565,14 +649,24 @@ func (session *changeSession) runTool(ctx context.Context, call responseItem) (s
 // earlier apply_diff has landed and moved the ground under this one.
 // Without that the model has to spend a whole round asking to read a
 // file again just to see what it already changed.
-func (session *changeSession) applyDiff(call responseItem) (string, []string) {
+func (session *changeSession) applyDiff(call responseItem) (string, []string, bool) {
 	var arguments toolArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "ERROR: invalid tool arguments: " + err.Error(), nil
+		return "ERROR: invalid tool arguments: " + err.Error(), nil, false
+	}
+	var completion struct {
+		Complete *bool `json:"task_complete"`
+	}
+	if !session.prefetched {
+		// Decode the new field only here: other tools and small-UI patches
+		// retain their existing treatment of unknown arguments.
+		if err := json.Unmarshal([]byte(call.Arguments), &completion); err != nil || completion.Complete == nil {
+			return "ERROR: task_complete must be a boolean: true only when this edit completes the entire request, false while work remains. Nothing was changed.", nil, false
+		}
 	}
 	patch := strings.TrimSpace(arguments.Patch)
 	if patch == "" {
-		return "ERROR: no patch was given.", []string{"no patch was given"}
+		return "ERROR: no patch was given.", []string{"no patch was given"}, false
 	}
 	runner := session.runner
 	started := time.Now()
@@ -587,31 +681,38 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string) {
 		}
 		session.lastFailure = err
 		session.recordFailure(patch, err)
-		return "The patch did not apply and nothing was changed.\n\n" + err.Error() + session.staleContents(err),
-			repo.Explain(err)
+		message := "The patch did not apply and nothing was changed."
+		if !session.prefetched {
+			message = "The patch failed."
+			// Only the direct content-placement error proves this call
+			// stopped before writing. A wrapped Git or I/O error may not.
+			if placement, staged := err.(*repo.PatchError); staged {
+				message = "The patch did not apply. Nothing was changed by this call; earlier accepted edits were not rolled back."
+				message += session.editBudgetFeedback()
+				message += rejectedPatchPaths(patch, placement)
+			}
+		}
+		return message + "\n\n" + err.Error() + session.staleContents(err),
+			repo.Explain(err), false
 	}
-	session.lastFailure = nil
 	changed := repo.PatchPaths(patch)
-	for _, path := range changed {
-		session.applied = appendUnique(session.applied, path)
-	}
 	// Recorded only now, after the edit actually landed: a note left on a
 	// patch that could not be placed would end the turn on a promise.
-	//
-	// Either signal ends the turn. The flag is the one the model is asked
-	// for, but a filled-in reply says the same thing and used to be the
-	// only signal there was, so honouring both costs nothing and keeps
-	// the saving when a model sets one and not the other.
-	if arguments.Complete || strings.TrimSpace(arguments.Comment) != "" {
-		session.closing = strings.TrimSpace(arguments.Comment)
-	}
 	// Said plainly, because the alternative is what happened on the first
 	// real run: the model applied an edit, was told only "Applied", and
 	// spent three further round trips reading the files back to see
 	// whether it had worked.
-	return "Applied. Changed: " + strings.Join(changed, ", ") +
-		". Every edit in that patch was placed; the files contain them now. " +
-		"Do not read them again to check.", nil
+	output := session.appliedEdit(changed, arguments.Comment)
+	if !session.prefetched {
+		session.complete = *completion.Complete
+		output += session.editBudgetFeedback()
+	}
+	return output, nil, true
+}
+
+func (session *changeSession) editBudgetFeedback() string {
+	return fmt.Sprintf("\nRemaining edit calls this turn: %d. Rejected calls also use the edit budget.",
+		max(0, toolQuota["apply_diff"]-session.used["apply_diff"]))
 }
 
 // recordFailure writes a rejected patch where it can be read back later.
@@ -816,7 +917,14 @@ type changeSession struct {
 	runner *Runner
 	// task is kept only so a failure record says what was being asked
 	// when a patch was rejected. Nothing reads it during the turn.
-	task       string
+	task   string
+	writer *Client
+	// A transient HTTP replay is shared across every coding round in this turn.
+	transientRetryUsed bool
+	checkpointUsed     bool // One diagnostic on an already-required continuation.
+	// prefetched enables the bounded small-UI path only. Normal tasks can
+	// receive initial context without opting into its writer or edit tools.
+	prefetched bool
 	transcript []any
 	readPaths  []string
 	// applied are the files edits actually landed in, attempted the ones
@@ -830,6 +938,9 @@ type changeSession struct {
 	// Set only by an edit that actually applied, so a failed one cannot
 	// end the turn on a promise.
 	closing string
+	// complete is set only by an accepted normal edit, until another tool
+	// runs or the project check fails. It does not depend on the note.
+	complete bool
 	// used counts calls per tool, against toolQuota.
 	used map[string]int
 }
@@ -856,7 +967,7 @@ func activityFor(tool string) string {
 		return "Reading the files..."
 	case "search":
 		return "Searching the folder..."
-	case "apply_diff":
+	case "apply_diff", "replace_text":
 		return "Applying the edit..."
 	case "recall":
 		return "Reading earlier turns..."
@@ -871,7 +982,7 @@ func activityFor(tool string) string {
 // with reading files.
 func stepFor(tool string) Step {
 	switch tool {
-	case "apply_diff":
+	case "apply_diff", "replace_text":
 		return StepPatch
 	case "recall":
 		return StepRecall
@@ -1241,6 +1352,8 @@ func (runner *Runner) describeCall(call responseItem) string {
 			return "edit " + strings.Join(paths, ", ")
 		}
 		return "apply an edit"
+	case "replace_text":
+		return "replace text in " + strings.Join(replacementPaths(call), ", ")
 	case "recall":
 		if reason := strings.TrimSpace(arguments.Reason); reason != "" {
 			return "recall earlier turns: " + reason
@@ -1336,33 +1449,32 @@ func mappedPaths(repoMap string) []string {
 	return paths
 }
 
-func (runner *Runner) runTool(ctx context.Context, call responseItem) string {
+func (runner *Runner) runTool(ctx context.Context, call responseItem) (string, bool) {
 	var arguments toolArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &arguments); err != nil {
-		return "ERROR: invalid tool arguments: " + err.Error()
+		return "ERROR: invalid tool arguments: " + err.Error(), false
 	}
 	switch call.Name {
 	case "read_files":
 		paths, note := runner.pathsMatching(ctx, arguments.Paths, arguments.Matching)
 		if len(paths) == 0 {
-			return note + "Nothing to read: no paths were given and nothing matched."
+			return note + "Nothing to read: no paths were given and nothing matched.", true
 		}
 		output, err := runner.readFiles(paths)
 		if err != nil {
-			return "ERROR: " + err.Error()
+			return "ERROR: " + err.Error(), false
 		}
-		output = note + output
-		return output
+		return note + output, true
 	case "search":
 		output, err := runner.repository.Search(ctx, arguments.Query)
 		if err != nil {
-			return "ERROR: " + err.Error()
+			return "ERROR: " + err.Error(), false
 		}
-		return output + runner.filesBehind(output)
+		return output + runner.filesBehind(output), true
 	case "recall":
-		return runner.recallEarlier()
+		return runner.recallEarlier(), true
 	default:
-		return "ERROR: unknown tool " + call.Name
+		return "ERROR: unknown tool " + call.Name, false
 	}
 }
 
@@ -1380,14 +1492,13 @@ func repositoryTools(recall bool) []functionTool {
 		// patch is named first, and required first, so a long comment
 		// cannot spend the output room the patch needs — which is the
 		// failure a summary field written ahead of a diff used to cause.
-		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. Set turn_is_complete to true when this edit finishes the task, and put your reply to the user in response_comment_for_user; the turn ends there and you do not get asked again.", Strict: true, Parameters: map[string]any{
+		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. On your last edit, put your closing note to the user in response_comment_for_user and the turn ends there; leave it empty while you still have work to do.", Strict: true, Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"patch":                     map[string]any{"type": "string"},
-				"turn_is_complete":          map[string]any{"type": "boolean"},
 				"response_comment_for_user": map[string]any{"type": "string"},
 			},
-			"required": []string{"patch", "turn_is_complete", "response_comment_for_user"}, "additionalProperties": false,
+			"required": []string{"patch", "response_comment_for_user"}, "additionalProperties": false,
 		}},
 	}
 	if recall {
@@ -1418,9 +1529,14 @@ const changeInstructions = `You are a small coding agent working in one folder.
 You are given the repository map and the user's message. The message may be a coding task,
 a question about the project, or ordinary conversation, and deciding which is part of your job.
 
-Finish by replying in plain markdown, with no tool call. That reply is what the user reads, so
-answer what was actually asked: the real colors, values or structure when it was a question,
-a short note of what you changed when it was a change, an ordinary reply when it was neither.
+For a completed change, set task_complete=true on your final apply_diff call. The application
+runs the project's check before ending the turn; failures return here for repair. Put a short,
+factual closing note in response_comment_for_user, or leave it empty for a local change summary.
+Do not claim checks passed before they run. Leave task_complete=false while any requested work
+remains. Do not make a separate call just to request the check or say "done".
+For questions, conversation or work you cannot complete, reply in plain markdown with no tool
+call. Answer what was actually asked: the real colors, values or structure for a question,
+an ordinary reply for conversation, and an honest account of any incomplete work.
 Do not describe a change you have not made — an edit only exists once apply_diff has accepted
 it. If you could not do something, say so plainly.
 
@@ -1430,33 +1546,23 @@ Do not go looking through the files for a message that did not ask you to.
 
 TOOLS
 
-read_files — one call, every file you want. Not one call per file.
-  matching — a regular expression, optional. Every file whose contents match it is read
-  too, along with the paths you named. Use it when you know what the code says but not
-  which file says it: read_files(paths: ["src/App.tsx"], matching: "accent") gets you the
-  file you knew about and the ones you did not, in one call instead of a search and then a
-  read. Leave it "" when you already know every path you want.
-search — for when the map is not enough to find something. When the matches land in a few
-  files, it hands you those files whole along with the match list, so you already have them:
-  do not follow a search with read_files for the files it just gave you.
-
-You can call read_files and search in the same reply, and should when you already know some
-files from the map but still have to find others. That is one round instead of two.
+read_files — read only files whose current contents are needed to implement or verify the
+  request. Reuse source already supplied by read_files, including initial context. Batch
+  those needed reads in one call; appearing in the map or search results alone is not a
+  reason to read a file. Resolve concrete dependencies and project rules when needed,
+  and read a file before editing it.
+  matching — optionally name a regular expression alongside explicit paths to read the
+  matching files in the same call. Leave it empty when paths are already known.
+search — for when the map is not enough to find something. Narrow searches also return
+  matching files in full; reuse those contents instead of reading them again.
 apply_diff — make the edit. Read a file before changing it; never write an edit against
   contents you have not seen. When it says the patch applied, it applied: every edit was
   placed and the file contains it. Do not read the file back to check.
-  turn_is_complete — true when this edit is the last one the task needs, false when you
-  still have more to do. Decide it on the task, not on how the edit went: an edit that
-  landed on the third attempt still finishes the task if nothing is left to change.
-  response_comment_for_user — when turn_is_complete is true this is your reply to the user,
-  so write it properly: what you changed, and anything they should know. The turn ends
-  there and you are not asked again, which saves a whole round trip spent saying "done".
-  Leave both empty and false while you still have work to do.
-  Set it on the assumption that this patch applies. If it does not, nothing is written,
-  the flag is ignored and you get another go — so a patch that was rejected before is no
-  reason to hold the turn open now.
-  Saying you are finished locks nothing in: the project's check still runs afterwards,
-  and if it fails the turn carries on and you fix it.
+  task_complete — a required boolean. Set true only when this edit implements the entire
+  request and is your final tool call in the response. Otherwise set false. A closing note
+  alone does not end the turn; a rejected edit cannot declare completion.
+  response_comment_for_user — a short, factual note of what changed and any limitations.
+  It may be empty. Completion depends on task_complete and the automatic project check.
 recall, when it is offered — the turns before the few already above, for a message that
   reaches back further than they go.
 
@@ -1464,9 +1570,46 @@ Everything you have already read stays in this conversation. Do not read a file 
 or search for text you have been shown; scroll up and use it. Each tool has a limited number
 of uses per turn, so spend them on what the task needs.
 
+Once the needed context is available, prefer one patch that completes the whole request,
+with task_complete=true so the automatic check runs immediately. Do not split already-known
+work by file or layer merely to await an acknowledgement. Use an intermediate edit only
+when further evidence or output-size limits require it; keep task_complete=false whenever
+requested work remains.
+
+REQUEST CONTRACT
+
+For a coding task, track the concrete requirements in the request and relevant project
+context: behaviour, data, validation, exact names and UI semantics. Before your final edit,
+compare its resulting contents with those requirements using the files and accepted edits
+already in this conversation. Include any missing implementation in that edit; do not add
+unrequested features or a separate round trip just to announce this review.
+
+Write source literals for their target language; tool JSON encoding is a separate layer.
+After that encoding is decoded, the source must contain exactly the intended characters;
+do not automatically unescape source text. Preserve exact requested stored and API values,
+including case. Display labels and formatting do not authorize changing those values.
+
+Ground schema and compatibility changes in the request and observed project evidence.
+Preserve existing records, fields and values except for changes the user requests.
+Add migrations when the observed schema or requested change requires them; do not invent
+legacy schemas, units or conversions.
+Do not destructively rebuild or drop stored data merely to fit a preferred layout. If
+necessary schema evidence is missing, obtain it within the available tools or disclose
+the gap instead of guessing.
+
+For UI work, visible text and accessible names are distinct requirements. Give a requested
+named control, table or region its own semantic name using native HTML associations or
+aria-label/aria-labelledby. A nearby heading, placeholder or labelled wrapper does not
+automatically name the element itself. Associate form labels with their controls, and name
+tables with a caption or explicit accessible label when the request specifies a table name.
+
+The automatic project check catches only what that project's check covers; a successful
+typecheck does not establish that the requested behaviour or accessibility is complete.
+Keep the closing note factual and disclose any unmet requirement or unverified behaviour.
+
 THE PATCH FORMAT
 
-apply_diff takes a patch and nothing else. Output patches only.
+The patch field of apply_diff contains only a patch in this format.
 
 @path            modify this file
 @+path           create this file; every following line is its literal content
@@ -1478,20 +1621,12 @@ For modifications:
 +new line
  context after
 
-Context is optional and starts with a space. Use it to make the edit unique.
-
-A hunk is placed by finding its lines in the file. If those lines appear more than once, it
-cannot be placed at all — the patch is rejected as ambiguous and you write it again. This is
-one of the most common ways an edit fails. It bites on short lines: }, );, return null, an
-import, a closing tag, the same call in two handlers.
-
-So before you write a hunk, ask whether its lines appear only once in that file. If they do
-not, add a line of context above and a line below — the nearest line that is unique, such as
-a function signature, a distinctive string or a JSX tag. One line each side is usually enough.
-Do not pad with ten: every context line must match the file character for character, so long
-context fails a different way.
-
-A blank line separates one edit from the next, and so does a bare @@ if that is
+Removed lines can anchor a replacement without unchanged context. For an insertion with no
+removed lines in an existing nonempty file, include unchanged context prefixed with a space
+that matches exactly and identifies the insertion point uniquely. Prefer a short anchor
+that appears once. Use @+ only for a new file, with literal content, not added-line prefixes.
+To replace an existing file, remove its current contents with - lines before adding the new
+contents with + lines. A blank line separates one edit from the next, and so does a bare @@ if that is
 what comes naturally. No line numbers and no counts — edits are placed by matching your text
 against the file, so none of that is read.
 

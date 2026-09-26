@@ -159,6 +159,12 @@ func (client *Client) Dialect() string {
 }
 
 func (client *Client) create(ctx context.Context, request responseRequest) (responseEnvelope, error) {
+	return client.createWithRetry(ctx, request, nil)
+}
+
+// retry is a turn-owned, one-use permission, shared by compatibility fallbacks.
+// Coding sessions supply it; routing and other callers stay unchanged.
+func (client *Client) createWithRetry(ctx context.Context, request responseRequest, retry func(int) bool) (responseEnvelope, error) {
 	request.Model = client.model
 	body := any(request)
 	if client.chat {
@@ -176,23 +182,10 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	// Authorization header), so it is safe to trace.
 	label := requestLabel(request)
 	debug.Log("REQUEST "+label, string(payload))
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, client.endpoint, bytes.NewReader(payload))
+	response, replyBody, err := client.post(ctx, payload, label, retry)
 	if err != nil {
 		return responseEnvelope{}, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
-	response, err := client.http.Do(httpRequest)
-	if err != nil {
-		return responseEnvelope{}, fmt.Errorf("call LLM: %w", err)
-	}
-	defer response.Body.Close()
-	replyBody, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return responseEnvelope{}, err
-	}
-	debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(replyBody))
 
 	// Check the status before parsing. Decoding first turned a 404 with
 	// an empty body into "decode LLM response: unexpected end of JSON
@@ -204,7 +197,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		debug.Log("DIALECT", "the Responses API returned 404; switching to /v1/chat/completions")
 		client.chat = true
 		client.endpoint = chatEndpoint(client.baseURL)
-		return client.create(ctx, request)
+		return client.createWithRetry(ctx, request, retry)
 	}
 
 	// Some providers constrain generation to a tool call whenever tools
@@ -216,7 +209,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		debug.Log("TOOLS", "the provider demanded a tool call the model would not make; asking again without tools")
 		request.Tools = nil
 		request.ToolChoice = ""
-		return client.create(ctx, request)
+		return client.createWithRetry(ctx, request, retry)
 	}
 
 	// Some providers won't take tool definitions and a JSON schema in the
@@ -225,7 +218,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 	if client.chat && !client.dropSchema && rejectsSchemaWithTools(replyBody) {
 		debug.Log("SCHEMA", "the provider rejects response_format alongside tools; describing the shape in the instructions instead")
 		client.dropSchema = true
-		return client.create(ctx, request)
+		return client.createWithRetry(ctx, request, retry)
 	}
 
 	envelope, parseErr := client.decode(replyBody)
@@ -236,6 +229,54 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 		return responseEnvelope{}, fmt.Errorf("decode LLM response: %w: %s", parseErr, snippet(string(replyBody)))
 	}
 	return envelope, nil
+}
+
+// post reuses the exact encoded request and context after an eligible error.
+// Transport/read errors and successful responses never grant a replay: delivery
+// is ambiguous there, or the response may already contain usable tool output.
+func (client *Client) post(ctx context.Context, payload []byte, label string, retry func(int) bool) (*http.Response, []byte, error) {
+	const responseLimit = 8 << 20
+	endpoint := client.endpoint
+	for {
+		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+		if err != nil {
+			return nil, nil, err
+		}
+		httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
+		httpRequest.Header.Set("Content-Type", "application/json")
+		httpRequest.Header.Set("Accept", "application/json")
+		response, err := client.http.Do(httpRequest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("call LLM: %w", err)
+		}
+		replyBody, err := io.ReadAll(io.LimitReader(response.Body, responseLimit))
+		response.Body.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(replyBody))
+		// Reaching the read cap may hide an incomplete body, so do not replay it.
+		eligible := response.StatusCode == http.StatusBadGateway || response.StatusCode == 524 ||
+			(response.StatusCode == http.StatusServiceUnavailable && client.model == "muse-spark-1-3" && musePolicyUnavailable(replyBody))
+		if eligible && len(replyBody) < responseLimit && ctx.Err() == nil && retry != nil && retry(response.StatusCode) {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, fmt.Errorf("call LLM: %w", err)
+			}
+			continue
+		}
+		return response, replyBody, nil
+	}
+}
+
+func musePolicyUnavailable(body []byte) bool {
+	const message = "The model policy is temporarily unavailable. Please retry shortly."
+	if strings.TrimSpace(string(body)) == message {
+		return true
+	}
+	var reply struct {
+		Error *apiError `json:"error"`
+	}
+	return json.Unmarshal(body, &reply) == nil && reply.Error != nil && reply.Error.Message == message
 }
 
 // decode reads a reply in whichever dialect this client speaks, returning
@@ -316,9 +357,8 @@ func (response responseEnvelope) calls() []responseItem {
 }
 
 // cutOff reports whether the model ran out of output room before it
-// finished, rather than deciding anything. The reply then carries no
-// usable text — an empty message, or none at all — and the turn should
-// ask again, shorter, instead of failing over it.
+// finished, rather than deciding anything. An incomplete envelope may
+// still contain text or tool calls; callers decide how to continue.
 func (response responseEnvelope) cutOff() bool {
 	if response.IncompleteDetails == nil {
 		return false

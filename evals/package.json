@@ -1,0 +1,7 @@
+{
+  "name": "yolocoder-evals",
+  "private": true,
+  "type": "module",
+  "scripts": { "browser:install": "playwright install chromium" },
+  "devDependencies": { "@playwright/test": "1.56.1" }
+}

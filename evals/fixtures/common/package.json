@@ -1,0 +1,17 @@
+{
+  "name": "yolocoder-eval-app",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "tsc --noEmit",
+    "dev:client": "vite --config frontend/vite.config.ts",
+    "dev:server": "tsx watch backend/index.ts"
+  },
+  "dependencies": { "better-sqlite3": "11.10.0", "express": "4.21.2", "react": "18.3.1", "react-dom": "18.3.1" },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13", "@types/express": "4.17.21", "@types/node": "22.15.3",
+    "@types/react": "18.3.20", "@types/react-dom": "18.3.6", "typescript": "5.8.3",
+    "tsx": "4.19.4", "vite": "6.1.6"
+  }
+}

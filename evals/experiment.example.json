@@ -1,0 +1,15 @@
+{
+  "id": "001-short-edit-route",
+  "status": "proposed",
+  "hypothesis": "A constrained path for title/colour edits removes one model round without correctness regressions.",
+  "single_change": "Describe the exact product change before implementation",
+  "baseline_run": null,
+  "candidate_run": null,
+  "screening_tasks": ["tictactoe.edit", "todos.edit", "expenses.edit", "booking.edit"],
+  "repeats_for_confirmation": 3,
+  "acceptance": {"paired_correctness_regressions": 0, "minimum_practical_speedup": 1.15, "unexplained_cost_increase_allowed": false},
+  "paired_comparison": null,
+  "independent_visual_review": null,
+  "reserved_validation": null,
+  "decision_and_evidence": null
+}

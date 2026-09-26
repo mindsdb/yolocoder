@@ -327,3 +327,7 @@ for and installs updates. Non-interactive output remains animation-free.
 
 Version tags matching `v*` create permanent GitHub releases. Every push to
 `main` refreshes the rolling `latest` release used by the self-updater.
+
+## Reproduce the Muse + Jev benchmark
+
+See [the evaluation guide](evals/README.md) for source-verified builds of original vanilla and the frozen winner, offline calibration, and the five-app comparison. The paid benchmark is a separate explicit step.

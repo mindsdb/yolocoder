@@ -40,3 +40,11 @@ go.work.sum
 # on disk and the compiler still reads it. `find . -name '* [0-9]*'` finds
 # them when a build fails for no apparent reason.
 * [0-9]*
+
+# Local evaluation dependencies and evidence
+/evals/node_modules/
+/evals/.cache/
+/evals/runs/
+/dist/
+__pycache__/
+*.pyc

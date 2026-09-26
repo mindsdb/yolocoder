@@ -34,6 +34,10 @@ Passing requires every functional browser/API, TypeScript, data-preservation/res
 
 See [the full protocol](PROTOCOL.md), [task definitions](yoloeval/catalog.py), [grading code](browser/checks.mjs), and [acceptance/early-stop rules](yoloeval/unseen.py). Jev routes the candidate; deterministic checks grade the results. There is no LLM judge in this protocol.
 
+## Recorded evidence
+
+The [recorded result](results/unseen-002/README.md) includes all 120 outcomes, 393 model-call records, source diffs, provenance, and an offline audit. Run `python3 evals/audit_results.py` to recalculate its acceptance and timings without API calls.
+
 ## Interpretation
 
 The recorded unseen result was **45/60 → 53/60**, mean **70.58s → 47.37s**, P50 **54.30s → 30.92s**. This is a complete-bundle result, not an isolated Jev ablation. Campaign 001 was invalidated for a native-search-input grader bug; campaign 002 restarted all 120 attempts after correcting it. A provider outage was held between attempts; all scored service errors remained in the final data.

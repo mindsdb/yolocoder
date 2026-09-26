@@ -1,0 +1,26 @@
+{
+  "complete": true,
+  "accepted": true,
+  "counts": {
+    "baseline": {
+      "completed": 60,
+      "passed": 45
+    },
+    "candidate": {
+      "completed": 60,
+      "passed": 53
+    }
+  },
+  "critical_regressions": [],
+  "timing_bounds": {
+    "baseline_mean_s": 70.57951289926423,
+    "baseline_p50_s": 54.29908558295574,
+    "candidate_mean_lower_bound_s": 47.37260423747163,
+    "candidate_p50_lower_bound_s": 30.92210533306934
+  },
+  "status": "accepted",
+  "reason": "Equal or higher pass count, no paired storage regressions, lower mean and median.",
+  "perfect_candidate": false,
+  "candidate_mean_s": 47.37260423747163,
+  "candidate_p50_s": 30.92210533306934
+}

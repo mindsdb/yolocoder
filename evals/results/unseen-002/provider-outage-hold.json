@@ -1,0 +1,16 @@
+{
+  "status": "resumed_same_process",
+  "pid": 72416,
+  "last_completed": "candidate/notes.feature--2",
+  "completed_attempts": 35,
+  "held_at_unix": 1790417401.868613,
+  "reason": "Repeated upstream 500/503 service failures; no actor or evaluator changes, no retries; preserve and resume same process after service recovery.",
+  "incomplete_attempt_folders": [],
+  "all_completed_calls_drained": true,
+  "resumed_at_unix": 1790417962.97086,
+  "verified_recovery_models": [
+    "muse-spark-1-3",
+    "jev-1.13.0"
+  ],
+  "hold_duration_s": 561.1022469997406
+}

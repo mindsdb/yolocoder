@@ -147,6 +147,34 @@ func TestAmbiguousHunkErrorPointsAtEachMatch(t *testing.T) {
 	}
 }
 
+func TestApplyIsRefusedWhenALongerHunkIsAmbiguous(t *testing.T) {
+	// Length does not make a block unique. Go's three-line error check
+	// appears in almost every function, and a hunk made of exactly that
+	// could mean any of them: placing it at the first one edits a function
+	// nobody asked about and reports the patch as applied.
+	root := t.TempDir()
+	original := "func a() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n\n" +
+		"func b() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n"
+	writeFile(t, root, "a.go", original)
+	repository := &Repository{Root: root}
+	patch := "@a.go\n" +
+		" \tif err != nil {\n" +
+		"-\t\treturn err\n" +
+		"+\t\treturn fmt.Errorf(\"b: %w\", err)\n" +
+		" \t}\n"
+	err := repository.Apply(patch)
+	if err == nil {
+		t.Fatal("expected a hunk that matches two places to be refused")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err = %v, want it to explain the ambiguity", err)
+	}
+	content, _ := os.ReadFile(filepath.Join(root, "a.go"))
+	if string(content) != original {
+		t.Fatalf("file was modified despite the refusal: %q", content)
+	}
+}
+
 func TestApplyLeavesFilesAloneWhenAHunkCannotBePlaced(t *testing.T) {
 	patch := "--- a/index.html\n+++ b/index.html\n@@ -1,1 +1,1 @@\n" +
 		"-  <title>Something Else Entirely</title>\n" +

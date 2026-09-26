@@ -665,9 +665,9 @@ func splitByAnchor(lines []string, current hunk) []hunk {
 	return parts
 }
 
-// locate finds the one place block occurs in lines. A short block that
-// appears more than once is ambiguous, and picking one would risk editing
-// the wrong part of the file, so it is refused instead.
+// locate finds the one place block occurs in lines. A block that appears
+// more than once is ambiguous, however long it is, and picking one would
+// risk editing the wrong part of the file, so it is refused instead.
 func locate(lines, block []string) (int, *HunkError) {
 	matches := findAll(lines, block, func(a, b string) bool { return a == b })
 	if len(matches) == 0 {
@@ -720,7 +720,7 @@ func locate(lines, block []string) (int, *HunkError) {
 			detail += fmt.Sprintf("\n\nthe closest match is at line %d, where it differs:\n  expected: %q\n  in file:  %q", at, expected, found)
 		}
 		return 0, &HunkError{Reason: reason, Expected: expected, Found: found, Detail: detail, Block: block}
-	case len(matches) > 1 && len(block) < 3:
+	case len(matches) > 1:
 		reason := fmt.Sprintf("this hunk's lines appear %d times, too ambiguous to place", len(matches))
 		return 0, &HunkError{Reason: reason, Detail: fmt.Sprintf("%s:\n%s%s", reason, preview(block), disambiguate(lines, matches, block))}
 	default:

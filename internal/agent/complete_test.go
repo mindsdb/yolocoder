@@ -25,7 +25,7 @@ func applyWith(t *testing.T, session *changeSession, arguments map[string]any) s
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, _ := session.applyDiff(responseItem{Name: "apply_diff", Arguments: string(encoded)})
+	output, _, _ := session.applyDiff(responseItem{Name: "apply_diff", Arguments: string(encoded)})
 	return output
 }
 
@@ -34,7 +34,7 @@ func TestAFinishedEditEndsTheTurn(t *testing.T) {
 	session := sessionOn(t, "a.css", ".a {\n  color: red;\n}\n")
 	applyWith(t, session, map[string]any{
 		"patch":                     "@a.css\n-  color: red;\n+  color: blue;\n",
-		"turn_is_complete":          true,
+		"task_complete":             true,
 		"response_comment_for_user": "Made it blue.",
 	})
 	if session.closing != "Made it blue." {
@@ -42,18 +42,16 @@ func TestAFinishedEditEndsTheTurn(t *testing.T) {
 	}
 }
 
-// A model that fills the reply but leaves the flag false is still
-// finished — that was the only signal there was, and honouring it costs
-// nothing.
-func TestAReplyWithoutTheFlagStillEndsTheTurn(t *testing.T) {
+// A closing note alone must not end an unfinished normal task.
+func TestAReplyWithoutTheFlagDoesNotCompleteTheTask(t *testing.T) {
 	session := sessionOn(t, "a.css", ".a {\n  color: red;\n}\n")
 	applyWith(t, session, map[string]any{
 		"patch":                     "@a.css\n-  color: red;\n+  color: blue;\n",
-		"turn_is_complete":          false,
+		"task_complete":             false,
 		"response_comment_for_user": "Made it blue.",
 	})
-	if session.closing != "Made it blue." {
-		t.Fatalf("closing = %q", session.closing)
+	if session.complete {
+		t.Fatal("closing note completed an unfinished task")
 	}
 }
 
@@ -61,7 +59,7 @@ func TestAnUnfinishedEditDoesNotEndTheTurn(t *testing.T) {
 	session := sessionOn(t, "a.css", ".a {\n  color: red;\n}\n")
 	applyWith(t, session, map[string]any{
 		"patch":                     "@a.css\n-  color: red;\n+  color: blue;\n",
-		"turn_is_complete":          false,
+		"task_complete":             false,
 		"response_comment_for_user": "",
 	})
 	if session.closing != "" {
@@ -74,7 +72,7 @@ func TestAFailedEditCannotEndTheTurn(t *testing.T) {
 	session := sessionOn(t, "a.css", ".a {\n  color: red;\n}\n")
 	applyWith(t, session, map[string]any{
 		"patch":                     "@a.css\n-  color: nowhere;\n+  color: blue;\n",
-		"turn_is_complete":          true,
+		"task_complete":             true,
 		"response_comment_for_user": "Made it blue.",
 	})
 	if session.closing != "" {

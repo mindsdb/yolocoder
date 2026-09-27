@@ -89,7 +89,13 @@ func decisionsEndpoint(baseURL string) string {
 // nil is the ordinary answer to anything going wrong — a timeout, a 504,
 // an endpoint that has never heard of decisions — and the turn carries on
 // exactly as it did before. Nothing here is allowed to fail a turn.
-func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []string) []string {
+//
+// A reply with a non-2xx status also gets a line on the trail. A revoked
+// key or an edge rule answers that way on every turn, and without the
+// line the only sign would be turns that quietly stop getting their files
+// picked. Timeouts and transport errors stay in the debug trace: a turn
+// the user cancels ends this call too, and that is not news.
+func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []string, progress Progress) []string {
 	if len(paths) == 0 || len(paths) > maxDecideFiles {
 		return nil
 	}
@@ -126,8 +132,13 @@ func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []stri
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		progress.Log("  file preselection skipped: decisions returned " + response.Status)
 		debug.Logf("DECIDE", "%s: %s", response.Status, snippet(string(body)))
+		return nil
+	}
+	if err != nil {
+		debug.Logf("DECIDE", "read: %v", err)
 		return nil
 	}
 	var reply decisionReply

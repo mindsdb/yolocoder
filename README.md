@@ -154,6 +154,8 @@ The trace holds the contents of the files being worked on, so it is written
 with user-only permissions. It never contains the API key, which travels in
 a header rather than the request body.
 
+With `/preselect` on, each turn first asks the provider's `/v1/decisions` endpoint which files it needs. When that call comes back with a non-2xx status, the trail says so, for example `file preselection skipped: decisions returned 403 Forbidden`, and the turn carries on with the model asking for files itself. Timeouts and connection errors stay in the debug trace only, since a turn you cancel ends that call too.
+
 ## Install
 
 macOS and Linux:
@@ -331,3 +333,5 @@ for and installs updates. Non-interactive output remains animation-free.
 
 Version tags matching `v*` create permanent GitHub releases. Every push to
 `main` refreshes the rolling `latest` release used by the self-updater.
+
+Every request YoloCoder sends carries `User-Agent: yolocoder/<version> (+https://github.com/mindsdb/yolocoder)`, where the version is the one the build stamped: `main` for the rolling `latest` release, the tag for a `v*` release, and `dev` for a local `go build` or `go run`. Go's own default, `Go-http-client/1.1` or `Go-http-client/2.0`, is shared by every Go program that never sets one, so a server can turn that default away without turning YoloCoder away. All outbound calls go through the one client in `internal/httpclient`, and `go test ./...` fails if new code sends through `http.DefaultClient` or builds its own `http.Client`.

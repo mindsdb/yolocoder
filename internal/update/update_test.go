@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/mindsdb/yolocoder/internal/httpclient"
 )
 
 func TestAsset(t *testing.T) {
@@ -128,4 +130,23 @@ func tarGz(t *testing.T, name string, content []byte) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+// The launch check runs with no Client set, which is the path every
+// installed build takes. It names YoloCoder like every other request.
+func TestTheLaunchCheckNamesYoloCoder(t *testing.T) {
+	var agent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agent = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte("abc1234\n"))
+	}))
+	defer server.Close()
+
+	checker := &Checker{BaseURL: server.URL}
+	if _, err := checker.LatestCommit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if agent != httpclient.UserAgent() {
+		t.Fatalf("User-Agent = %q, want %q", agent, httpclient.UserAgent())
+	}
 }

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mindsdb/yolocoder/internal/httpclient"
 	"github.com/mindsdb/yolocoder/internal/ui"
 )
 
@@ -238,7 +239,7 @@ func (checker *Checker) get(ctx context.Context, name string, limit int64) ([]by
 	}
 	client := checker.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = httpclient.Client
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/"+name, nil)
 	if err != nil {

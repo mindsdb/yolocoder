@@ -290,7 +290,6 @@ func (client *Client) selectEditFiles(ctx context.Context, model, opening string
 		}
 		request.Header.Set("Authorization", "Bearer "+client.apiKey)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "YoloCoder/experimental-edit-router")
 		response, err = client.http.Do(request)
 		if err != nil {
 			return nil, Usage{}, err

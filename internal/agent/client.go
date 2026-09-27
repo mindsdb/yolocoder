@@ -12,6 +12,7 @@ import (
 
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/debug"
+	"github.com/mindsdb/yolocoder/internal/httpclient"
 )
 
 type Client struct {
@@ -140,7 +141,7 @@ func NewClient(provider config.LLM) (*Client, error) {
 		apiKey:      provider.APIKey,
 		model:       provider.Model,
 		autoDialect: strings.TrimSpace(provider.API) == "",
-		http:        http.DefaultClient,
+		http:        httpclient.Client,
 	}
 	if provider.API == config.APIChat {
 		client.endpoint = chatEndpoint(provider.BaseURL)
@@ -430,7 +431,7 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error
 	}
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Accept", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := httpclient.Client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
 	}

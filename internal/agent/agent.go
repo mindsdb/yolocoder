@@ -339,7 +339,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		if len(chosen) > 0 {
 			session.preread(chosen, progress)
 		}
-		progress.Log("  chose files · " + formatDuration(spent))
+		progress.Log("  file choice · " + formatDuration(spent))
 	}
 	if len(images) == 0 {
 		runner.prefetchEdit(ctx, session, mapped, progress)

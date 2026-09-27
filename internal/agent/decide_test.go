@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
@@ -37,7 +38,7 @@ func TestChosenFilesAreTheOnesAboveTheLine(t *testing.T) {
 	defer server.Close()
 
 	runner := NewRunner(&Client{baseURL: server.URL, apiKey: "k", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
-	chosen := runner.chooseFiles(context.Background(), "do a thing", paths)
+	chosen := runner.chooseFiles(context.Background(), "do a thing", paths, &recordingProgress{})
 	if len(chosen) != 2 || chosen[0] != "a.ts" || chosen[1] != "b.ts" {
 		t.Fatalf("chose %v, want a.ts and b.ts, most confident first", chosen)
 	}
@@ -55,25 +56,133 @@ func TestAShrugChoosesNothing(t *testing.T) {
 	defer server.Close()
 
 	runner := NewRunner(&Client{baseURL: server.URL, apiKey: "k", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
-	if chosen := runner.chooseFiles(context.Background(), "do a thing", paths); chosen != nil {
+	progress := &recordingProgress{}
+	if chosen := runner.chooseFiles(context.Background(), "do a thing", paths, progress); chosen != nil {
 		t.Fatalf("chose %v, want nothing", chosen)
+	}
+	if len(progress.logs) != 0 {
+		t.Fatalf("a call that answered printed %q", progress.logs)
 	}
 }
 
 func TestAnythingGoingWrongJustChoosesNothing(t *testing.T) {
 	// A 504 was seen once in twenty-five real calls. It must cost the
-	// optimization, never the turn.
-	for _, broken := range []http.HandlerFunc{
-		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusGatewayTimeout) },
-		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
-		func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "not json at all") },
+	// optimization, never the turn. A refused call also says so on the
+	// trail; a 2xx reply that merely fails to parse, or is cut off
+	// mid-body, does not.
+	for _, broken := range []struct {
+		handler http.HandlerFunc
+		trail   []string
+	}{
+		{func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusGatewayTimeout) },
+			[]string{"  file preselection skipped: decisions returned 504 Gateway Timeout"}},
+		{func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+			[]string{"  file preselection skipped: decisions returned 404 Not Found"}},
+		// Cloudflare's own codes have no name in Go. The line gives the
+		// bare code, not the server's reason phrase.
+		{func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(522) },
+			[]string{"  file preselection skipped: decisions returned 522"}},
+		{func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "not json at all") },
+			nil},
+		{func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "100")
+			fmt.Fprint(w, "{")
+		}, nil},
 	} {
-		server := httptest.NewServer(broken)
+		server := httptest.NewServer(broken.handler)
 		runner := NewRunner(&Client{baseURL: server.URL, apiKey: "k", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
-		if chosen := runner.chooseFiles(context.Background(), "task", []string{"a.ts"}); chosen != nil {
+		progress := &recordingProgress{}
+		if chosen := runner.chooseFiles(context.Background(), "task", []string{"a.ts"}, progress); chosen != nil {
 			t.Fatalf("chose %v from a broken endpoint", chosen)
 		}
+		if strings.Join(progress.logs, "\n") != strings.Join(broken.trail, "\n") {
+			t.Fatalf("trail = %q, want %q", progress.logs, broken.trail)
+		}
 		server.Close()
+	}
+}
+
+// A stalled or unreachable endpoint costs every turn its preselection the
+// same way a refusal does, so it says so too. A turn whose own context has
+// already ended prints nothing, since that is the caller stopping it.
+func TestAStalledOrUnreachableDecisionsCallIsOnTheTrail(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	// The server cannot see the client hang up while the POST body sits
+	// unread, so the handler waits for release, which runs before Close.
+	release := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer stalled.Close()
+	defer close(release)
+
+	limit := decideTimeout
+	decideTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { decideTimeout = limit })
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, call := range []struct {
+		name  string
+		url   string
+		ctx   context.Context
+		trail []string
+	}{
+		{"unreachable", gone.URL, context.Background(),
+			[]string{"  file preselection skipped: decisions unreachable"}},
+		{"stalled", stalled.URL, context.Background(),
+			[]string{"  file preselection skipped: decisions timed out after 50ms"}},
+		{"turn already ended", stalled.URL, ended, nil},
+	} {
+		t.Run(call.name, func(t *testing.T) {
+			runner := NewRunner(&Client{baseURL: call.url, apiKey: "k", http: stalled.Client()}, &repo.Repository{Root: t.TempDir()})
+			progress := &recordingProgress{}
+			if chosen := runner.chooseFiles(call.ctx, "task", []string{"a.ts"}, progress); chosen != nil {
+				t.Fatalf("chose %v from a call that never answered", chosen)
+			}
+			if strings.Join(progress.logs, "\n") != strings.Join(call.trail, "\n") {
+				t.Fatalf("trail = %q, want %q", progress.logs, call.trail)
+			}
+		})
+	}
+}
+
+// A blocked decisions call answers the same way on every turn, so the
+// turn has to say so where the user reads it. Driven through Run, since
+// that is the call site the user sees.
+func TestABlockedDecisionsCallIsOnTheTrailAndTheTurnCarriesOn(t *testing.T) {
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	decider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, "<html><title>Attention Required!</title></html>")
+	}))
+	defer decider.Close()
+	model, seen := scripted(t, finishes("Nothing to change."))
+	defer model.Close()
+
+	client := &Client{endpoint: model.URL, baseURL: decider.URL, apiKey: "k", model: "m", http: model.Client()}
+	runner := NewRunner(client, repository)
+	runner.UsePreselect(true)
+	progress := &recordingProgress{}
+	if _, err := runner.Run(context.Background(), "look at x", nil, nil, progress); err != nil {
+		t.Fatalf("a refused preselection failed the turn: %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("model calls = %d, want the turn to have gone ahead without the pick", len(*seen))
+	}
+	var skipped []string
+	for _, line := range progress.logs {
+		if strings.HasPrefix(line, "  file preselection skipped:") {
+			skipped = append(skipped, line)
+		}
+	}
+	if len(skipped) != 1 || skipped[0] != "  file preselection skipped: decisions returned 403 Forbidden" {
+		t.Fatalf("skipped lines = %q, want exactly one naming the 403", skipped)
 	}
 }
 
@@ -86,7 +195,7 @@ func TestATooLargeMapIsLeftToTheModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { asked = true }))
 	defer server.Close()
 	runner := NewRunner(&Client{baseURL: server.URL, apiKey: "k", http: server.Client()}, &repo.Repository{Root: t.TempDir()})
-	if chosen := runner.chooseFiles(context.Background(), "task", paths); chosen != nil || asked {
+	if chosen := runner.chooseFiles(context.Background(), "task", paths, &recordingProgress{}); chosen != nil || asked {
 		t.Fatal("past the ceiling the map is cheaper for the model to narrow by name")
 	}
 }
@@ -123,6 +232,11 @@ func TestPreselectionRemovesTheCallThatOnlyPicked(t *testing.T) {
 	}
 	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "picked a.ts") {
 		t.Fatalf("the trail should say which files were chosen for it:\n%s", trail)
+	}
+	for _, line := range progress.logs {
+		if strings.HasPrefix(line, "  file preselection skipped:") {
+			t.Fatalf("a call that answered reported itself skipped: %q", line)
+		}
 	}
 	content, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
 	if string(content) != "const x = 9;\n" {

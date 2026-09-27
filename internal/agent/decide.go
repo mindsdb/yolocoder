@@ -29,7 +29,7 @@ import (
 // mattered in thirteen of fourteen, carrying about 1.6 files that did not.
 //
 // Being wrong is survivable and being slow is not, which is what the
-// timeout and the silent fall-through below are for: a miss costs the
+// timeout and the fall-through below are for: a miss costs the
 // round trip this was saving, and nothing else, because the model still
 // has read_files.
 
@@ -40,10 +40,6 @@ const (
 	// at four extra files a turn, which is a worse trade than the round
 	// trip it saves.
 	decideThreshold = 0.35
-
-	// decideTimeout is short because this is an optimization. Past this
-	// the turn is better off doing what it always did.
-	decideTimeout = 6 * time.Second
 
 	// maxDecideFiles bounds what is worth asking about. Latency does not
 	// grow with the question count but the prompt does — nineteen files
@@ -56,6 +52,11 @@ const (
 	// not a selection.
 	maxDecidePicks = 8
 )
+
+// decideTimeout is short because this is an optimization. Past this the
+// turn is better off doing what it always did. It is a variable so a test
+// can shorten it instead of waiting it out.
+var decideTimeout = 6 * time.Second
 
 type decisionRequest struct {
 	Model     string              `json:"model"`
@@ -89,7 +90,16 @@ func decisionsEndpoint(baseURL string) string {
 // nil is the ordinary answer to anything going wrong — a timeout, a 504,
 // an endpoint that has never heard of decisions — and the turn carries on
 // exactly as it did before. Nothing here is allowed to fail a turn.
-func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []string) []string {
+//
+// A reply with a non-2xx status also gets a line on the trail, and so does
+// a call that runs out of time or never connects. A revoked key, an edge
+// rule or a stalled endpoint answers that way on every turn, and without
+// the line the only sign would be turns that quietly stop getting their
+// files picked. A 2xx reply that fails to read or parse stays in the
+// debug trace, since the endpoint did answer. So does a call whose turn
+// context has already ended: that is the caller stopping the turn, not
+// the endpoint failing.
+func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []string, progress Progress) []string {
 	if len(paths) == 0 || len(paths) > maxDecideFiles {
 		return nil
 	}
@@ -122,12 +132,31 @@ func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []stri
 	response, err := runner.client.http.Do(request)
 	if err != nil {
 		debug.Logf("DECIDE", "%v", err)
+		if ctx.Err() == nil {
+			reason := "unreachable"
+			if callCtx.Err() != nil {
+				reason = "timed out after " + decideTimeout.String()
+			}
+			progress.Log("  file preselection skipped: decisions " + reason)
+		}
 		return nil
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// The code and Go's own name for it, not response.Status: that is
+		// the server's text over HTTP/1.1, and over HTTP/2 it ends in a
+		// bare space for codes Go has no name for, like Cloudflare's 52x.
+		status := strconv.Itoa(response.StatusCode)
+		if text := http.StatusText(response.StatusCode); text != "" {
+			status += " " + text
+		}
+		progress.Log("  file preselection skipped: decisions returned " + status)
 		debug.Logf("DECIDE", "%s: %s", response.Status, snippet(string(body)))
+		return nil
+	}
+	if err != nil {
+		debug.Logf("DECIDE", "read: %v", err)
 		return nil
 	}
 	var reply decisionReply

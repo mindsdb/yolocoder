@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
+	"github.com/mindsdb/yolocoder/internal/httpclient"
 )
 
 // Most OpenAI-compatible providers implement /v1/chat/completions and not
@@ -359,7 +360,7 @@ func DetectAPI(ctx context.Context, baseURL, apiKey string) (string, error) {
 	}
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := httpclient.Client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("reach %s: %w", baseURL, err)
 	}

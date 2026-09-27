@@ -333,13 +333,13 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	if runner.editRouterModel == "" && runner.preselect {
 		progress.Status("Choosing the files...")
 		started := time.Now()
-		chosen := runner.chooseFiles(ctx, task, mapped)
+		chosen := runner.chooseFiles(ctx, task, mapped, progress)
 		spent := time.Since(started)
 		runner.profile.record(StepFiles, spent)
 		if len(chosen) > 0 {
 			session.preread(chosen, progress)
 		}
-		progress.Log("  chose files · " + formatDuration(spent))
+		progress.Log("  file choice · " + formatDuration(spent))
 	}
 	if len(images) == 0 {
 		runner.prefetchEdit(ctx, session, mapped, progress)

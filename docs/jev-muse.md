@@ -1,25 +1,22 @@
-# Muse + Jev build
+# Models and context selection
 
-Use Jev to select initial context and route small UI edits to a bounded Muse conversation. Other coding tasks use the configured primary model, with explicit completion checks and bounded recovery from supported provider errors.
+MindsHub connections use the complete Muse + Jev approach automatically in the CLI and web app. Normal installs, source builds and automatic updates all include it; no special build or activation setting is needed. Both models use the same MindsHub API key.
 
-## Build and configure
+- **Muse 1.3** (`muse-spark-1-3`) is the default coding model.
+- **Jev** (`jev-1.13.0`) selects initial context and identifies small UI edits.
+- Small UI edits use a bounded Muse conversation with literal replacements checked for a unique match before the batch is written.
+- Other coding tasks use the selected primary model, with bounded initial context, explicit completion checks and recovery from narrowly recognized provider errors.
 
-Requires Go 1.24+, Node.js 22 for web projects, and a MindsHub account serving `muse-spark-1-3` and `jev-1.13.0`.
+The project's detected check runs after edits. Jev cannot skip checks or declare completion. Its existing time, confidence and context limits still apply; when routing is uncertain or a request fails, the coding model can obtain its own context. Image requests and projects outside the router's supported bounds also use the normal coding conversation.
 
-```sh
-./scripts/build-jev-muse.sh
-YOLOCODER_NO_AUTOUPDATE=1 ./dist/yolocoder-jev-muse config
-YOLOCODER_NO_AUTOUPDATE=1 ./dist/yolocoder-jev-muse model
-```
+## Existing connections and model choices
 
-Configure MindsHub and select **muse-spark-1-3** as the primary coding model. The build selects **jev-1.13.0** for routing and **muse-spark-1-3** for the small-edit writer. The model picker changes the primary model; the small-edit model is set at build time.
+Saved MindsHub connections automatically gain Jev context selection and small-edit routing. Configurations from before this change that selected the old `mindshub_air` default now use Muse 1.3. Other saved model choices are preserved. Use the normal model picker to choose another primary model; small UI edits still use Muse 1.3. An explicit selection of `mindshub_air` saved with the new version is also preserved.
 
-From an empty app directory or an existing YoloCoder web project, launch the absolute path to the built binary with `--web`. The normal CLI also works. Keep `YOLOCODER_NO_AUTOUPDATE=1` when running this custom build so an update does not replace its compiled model configuration.
+Connections to the MindsHub inference URL through the custom-provider form or environment variables receive the same behaviour. For an environment connection to MindsHub, omitting `OPENAI_MODEL` selects Muse 1.3. The supported domain override applies to endpoint recognition too.
 
-## Behaviour
+Jev routing takes precedence over the older `/preselect` preference, so enabling that preference does not add another selector request.
 
-Jev selects bounded initial context; uncertainty or an unavailable router lets the coding model obtain its own context. Small UI edits can use exact literal substitutions, checked for a unique match before the batch is written. The project's detected check still runs after edits.
+## Other inference providers
 
-Normal tasks finish only after an explicit completion signal, successful tool results, a complete response and the project's detected check. Rejected edits receive path and remaining-budget feedback. A bounded diagnostic check can help with an already-required continuation, and narrowly recognized provider errors have a finite recovery budget.
-
-The Jev router takes precedence over `/preselect` in this build, avoiding two selectors per request. Plain builds still support `/preselect`; their normal completion and recovery improvements apply without the new router. Architecture notes, pattern-based reads, search pre-reading and rejected-patch logging remain available.
+Other providers use their configured model to read context and make edits. They do not automatically receive Jev decision requests or Muse model requests. Explicit completion checks, checked edits and applicable bounded error recovery remain active. Both Responses and chat-completions endpoints remain supported.

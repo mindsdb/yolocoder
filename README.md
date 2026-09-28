@@ -168,9 +168,12 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/mindsdb/yolocoder/main/install.ps1 | iex
 ```
 
-## Muse + Jev build
+## MindsHub defaults
 
-See [the Muse + Jev guide](docs/jev-muse.md) for build instructions and model configuration.
+MindsHub connections use Muse 1.3 for coding and Jev for context selection
+and small-edit routing automatically. This is included in normal installs,
+source builds and updates. See [how the models work together](docs/jev-muse.md).
+Other providers use their configured coding model without requiring Jev or Muse.
 
 ## Develop
 
@@ -185,7 +188,7 @@ go test ./...
 
 On first launch, YoloCoder asks you to connect either:
 
-- MindsHub using browser sign-in
+- MindsHub using browser sign-in, with Muse 1.3 and Jev ready to use
 - Custom: any OpenAI-compatible endpoint using a base URL and API key
 
 "OpenAI-compatible" covers two different APIs. YoloCoder speaks both: the
@@ -222,15 +225,13 @@ YoloCoder keeps the loop deliberately small:
 
 1. Builds a compact map of the current folder (`.gitignore`-aware when it
    already has its own Git repository, a plain walk otherwise).
-2. Opens one conversation with that map and the message, and works in it
-   until there is something to say. The model reads with `read_files` and
-   `search`, edits with `apply_diff`, and finishes by replying in plain
-   markdown with no tool call — which is the reply you read. Deciding
-   whether the message was a task, a question or ordinary conversation
-   happens there too, by the call that can act on the answer. A separate
-   routing call used to come first, but it had no tools and so couldn't
-   settle "question or change?" for anything needing the files to answer;
-   it said "change" and deferred, costing a round trip every turn.
+2. On MindsHub, Jev selects initial context and routes eligible small UI
+   edits to a bounded Muse conversation. Other tasks use the selected
+   coding model, with Muse 1.3 as the default. Other providers start with
+   their configured model, which obtains its own context. The model reads
+   with `read_files` and `search`, edits with `apply_diff`, and answers
+   questions in plain markdown. Small UI edits can also use checked literal
+   replacements.
 3. Places each edit by matching its text against the file. Nothing is
    written unless every edit in the patch can be placed, and a rejection
    comes back as that tool's result — naming each edit it could not find
@@ -239,9 +240,10 @@ YoloCoder keeps the loop deliberately small:
 4. Runs the repository's detected check command when the model tries to
    finish, and sends it back to work if that fails. It cannot declare
    victory over a build it just broke. An edit can carry the model's
-   closing note to the user with it (`response_comment_for_user`), and
-   when that edit lands and the check passes, the note is the reply and
-   the turn ends there — removing a round trip that existed only to hear
+   closing note to the user with it (`response_comment_for_user`). Normal
+   tasks also require `task_complete=true` on the final edit. When that
+   edit lands and the check passes, the turn can end there — removing a
+   round trip that existed only to hear
    "done", which meant resending the whole transcript to generate forty
    words. The check still has the final say: if it fails the note is
    dropped and the conversation carries on.

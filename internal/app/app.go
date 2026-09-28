@@ -44,14 +44,13 @@ Usage:
 Environment provider:
   OPENAI_BASE_URL                 OpenAI-compatible endpoint
   OPENAI_API_KEY                  endpoint API key
-  OPENAI_MODEL                    optional model name
+  OPENAI_MODEL                    model name (defaults to Muse 1.3 on MindsHub)
   OPENAI_API_DIALECT              "chat" for /v1/chat/completions,
                                   otherwise the Responses API
 `
 
 const listModelsTimeout = 10 * time.Second
 const detectAPITimeout = 10 * time.Second
-const defaultMindsHubModel = "mindshub_air"
 
 func terminalInput() bool {
 	return terminal.IsTTY(os.Stdin)
@@ -244,13 +243,8 @@ func connectMindsHub(output *os.File, reader *terminal.Reader) (config.LLM, erro
 			return config.LLM{}, err
 		}
 	}
-	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey}
-	model, err := pickModel(output, reader, provider)
-	if err != nil {
-		fmt.Fprintf(output, "Could not choose a model (%v); using the default.\n", err)
-		model = defaultMindsHubModel
-	}
-	provider.Model = model
+	provider := config.LLM{Provider: "mindshub", BaseURL: config.MindsHubBaseURL(), APIKey: apiKey}.WithDefaults()
+	fmt.Fprintln(output, "Using Muse 1.3 for coding with Jev context selection.")
 	return saveProvider(output, provider)
 }
 

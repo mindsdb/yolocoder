@@ -131,6 +131,7 @@ type toolOutput struct {
 }
 
 func NewClient(provider config.LLM) (*Client, error) {
+	provider = provider.WithDefaults()
 	if strings.TrimSpace(provider.Model) == "" {
 		return nil, fmt.Errorf("an LLM model is required; reconnect with `yolocoder config connect` or set OPENAI_MODEL")
 	}

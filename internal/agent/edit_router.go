@@ -14,11 +14,6 @@ import (
 	"time"
 )
 
-// Experimental, off in normal builds. A trial binary opts in with -ldflags
-// '-X github.com/mindsdb/yolocoder/internal/agent.editRouterModel=jev-1.13.0'.
-// The configured provider must serve this model at /v1/decisions.
-var editRouterModel string
-
 const (
 	editRouteTimeout     = 3 * time.Second
 	prefetchMaxSources   = 4
@@ -290,7 +285,7 @@ func (client *Client) selectEditFiles(ctx context.Context, model, opening string
 		}
 		request.Header.Set("Authorization", "Bearer "+client.apiKey)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "YoloCoder/experimental-edit-router")
+		request.Header.Set("User-Agent", "YoloCoder/edit-router")
 		response, err = client.http.Do(request)
 		if err != nil {
 			return nil, Usage{}, err

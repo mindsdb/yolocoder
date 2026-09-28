@@ -6,10 +6,6 @@ import (
 	"net/http"
 )
 
-// Experimental and off in normal builds. This model handles the normal loop
-// only after Jev has selected the small-edit route and context was read.
-var smallEditModel string
-
 func (session *changeSession) create(ctx context.Context, request responseRequest, progress Progress) (responseEnvelope, error) {
 	runner := session.runner
 	if session.writer == nil {

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 type LLM struct {
 	Provider string
@@ -94,10 +94,17 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect}, true, nil
+	provider := LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect}
+	// Upgrade the previous MindsHub default once. Version 2 saves preserve an
+	// explicit choice of that model, just like any other model selection.
+	if saved.Version < 2 && provider.UsesMindsHub() && provider.Model == "mindshub_air" {
+		provider.Model = DefaultMindsHubModel
+	}
+	return provider.WithDefaults(), true, nil
 }
 
 func Save(provider LLM) error {
+	provider = provider.WithDefaults()
 	baseURL, err := ValidateBaseURL(provider.BaseURL)
 	if err != nil {
 		return err
@@ -148,11 +155,11 @@ func FromEnvironment(getenv func(string) string) (LLM, error) {
 	if apiKey == "" {
 		return LLM{}, fmt.Errorf("OPENAI_API_KEY is required with --llm-from-env-vars")
 	}
-	model := strings.TrimSpace(getenv("OPENAI_MODEL"))
-	if model == "" {
+	provider := LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: strings.TrimSpace(getenv("OPENAI_MODEL")), API: strings.TrimSpace(getenv("OPENAI_API_DIALECT"))}.WithDefaults()
+	if provider.Model == "" {
 		return LLM{}, fmt.Errorf("OPENAI_MODEL is required with --llm-from-env-vars")
 	}
-	return LLM{Provider: "environment", BaseURL: baseURL, APIKey: apiKey, Model: model, API: strings.TrimSpace(getenv("OPENAI_API_DIALECT"))}, nil
+	return provider, nil
 }
 
 func ValidateBaseURL(raw string) (string, error) {

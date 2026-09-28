@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/debug"
 	"github.com/mindsdb/yolocoder/internal/repo"
 )
@@ -245,7 +246,12 @@ type Runner struct {
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
-	return &Runner{client: client, repository: repository, served: map[string]string{}, editRouterModel: editRouterModel, smallEditModel: smallEditModel}
+	runner := &Runner{client: client, repository: repository, served: map[string]string{}}
+	if client != nil && (config.LLM{BaseURL: client.baseURL}).UsesMindsHub() {
+		runner.editRouterModel = config.MindsHubDecisionModel
+		runner.smallEditModel = config.DefaultMindsHubModel
+	}
+	return runner
 }
 
 // UseRecall offers (or withholds) the tool for reading further back than
@@ -303,7 +309,7 @@ func (runner *Runner) recallable() []Recollection {
 // the files to answer; it said "change" and deferred, costing a serial
 // round trip to reach a foregone conclusion. The same judgement is made
 // here instead, by the call that can act on it.
-// An experimental edit router can prefetch context; it never decides the
+// The MindsHub edit router can prefetch context; it never decides the
 // outcome or replaces the normal conversation.
 //
 // images are data URLs (screenshots pasted into the web UI) attached to

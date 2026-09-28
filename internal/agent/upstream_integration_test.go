@@ -10,7 +10,7 @@ import (
 )
 
 // A saved /preselect preference must not add a second Jev round trip when
-// the review build has already opted into the winning router.
+// the MindsHub connection already uses the standard router.
 func TestWinnerRouterSupersedesLegacyPreselection(t *testing.T) {
 	repository := folder(t, map[string]string{"app.tsx": "export const title = 'Old';\n"})
 	routes := 0

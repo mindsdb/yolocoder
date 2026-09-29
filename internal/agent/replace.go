@@ -21,11 +21,37 @@ type anchoredReplacement struct {
 }
 
 func (session *changeSession) instructions() string {
-	if !session.prefetched {
+	switch {
+	case session.prefetched:
+		return smallEditInstructions
+	case session.whole:
+		return wholeProjectChangeInstructions
+	default:
 		return changeInstructions
 	}
-	return smallEditInstructions
 }
+
+// wholeProjectChangeInstructions are changeInstructions for a project
+// handed over whole and in memory (--web-fe): nothing is left to read,
+// and a file being rewritten is written out in full rather than as a
+// diff of every one of its lines. The two sentences that say otherwise
+// are replaced rather than contradicted further down: with both in the
+// prompt, the model split the difference and wrote a whole file as "+"
+// lines under a plain @path, which places nowhere.
+var wholeProjectChangeInstructions = strings.Replace(strings.Replace(changeInstructions,
+	"Use @+ only for a new file, with literal content, not added-line prefixes.\n"+
+		"To replace an existing file, remove its current contents with - lines before adding the new\n"+
+		"contents with + lines.",
+	"Use @+path, with literal content and no added-line prefixes, both for a new file and to\n"+
+		"replace an existing file whole: whenever you are rewriting most of a file (building the app\n"+
+		"from a starter, for one), write the complete new file under @+path. Never write a whole file as\n"+
+		"+ lines under a plain @path. For a small change, use @path with only the lines that change.", 1),
+	"THE PATCH FORMAT", `THIS PROJECT
+
+Every file in the project is already above, complete and current. There is nothing else to read or
+search for: go straight to the edit. It runs in a browser preview, not on this machine.
+
+THE PATCH FORMAT`, 1)
 
 const smallEditInstructions = `Implement the user's small UI edit in this folder. Preserve unrelated content and behaviour.
 The initial read_files call already read the selected source and project context; use those exact contents.
@@ -59,6 +85,17 @@ Use recall, when offered, only for earlier context not already in the conversati
 
 func (session *changeSession) tools() []functionTool {
 	tools := repositoryTools(session.runner.recall)
+	if session.whole {
+		// Offered anyway, read_files and search were only ever a way to
+		// spend a round trip re-reading what is already in the transcript.
+		kept := tools[:0]
+		for _, tool := range tools {
+			if tool.Name != "read_files" && tool.Name != "search" {
+				kept = append(kept, tool)
+			}
+		}
+		tools = kept
+	}
 	if !session.prefetched {
 		for i := range tools {
 			if tools[i].Name == "read_files" {

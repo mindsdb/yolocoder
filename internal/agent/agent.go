@@ -341,7 +341,19 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 		}
 		progress.Log("  chose files · " + formatDuration(spent))
 	}
-	if len(images) == 0 {
+	switch {
+	case runner.repository.InMemory():
+		// A project handed over in memory is small by construction, so
+		// all of it goes in up front when it fits, instead of spending a
+		// round trip asking for it. When it does not, the model reads
+		// what it needs the ordinary way.
+		started := time.Now()
+		if runner.completeWholeContext(ctx, session, mapped) {
+			session.whole = true
+			progress.Log(fmt.Sprintf("  read %s · %s", strings.Join(session.readPaths, ", "), formatDuration(time.Since(started))))
+		}
+		runner.profile.record(StepTools, time.Since(started))
+	case len(images) == 0:
 		runner.prefetchEdit(ctx, session, mapped, progress)
 	}
 	progress.Status("Working out the change...")
@@ -371,6 +383,12 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 	runner := session.runner
 	workStarted := time.Now()
 	for round := 0; round < maxRounds; round++ {
+		// Every round is the model thinking again, and says so: left
+		// alone, the status still named the last tool that ran, so the
+		// longest wait of the turn was labelled "Applying the edit...".
+		if round > 0 {
+			progress.Status("Working out the change...")
+		}
 		input := session.timedInput(ctx, workStarted, time.Now())
 		if !session.prefetched {
 			progress.Log("  normal timing feedback attached")
@@ -434,7 +452,7 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 				}
 				switch {
 				case result.Skipped:
-					progress.Log("  no check command detected")
+					progress.Log("  " + noCheckLine(runner.repository))
 				case !result.Passed:
 					progress.Log("  check failed, back to it · " + formatDuration(testSpent))
 					for _, line := range firstFailures(result.Output) {
@@ -511,7 +529,8 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 		}
 
 		if !session.prefetched && !session.complete && batchOK &&
-			calls[len(calls)-1].Name == "apply_diff" && !session.checkpointUsed && round+1 < maxRounds {
+			calls[len(calls)-1].Name == "apply_diff" && !session.checkpointUsed && round+1 < maxRounds &&
+			!runner.repository.InMemory() {
 			session.checkpointUsed = true
 			started := time.Now()
 			status, diagnostic := diagnosticCheckpoint(ctx, runner.repository.Root)
@@ -543,7 +562,7 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 			}
 			switch {
 			case result.Skipped:
-				progress.Log("  no check command detected")
+				progress.Log("  " + noCheckLine(runner.repository))
 			case !result.Passed:
 				progress.Log("  check failed, back to it · " + formatDuration(testSpent))
 				for _, line := range firstFailures(result.Output) {
@@ -561,7 +580,7 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 				if reply == "" {
 					reply = "Updated " + strings.Join(session.applied, ", ") + "."
 				}
-				if result.Skipped {
+				if result.Skipped && !runner.repository.InMemory() {
 					reply += "\n\nNo project check was detected."
 				}
 			}
@@ -803,7 +822,7 @@ func (runner *Runner) rewriteInstead(ctx context.Context, task string, session *
 		return Outcome{Profile: runner.profile}, fmt.Errorf("rewrote %s, but the check failed:\n%s", strings.Join(targets, ", "), result.Output)
 	}
 	if result.Skipped {
-		progress.Log("  no check command detected")
+		progress.Log("  " + noCheckLine(runner.repository))
 	} else {
 		progress.Log("  check passed · " + formatDuration(testSpent))
 	}
@@ -895,6 +914,11 @@ func clip(line string, limit int) string {
 // step: nothing ran, so there is nothing there to make faster, and a
 // 0ms "test" entry would only pad the profile line.
 func (runner *Runner) runTests(ctx context.Context) (TestResult, time.Duration) {
+	// Nothing runs beside a project in memory: its check is the browser
+	// that previews it, which reports back as the next turn.
+	if runner.repository.InMemory() {
+		return TestResult{Passed: true, Skipped: true, Output: "Checked in the browser."}, 0
+	}
 	started := time.Now()
 	result := RunTests(ctx, runner.repository.Root)
 	spent := time.Since(started)
@@ -902,6 +926,15 @@ func (runner *Runner) runTests(ctx context.Context) (TestResult, time.Duration) 
 		runner.profile.record(StepTest, spent)
 	}
 	return result, spent
+}
+
+// noCheckLine is what the trail says when no check ran: for a folder,
+// that none was found; in memory, where the check is.
+func noCheckLine(repository *repo.Repository) string {
+	if repository.InMemory() {
+		return "checked by the preview in the browser"
+	}
+	return "no check command detected"
 }
 
 // changeSession is one continuous conversation that reads what it needs
@@ -925,6 +958,10 @@ type changeSession struct {
 	// prefetched enables the bounded small-UI path only. Normal tasks can
 	// receive initial context without opting into its writer or edit tools.
 	prefetched bool
+	// whole means every file in the project is already in the
+	// transcript, so there is nothing left to read or search for and the
+	// only tool offered is the edit (see tools).
+	whole      bool
 	transcript []any
 	readPaths  []string
 	// applied are the files edits actually landed in, attempted the ones

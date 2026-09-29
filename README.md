@@ -136,6 +136,56 @@ up to a few attempts within a couple of minutes before giving up and
 showing a Restart button — the only control surface `--web` has, and only
 once automatic recovery has actually stopped trying.
 
+## Hosted demo (`--web-fe`)
+
+```sh
+OPENAI_BASE_URL=https://api.mindshub.ai OPENAI_API_KEY=... \
+  yolocoder --web-fe            # http://localhost:8080; --port to change it
+```
+
+A version of the web UI meant to be hosted for anyone to try, limited to
+frontend-only apps and games. The browser holds the project and runs it:
+the preview is [Sandpack](https://sandpack.codesandbox.io), bundling the
+files right in the page, and the project (files, chat, history) is kept
+in the browser's IndexedDB. The server does one thing: each message
+arrives with the whole project, the agent works on it in memory, and
+the files it changed go back. Nothing is written to disk, nothing is
+executed, and nothing is kept between requests. There are no dev
+servers, no project check to run and no Node.js: errors the preview
+throws come back as the next turn instead, fixed once automatically and
+after that only when asked.
+
+Two starters: **App** (React + TypeScript + Tailwind) and **Game** (a
+canvas game loop in the same shell). Each carries an `ARCHITECTURE.md`
+telling the model what it can and cannot do there. A project small
+enough to fit is sent to the model whole, so most turns are one call.
+
+Every project the server hands out, starter or turn result, is signed
+(HMAC over its files and history together), and a turn on anything
+unsigned or altered is refused before the model sees it. The only
+thing a visitor steers is the message they type. Limits per turn: 48
+files, 64 KB each, 256 KB in all (all of which goes to the model up
+front, so no turn spends a round trip reading), a 4,000-byte message, 3 images, 10
+turns of history.
+
+Configuration, all from the environment:
+
+| Variable | |
+|---|---|
+| `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | the provider every turn uses, as with `--llm-from-env-vars`, except that `OPENAI_MODEL` defaults to `mindshub_air` |
+| `YOLOCODER_WEB_FE_SIGNING_KEY` | 32+ bytes. Unset, one is made up per process, so projects break on restart. Changing it retires every open project. |
+| `YOLOCODER_WEB_FE_ORIGINS` | comma-separated origins allowed to call the API cross-origin (the Pages site). Unset, only the page this server serves itself can call it. |
+| `PORT` | when `--port` isn't given; defaults to 8080 |
+
+Deployed by `.github/workflows/web-fe.yml`: the API to a Lambda
+(`deploy/web-fe/template.yaml`, behind the Lambda Web Adapter with a
+streaming Function URL), and the client in `internal/webfe/static` to
+GitHub Pages, pointed at it. The workflow is off until the repository
+variable `WEB_FE_ENABLED` is `true`; its header lists the variables and
+secrets it needs. With no sign-in, the Lambda's reserved concurrency
+(`MaxConcurrency`, 10 by default) is what caps what the shared key can
+be made to spend.
+
 ## Debugging
 
 When a provider returns something unexpected, `/debug` in a session shows

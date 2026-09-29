@@ -203,7 +203,7 @@ func parseCompact(patch string) ([]filePatch, error) {
 				return nil, fmt.Errorf("the patch moves %s, which YoloCoder does not do", header.path)
 			}
 			added = false
-			patches = append(patches, filePatch{path: header.path})
+			patches = append(patches, filePatch{path: header.path, whole: header.mode == '+'})
 			current = &patches[len(patches)-1]
 
 			if header.mode == '+' {

@@ -1,0 +1,9 @@
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+canvas {
+  max-width: 100%;
+  image-rendering: pixelated;
+}

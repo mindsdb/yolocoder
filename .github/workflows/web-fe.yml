@@ -1,0 +1,114 @@
+name: Web FE
+
+# Deploys the hosted demo: the --web-fe API to a Lambda, and its client
+# to GitHub Pages. Off until the repository variable WEB_FE_ENABLED is
+# "true", so a fork or an unconfigured account does not fail every push.
+#
+# Needs:
+#   vars.WEB_FE_ENABLED     "true"
+#   vars.WEB_FE_AWS_ROLE    role ARN GitHub's OIDC provider may assume
+#   vars.WEB_FE_AWS_REGION  e.g. us-east-1
+#   vars.WEB_FE_MODEL       optional; the model every turn uses
+#                           (mindshub_air when unset)
+#   secrets.WEB_FE_API_KEY  the MindsHub key turns are charged to
+#   secrets.WEB_FE_SIGNING_KEY  32+ random bytes; changing it retires
+#                               every project people have open
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/web-fe/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/web-fe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-fe
+  cancel-in-progress: false
+
+jobs:
+  api:
+    if: vars.WEB_FE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/web-fe
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/mindsdb/yolocoder/internal/version.Version=main -X github.com/mindsdb/yolocoder/internal/version.Commit=${{ github.sha }}" \
+            -o dist/web-fe/yolocoder ./cmd/yolocoder
+          cp deploy/web-fe/bootstrap dist/web-fe/bootstrap
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.WEB_FE_AWS_ROLE }}
+          aws-region: ${{ vars.WEB_FE_AWS_REGION }}
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - name: Deploy
+        id: deploy
+        env:
+          API_KEY: ${{ secrets.WEB_FE_API_KEY }}
+          SIGNING_KEY: ${{ secrets.WEB_FE_SIGNING_KEY }}
+          MODEL: ${{ vars.WEB_FE_MODEL || 'mindshub_air' }}
+          ORIGINS: https://${{ github.repository_owner }}.github.io
+        run: |
+          sam deploy \
+            --template-file deploy/web-fe/template.yaml \
+            --stack-name yolocoder-web-fe \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "OpenAIModel=$MODEL" \
+              "OpenAIAPIKey=$API_KEY" \
+              "SigningKey=$SIGNING_KEY" \
+              "AllowedOrigins=$ORIGINS"
+          url=$(aws cloudformation describe-stacks --stack-name yolocoder-web-fe \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "url=${url%/}" >> "$GITHUB_OUTPUT"
+
+  pages:
+    needs: api
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the client
+        env:
+          API: ${{ needs.api.outputs.url }}
+        run: |
+          cp -r internal/webfe/static _site
+          printf 'window.YOLOCODER_API = "%s";\n' "$API" > _site/config.js
+          # The API is on another origin here, so the page's own policy
+          # has to name it.
+          sed -i "s|connect-src 'self'|connect-src 'self' $API|" _site/index.html
+      - uses: actions/upload-pages-artifact@v3
+      - id: deployment
+        uses: actions/deploy-pages@v4

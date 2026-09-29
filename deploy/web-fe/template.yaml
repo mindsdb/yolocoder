@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  yolocoder --web-fe: the agent loop behind the hosted demo. Stateless;
+  each request carries its whole project and the function keeps nothing.
+
+Parameters:
+  OpenAIBaseURL:
+    Type: String
+    Default: https://api.mindshub.ai
+  OpenAIModel:
+    Type: String
+    Default: mindshub_air
+  OpenAIAPIKey:
+    Type: String
+    NoEcho: true
+  SigningKey:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+  AllowedOrigins:
+    Type: String
+    Default: https://mindsdb.github.io
+    Description: Comma-separated origins the hosted client is served from.
+  MaxConcurrency:
+    Type: Number
+    Default: 10
+    Description: >
+      Hard cap on turns running at once. With no sign-in, this is what
+      bounds what the shared key can be made to spend.
+  AdapterLayerArn:
+    Type: String
+    # Lambda Web Adapter, arm64. Check its README for the current version.
+    Default: arn:aws:lambda:us-east-1:753240598075:layer:LambdaAdapterLayerArm64:25
+
+Resources:
+  WebFE:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/web-fe
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      MemorySize: 512
+      # A turn is capped at five minutes by the server itself; this only
+      # has to outlast it.
+      Timeout: 330
+      ReservedConcurrentExecutions: !Ref MaxConcurrency
+      Layers:
+        - !Ref AdapterLayerArn
+      Environment:
+        Variables:
+          AWS_LWA_INVOKE_MODE: response_stream
+          AWS_LWA_READINESS_CHECK_PATH: /healthz
+          OPENAI_BASE_URL: !Ref OpenAIBaseURL
+          OPENAI_MODEL: !Ref OpenAIModel
+          OPENAI_API_KEY: !Ref OpenAIAPIKey
+          OPENAI_API_DIALECT: responses
+          YOLOCODER_WEB_FE_SIGNING_KEY: !Ref SigningKey
+          YOLOCODER_WEB_FE_ORIGINS: !Ref AllowedOrigins
+      FunctionUrlConfig:
+        AuthType: NONE
+        # Streaming is what lets the browser show the agent's trail while
+        # it works, instead of one answer after up to five minutes.
+        InvokeMode: RESPONSE_STREAM
+
+Outputs:
+  ApiUrl:
+    Description: The Function URL the client calls.
+    Value: !GetAtt WebFEUrl.FunctionUrl

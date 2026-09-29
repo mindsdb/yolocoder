@@ -19,9 +19,13 @@ func (repository *Repository) ReplaceText(edits []Replacement) ([]string, error)
 	if len(edits) == 0 || len(edits) > 8 {
 		return nil, fmt.Errorf("replace_text accepts 1-8 substitutions")
 	}
-	root, err := filepath.EvalSymlinks(repository.Root)
-	if err != nil {
-		return nil, err
+	root := ""
+	if !repository.InMemory() {
+		resolved, err := filepath.EvalSymlinks(repository.Root)
+		if err != nil {
+			return nil, err
+		}
+		root = resolved
 	}
 	updated := map[string]string{}
 	originals := map[string]string{}
@@ -36,11 +40,14 @@ func (repository *Repository) ReplaceText(edits []Replacement) ([]string, error)
 			if !repository.Exists(edit.Path) {
 				return nil, fmt.Errorf("%s: expected an existing file", edit.Path)
 			}
-			full := filepath.Join(root, filepath.FromSlash(edit.Path))
-			resolved, err := filepath.EvalSymlinks(full)
-			if err != nil || resolved != full {
-				return nil, fmt.Errorf("%s: replace_text requires a regular path without symlinks", edit.Path)
+			if !repository.InMemory() {
+				full := filepath.Join(root, filepath.FromSlash(edit.Path))
+				resolved, err := filepath.EvalSymlinks(full)
+				if err != nil || resolved != full {
+					return nil, fmt.Errorf("%s: replace_text requires a regular path without symlinks", edit.Path)
+				}
 			}
+			var err error
 			content, err = repository.ReadFile(edit.Path)
 			if err != nil {
 				return nil, err

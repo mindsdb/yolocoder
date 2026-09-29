@@ -195,6 +195,10 @@ func (current *hunk) add(kind byte, text string) {
 type filePatch struct {
 	path  string
 	hunks []hunk
+	// whole marks a file written out in full ("@+path", "*** Add File:")
+	// rather than edited. In memory that replaces an existing file too:
+	// see applyByContent.
+	whole bool
 }
 
 // parsePatch pulls the per-file hunks out of a unified diff, keeping only
@@ -266,7 +270,7 @@ func parsePatch(patch string) ([]filePatch, error) {
 				active = nil
 				continue
 			}
-			patches = append(patches, filePatch{path: path})
+			patches = append(patches, filePatch{path: path, whole: strings.HasPrefix(line, "*** Add File:")})
 			current = &patches[len(patches)-1]
 			// "*** Add File:" is followed straight by its "+" lines with
 			// no "@@" of its own, so start collecting immediately or the
@@ -421,6 +425,16 @@ func (repository *Repository) applyByContent(patch string) error {
 			}
 			current = read
 			originals[file.path] = read
+		}
+		// A whole file written over an existing one, in memory, is that
+		// file's new contents. Asking for the old lines as "-" lines
+		// first is what a model rewriting a file gets wrong: it writes the
+		// new file faithfully and invents the old one ("-import React?"),
+		// the patch cannot be placed, and the whole thing is written
+		// again next round. On disk this stays refused, as before.
+		if file.whole && repository.InMemory() && len(file.hunks) == 1 {
+			updated[file.path] = strings.Join(file.hunks[0].after, "\n")
+			continue
 		}
 		content, hunkFailures := applyHunks(current, file.hunks)
 		for _, failure := range hunkFailures {

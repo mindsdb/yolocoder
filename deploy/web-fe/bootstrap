@@ -1,0 +1,4 @@
+#!/bin/sh
+# The Lambda entry point. The Lambda Web Adapter layer turns invocations
+# into plain HTTP on :8080, which is where --web-fe listens by default.
+exec ./yolocoder --web-fe

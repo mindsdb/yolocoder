@@ -30,6 +30,10 @@ Usage:
                                   of the app, with server and browser errors
                                   fed back to the agent automatically
   yolocoder --web --port <n>      use a specific port for the web UI
+  yolocoder --web-fe [--port <n>]  serve the hosted demo: a browser client
+                                  for frontend-only apps, previewed in the
+                                  browser, edited here in memory; reads its
+                                  provider from OPENAI_* (see README)
   yolocoder --web --debug         also print every request/reply to this
                                   terminal (never the browser); works with
                                   plain yolocoder too

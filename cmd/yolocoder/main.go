@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/mindsdb/yolocoder/internal/update"
 	"github.com/mindsdb/yolocoder/internal/version"
 	"github.com/mindsdb/yolocoder/internal/web"
+	"github.com/mindsdb/yolocoder/internal/webfe"
 )
 
 func main() {
@@ -41,6 +43,13 @@ func main() {
 			fmt.Printf("YoloCoder is current at %s.\n", version.Display())
 		}
 		return
+	}
+
+	// Ahead of the update check and everything interactive: --web-fe is a
+	// service, run where there is no one to answer a prompt and a binary
+	// that must not replace itself — a Lambda, typically.
+	if len(args) > 0 && args[0] == "--web-fe" {
+		os.Exit(runWebFE(args[1:]))
 	}
 
 	var updated bool
@@ -470,4 +479,35 @@ func firstLine(text string) string {
 		return line[:100] + "..."
 	}
 	return line
+}
+
+// runWebFE serves --web-fe on --port, or on PORT when a host sets one
+// (the Lambda Web Adapter's default is 8080).
+func runWebFE(args []string) int {
+	_, port, _, rest, err := app.ParseWeb(args)
+	if err == nil && len(rest) > 0 {
+		err = fmt.Errorf("--web-fe takes no task; unexpected %q", strings.Join(rest, " "))
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if port == 0 {
+		port = 8080
+		if fromHost, convErr := strconv.Atoi(os.Getenv("PORT")); convErr == nil && fromHost > 0 {
+			port = fromHost
+		}
+	}
+	cfg, err := webfe.ConfigFromEnvironment(os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := webfe.Serve(ctx, cfg, port); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }

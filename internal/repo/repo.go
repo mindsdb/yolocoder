@@ -52,9 +52,20 @@ var ignoredDirectories = map[string]bool{
 
 type Repository struct {
 	Root string
+
+	// memory holds the project for a repository made by NewMemory, and
+	// original what it was given, so Changed can say what a turn did.
+	// Both are nil for a folder on disk.
+	memory   map[string]string
+	original map[string]string
 }
 
 func (repository *Repository) Exists(path string) bool {
+	if repository.InMemory() {
+		name, err := memoryPath(path)
+		_, ok := repository.memory[name]
+		return err == nil && ok
+	}
 	fullPath, err := repository.safePath(path)
 	if err != nil {
 		return false
@@ -85,11 +96,17 @@ func Open(path string) (*Repository, error) {
 }
 
 func (repository *Repository) hasGit() bool {
+	if repository.InMemory() {
+		return false
+	}
 	_, err := os.Stat(filepath.Join(repository.Root, ".git"))
 	return err == nil
 }
 
 func (repository *Repository) Map() (string, error) {
+	if repository.InMemory() {
+		return repository.memoryMap(), nil
+	}
 	if repository.hasGit() {
 		if mapText, err := repository.gitMap(); err == nil {
 			return mapText, nil
@@ -176,13 +193,26 @@ func (repository *Repository) Read(paths []string) (string, error) {
 	var result strings.Builder
 	total := 0
 	for _, path := range paths {
-		fullPath, err := repository.safePath(path)
-		if err != nil {
-			return "", err
-		}
-		content, err := os.ReadFile(fullPath)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", path, err)
+		var content []byte
+		if repository.InMemory() {
+			name, err := memoryPath(path)
+			if err != nil {
+				return "", err
+			}
+			text, ok := repository.memory[name]
+			if !ok {
+				return "", fmt.Errorf("read %s: file does not exist", path)
+			}
+			content = []byte(text)
+		} else {
+			fullPath, err := repository.safePath(path)
+			if err != nil {
+				return "", err
+			}
+			content, err = os.ReadFile(fullPath)
+			if err != nil {
+				return "", fmt.Errorf("read %s: %w", path, err)
+			}
 		}
 		total += len(content)
 		if total > maxReadBytes {
@@ -204,6 +234,12 @@ func (repository *Repository) Read(paths []string) (string, error) {
 // about nothing and saves the trip.
 func (repository *Repository) Architecture() (string, string) {
 	for _, name := range architectureNames {
+		if repository.InMemory() {
+			if text := repository.memory[name]; text != "" && len(text) <= maxArchitectureBytes {
+				return name, text
+			}
+			continue
+		}
 		full, err := repository.safePath(name)
 		if err != nil {
 			continue
@@ -231,6 +267,13 @@ func (repository *Repository) Search(ctx context.Context, query string) (string,
 	// failing instantly with "executable file not found" — a whole tool
 	// silently gone, and the model left guessing which files to read.
 	// Found on a machine that had been running this for weeks.
+	if repository.InMemory() {
+		pattern, err := regexp.Compile(query)
+		if err != nil {
+			return "", fmt.Errorf("search: %w", err)
+		}
+		return repository.memorySearch(pattern), nil
+	}
 	if _, err := exec.LookPath("rg"); err != nil {
 		return repository.searchWithoutRipgrep(query)
 	}
@@ -327,8 +370,9 @@ func (repository *Repository) Apply(patch string) error {
 
 	// Git cannot read the compact or apply_patch formats, so handing
 	// either over would only produce a confusing failure on the way to
-	// the applier that can.
-	if isApplyPatchFormat(patch) || isCompactPatch(patch) {
+	// the applier that can. A repository in memory has no folder for git
+	// to apply anything to, so every format goes by content there.
+	if isApplyPatchFormat(patch) || isCompactPatch(patch) || repository.InMemory() {
 		if err := repository.applyByContent(patch); err != nil {
 			debug.Logf("PATCH FAILED", "%v", err)
 			return err
@@ -380,6 +424,13 @@ func (repository *Repository) applyWithGit(patch string) error {
 // for the model. It reports an empty string for a file that doesn't exist
 // yet, since the caller may be about to create it.
 func (repository *Repository) ReadFile(path string) (string, error) {
+	if repository.InMemory() {
+		name, err := memoryPath(path)
+		if err != nil {
+			return "", err
+		}
+		return repository.memory[name], nil
+	}
 	fullPath, err := repository.safePath(path)
 	if err != nil {
 		return "", err
@@ -400,6 +451,14 @@ func (repository *Repository) ReadFile(path string) (string, error) {
 // only applies when its context and removed lines match the file byte for
 // byte, which a model-written one often doesn't.
 func (repository *Repository) Write(path, content string) error {
+	if repository.InMemory() {
+		name, err := memoryPath(path)
+		if err != nil {
+			return err
+		}
+		repository.memory[name] = content
+		return nil
+	}
 	fullPath, err := repository.safePath(path)
 	if err != nil {
 		return err

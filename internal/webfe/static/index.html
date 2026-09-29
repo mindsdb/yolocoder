@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- The client talks to one API and loads Sandpack from esm.sh; the
+     preview itself runs in Sandpack's own frame, on its own origin.
+     The deploy adds the API's origin to connect-src when the client is
+     hosted somewhere other than the API. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://esm.sh; connect-src 'self' https://esm.sh; frame-src https://*.codesandbox.io; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'" />
+<title>YoloCoder</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+  <section id="sidebar">
+    <header id="chat-header">
+      <div id="brand-block">
+        <span id="brand"><span class="brand-face">[^_^]</span> YoloCoder <span id="badge">demo</span></span>
+        <span id="subtitle">frontend apps and games, in your browser</span>
+      </div>
+      <a id="get-local" href="https://github.com/mindsdb/yolocoder#readme" target="_blank" rel="noopener">Get YoloCoder</a>
+    </header>
+    <div id="chat-log"></div>
+    <div id="pending-images" hidden></div>
+    <form id="chat-form">
+      <div id="composer-input-row">
+        <span id="composer-prompt" aria-hidden="true">&#10095;</span>
+        <textarea id="chat-input" placeholder="Describe what to build or change" rows="2"></textarea>
+      </div>
+      <div id="composer-bar">
+        <button id="btn-attach" type="button" title="Attach an image" aria-label="Attach an image">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <input id="file-input" type="file" accept="image/*" multiple hidden>
+        <span id="composer-hint">Enter to send · Shift+Enter for a new line</span>
+        <button id="chat-send" type="submit" title="Send" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+      </div>
+    </form>
+  </section>
+  <section id="workspace">
+    <nav id="workspace-bar">
+      <div id="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="preview" aria-selected="true">Preview</button>
+        <button type="button" role="tab" data-tab="code" aria-selected="false">Code</button>
+      </div>
+      <div id="new-project">
+        <span>New</span>
+        <button type="button" data-kind="app">App</button>
+        <button type="button" data-kind="game">Game</button>
+      </div>
+    </nav>
+    <div id="preview-pane">
+      <iframe id="app-frame" title="Your app"></iframe>
+      <div id="preview-error" hidden>
+        <strong>The preview hit an error</strong>
+        <pre id="preview-error-text"></pre>
+        <div>
+          <button id="btn-fix" type="button">Fix it</button>
+          <button id="btn-dismiss" type="button">Dismiss</button>
+        </div>
+      </div>
+    </div>
+    <div id="code-pane" hidden>
+      <ul id="file-list"></ul>
+      <pre id="file-view"></pre>
+    </div>
+  </section>
+</main>
+<script src="config.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

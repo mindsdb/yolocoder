@@ -18,12 +18,30 @@ const (
 	// Each completed read respects the ordinary read_files path limit and
 	// consumes one of its existing calls; this does not enlarge any quota.
 	wholeContextReadFiles = 12
+
+	// A project in memory is bounded by whoever handed it over (--web-fe
+	// holds it to these same numbers), and all of it is always wanted:
+	// there is no folder to go back to for more, so a project that did
+	// not fit would cost a round trip per read instead.
+	MemoryWholeMaxFiles     = 48
+	MemoryWholeMaxFileBytes = 64 << 10
+	MemoryWholeMaxBytes     = 256 << 10
 )
+
+// wholeContextLimits are the file count, per-file and total bytes whole
+// context fits within for this repository.
+func (runner *Runner) wholeContextLimits() (files, fileBytes, total int) {
+	if runner.repository.InMemory() {
+		return MemoryWholeMaxFiles, MemoryWholeMaxFileBytes, MemoryWholeMaxBytes
+	}
+	return wholeContextMaxFiles, prefetchMaxFileBytes, prefetchMaxBytes
+}
 
 // completeWholeContext supplies all mapped, supported project text only when
 // the entire eligible set fits. It is called only for confident normal routes;
 // failure leaves read state untouched for the existing ranked prefetch.
 func (runner *Runner) completeWholeContext(ctx context.Context, session *changeSession, mapped []string) bool {
+	maxFiles, maxFileBytes, maxBytes := runner.wholeContextLimits()
 	var paths []string
 	for _, path := range mapped {
 		clean := filepath.Clean(filepath.FromSlash(path))
@@ -32,7 +50,7 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 		}
 		if wholeContextPath(path) {
 			paths = appendUnique(paths, path)
-			if len(paths) > wholeContextMaxFiles {
+			if len(paths) > maxFiles {
 				return false
 			}
 		}
@@ -42,11 +60,11 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 		return false
 	}
 	sort.Strings(paths)
-	root, err := os.OpenRoot(runner.repository.Root)
-	if err != nil {
+	read, done := runner.readWholeContextFrom(maxFileBytes)
+	if read == nil {
 		return false
 	}
-	defer root.Close()
+	defer done()
 
 	// Stage both reads before committing any transcript or served snapshots.
 	// The byte limit includes exactly the path framing shown to the model.
@@ -57,13 +75,13 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 		if ctx.Err() != nil {
 			return false
 		}
-		content, ok := readWholeContextFile(root, path)
+		content, ok := read(path)
 		if !ok {
 			return false
 		}
 		framed := fmt.Sprintf("--- %s ---\n%s\n", path, content)
 		total += len(framed)
-		if total > prefetchMaxBytes {
+		if total > maxBytes {
 			return false
 		}
 		outputs[i/wholeContextReadFiles].WriteString(framed)
@@ -112,6 +130,31 @@ func wholeContextPath(path string) bool {
 		return true
 	}
 	return false
+}
+
+// readWholeContextFrom is how one file is read for whole context: from
+// the map for a repository in memory, otherwise through a rooted handle
+// on the folder. Nil when the folder cannot be opened; done releases
+// whatever the reader holds.
+func (runner *Runner) readWholeContextFrom(maxFileBytes int) (read func(string) (string, bool), done func()) {
+	repository := runner.repository
+	if repository.InMemory() {
+		return func(path string) (string, bool) {
+			if !repository.Exists(path) {
+				return "", false
+			}
+			content, err := repository.ReadFile(path)
+			if err != nil || len(content) > maxFileBytes || !utf8.ValidString(content) || strings.IndexByte(content, 0) >= 0 {
+				return "", false
+			}
+			return content, true
+		}, func() {}
+	}
+	root, err := os.OpenRoot(repository.Root)
+	if err != nil {
+		return nil, nil
+	}
+	return func(path string) (string, bool) { return readWholeContextFile(root, path) }, func() { root.Close() }
 }
 
 // The rooted handle prevents reads from escaping the project. Reject symlinks

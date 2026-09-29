@@ -256,7 +256,7 @@ func (client *Client) post(ctx context.Context, payload []byte, label string, re
 		}
 		debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(replyBody))
 		// Reaching the read cap may hide an incomplete body, so do not replay it.
-		eligible := response.StatusCode == http.StatusBadGateway || response.StatusCode == 524 ||
+		eligible := response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusGatewayTimeout || response.StatusCode == 524 ||
 			(response.StatusCode == http.StatusServiceUnavailable && client.model == "muse-spark-1-3" && musePolicyUnavailable(replyBody))
 		if eligible && len(replyBody) < responseLimit && ctx.Err() == nil && retry != nil && retry(response.StatusCode) {
 			if err := ctx.Err(); err != nil {

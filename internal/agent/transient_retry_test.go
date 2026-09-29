@@ -80,7 +80,7 @@ func retryScript(t *testing.T, replies ...retryReply) (*changeSession, *[]retryR
 }
 
 func TestTransientRetryReplaysBytesAndAppliesOnlyAcceptedTool(t *testing.T) {
-	for _, status := range []int{502, 524} {
+	for _, status := range []int{502, 504, 524} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			// Even plausible tool output inside an eligible error is never dispatched.
 			session, seen := retryScript(t,
@@ -141,6 +141,7 @@ func TestTransientRetryExcludesOtherErrorsAndSmallUI(t *testing.T) {
 	}{
 		{"small UI 524", retryReply{status: 524, body: "error code: 524"}, true},
 		{"small UI 502", retryReply{status: 502, body: "gateway error"}, true},
+		{"small UI 504", retryReply{status: 504, body: "gateway time-out"}, true},
 		{"budget refusal", retryReply{status: 429, body: "Evaluation request limit reached"}, false},
 		{"bad request", retryReply{status: 400, body: "bad request"}, false},
 		{"server error", retryReply{status: 500, body: "error"}, false},
@@ -148,13 +149,13 @@ func TestTransientRetryExcludesOtherErrorsAndSmallUI(t *testing.T) {
 		{"billing", retryReply{status: 402, body: "error"}, false},
 		{"authorization", retryReply{status: 403, body: "error"}, false},
 		{"unavailable", retryReply{status: 503, body: "error"}, false},
-		{"gateway timeout", retryReply{status: 504, body: "error"}, false},
 		{"transport", retryReply{err: io.ErrUnexpectedEOF}, false},
 		{"deadline", retryReply{err: context.DeadlineExceeded}, false},
 		{"partial 502 body", retryReply{status: 502, body: "partial", readErr: io.ErrUnexpectedEOF}, false},
 		{"capped 502 body", retryReply{status: 502, body: strings.Repeat("x", 8<<20)}, false},
 		{"partial 524 body", retryReply{status: 524, body: "partial", readErr: io.ErrUnexpectedEOF}, false},
 		{"capped 524 body", retryReply{status: 524, body: strings.Repeat("x", 8<<20)}, false},
+		{"partial 504 body", retryReply{status: 504, body: "partial", readErr: io.ErrUnexpectedEOF}, false},
 		{"partial successful body", retryReply{status: 200, body: "partial", readErr: io.ErrUnexpectedEOF}, false},
 		{"malformed successful JSON", retryReply{status: 200, body: "{"}, false},
 	} {

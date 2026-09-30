@@ -707,3 +707,44 @@ func TestTheTrailStopsAfterEnoughDistinctKinds(t *testing.T) {
 		t.Fatalf("trail should stop and say how many kinds remain, got %q", last)
 	}
 }
+
+// The run this comes from: the model recalled an import the file does not
+// have at the top of an otherwise exact replacement.
+func TestARemovedLineThatIsNotInTheFileIsDropped(t *testing.T) {
+	app := "export default function App() {\n  return (\n    <div>hi</div>\n  );\n}\n"
+	for name, patch := range map[string]string{
+		"leading":  "@App.tsx\n-import React from \"react\";\n-\n export default function App() {\n-  return (\n-    <div>hi</div>\n-  );\n+  return <Game />;\n }\n",
+		"trailing": "@App.tsx\n export default function App() {\n-  return (\n-    <div>hi</div>\n-  );\n+  return <Game />;\n }\n-export const unused = 1;\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := project(t, map[string]string{"App.tsx": app})
+			if err := repository.Apply(patch); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(t, repository, "App.tsx"); got != "export default function App() {\n  return <Game />;\n}\n" {
+				t.Fatalf("App.tsx = %q", got)
+			}
+		})
+	}
+}
+
+// A removed line that is in the file, just not next to the rest, is a real
+// mistake about where the edit goes, and dropping it would leave it behind.
+func TestARemovedLineElsewhereInTheFileIsNotDropped(t *testing.T) {
+	lines := strings.Split("import x from \"x\";\n\nconst a = 1;\nconst b = 2;\n", "\n")
+	var current hunk
+	current.add('-', "import x from \"x\";")
+	current.add(' ', "const b = 2;")
+	current.add('+', "const c = 3;")
+	if _, ok := withoutStrayRemovals(lines, current); ok {
+		t.Fatal("dropped a removed line that is in the file")
+	}
+	// The same edit with a line that is nowhere in the file is repaired.
+	var stray hunk
+	stray.add('-', "import y from \"y\";")
+	stray.add(' ', "const b = 2;")
+	stray.add('+', "const c = 3;")
+	if repaired, ok := withoutStrayRemovals(lines, stray); !ok || len(repaired.before) != 1 {
+		t.Fatalf("repaired=%+v ok=%v", repaired, ok)
+	}
+}

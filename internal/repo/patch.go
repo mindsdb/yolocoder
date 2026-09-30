@@ -83,7 +83,7 @@ func (failure *PatchError) Error() string {
 		return failure.Failures[0].Error()
 	}
 	var text strings.Builder
-	fmt.Fprintf(&text, "%d edits in this patch could not be placed. Fix every one of them:\n", len(failure.Failures))
+	fmt.Fprintf(&text, "%d edits in this patch could not be placed. Fix every one of them, all in one apply_diff call:\n", len(failure.Failures))
 	for index, one := range failure.Failures {
 		fmt.Fprintf(&text, "\n[%d] %s\n", index+1, one.Error())
 	}
@@ -504,6 +504,67 @@ func (repository *Repository) writePlaced(patches []filePatch, failures []*HunkE
 // one validation pass find every problem in the patch.
 // changesNothing reports a hunk that would write the file back exactly
 // as it found it.
+// withoutStrayRemovals is an edit with the removed lines at its edges
+// dropped, when those lines are nowhere in the file and what remains
+// places exactly once. Removing a line that is not there changes nothing,
+// so the edit means the same without it. A model recalling a file's head
+// writes the import it expects ("-import React from \"react\";") where
+// the file has none; the rest of the edit was right, and a whole round
+// went on sending it back.
+//
+// Only lines that are absent anywhere in the file are dropped, apart from
+// blank lines alongside them, so a line that really is in the file is
+// never quietly left behind.
+func withoutStrayRemovals(lines []string, current hunk) (hunk, bool) {
+	lead, trail := 0, 0
+	for lead < len(current.ops) && current.ops[lead].kind == '-' {
+		lead++
+	}
+	for trail < len(current.ops)-lead && current.ops[len(current.ops)-1-trail].kind == '-' {
+		trail++
+	}
+	present := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		present[strings.TrimSpace(line)] = true
+	}
+	// stray reports whether ops can be dropped: every non-blank one absent
+	// from the file, and at least one of them non-blank.
+	stray := func(ops []patchOp) bool {
+		absent := false
+		for _, op := range ops {
+			text := strings.TrimSpace(op.text)
+			if text == "" {
+				continue
+			}
+			if present[text] {
+				return false
+			}
+			absent = true
+		}
+		return absent
+	}
+	for total := 1; total <= lead+trail; total++ {
+		for front := min(total, lead); front >= 0 && total-front <= trail; front-- {
+			back := total - front
+			kept := current.ops[front : len(current.ops)-back]
+			if !stray(append(append([]patchOp{}, current.ops[:front]...), current.ops[len(current.ops)-back:]...)) {
+				continue
+			}
+			var candidate hunk
+			for _, op := range kept {
+				candidate.add(op.kind, op.text)
+			}
+			if len(candidate.before) == 0 || changesNothing(candidate) {
+				continue
+			}
+			if _, err := locate(lines, candidate.before); err == nil {
+				return candidate, true
+			}
+		}
+	}
+	return hunk{}, false
+}
+
 // alreadyInPlace reports an edit the file already contains: its after
 // lines sit, exactly and once, where its before lines would be. Since the
 // files of a failed patch that did place are written, a repair that
@@ -608,6 +669,15 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 					lines = strings.Split(placed, "\n")
 					continue
 				}
+			}
+			if trimmed, ok := withoutStrayRemovals(lines, current); ok {
+				index, _ := locate(lines, trimmed.before)
+				replaced := make([]string, 0, len(lines)-len(trimmed.before)+len(trimmed.after))
+				replaced = append(replaced, lines[:index]...)
+				replaced = append(replaced, trimmed.after...)
+				replaced = append(replaced, lines[index+len(trimmed.before):]...)
+				lines = replaced
+				continue
 			}
 			failures = append(failures, err)
 			continue

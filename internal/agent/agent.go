@@ -732,7 +732,7 @@ func (session *changeSession) partlyApplied(failure *repo.PatchError) string {
 	}
 	message := "Part of the patch applied. Written now, with every edit for them in place: " +
 		strings.Join(failure.Applied, ", ") + ". Do not resend or re-read those files. " +
-		"Not applied: " + strings.Join(failed, ", ") + ". Resend only the edits for those files, fixed as below."
+		"Not applied: " + strings.Join(failed, ", ") + ". Resend only the edits for those files, fixed as below, all in one apply_diff call."
 	if !session.prefetched {
 		message += session.editBudgetFeedback()
 	}

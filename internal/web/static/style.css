@@ -91,6 +91,14 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+#update-notice {
+  font: 11px var(--mono);
+  color: #1d5a2f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#update-notice[hidden] { display: none; }
 #btn-recover {
   border: 1px solid #f3c6c6;
   background: #fff5f5;

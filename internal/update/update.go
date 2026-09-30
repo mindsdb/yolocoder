@@ -39,12 +39,13 @@ type Checker struct {
 // reporting whether a new build was installed. The caller should follow a
 // true result with Relaunch so this invocation continues on the new build
 // instead of finishing out on the one it started with.
-func CheckOnLaunch(currentCommit string, status ui.RobotStatus) bool {
+//
+// A failed check is returned rather than swallowed. It used to be printed
+// only under YOLOCODER_DEBUG, so a check that timed out looked exactly like
+// being current, and a build three commits behind went unnoticed.
+func CheckOnLaunch(currentCommit string, status ui.RobotStatus) (bool, error) {
 	_, updated, err := check(currentCommit, false, status)
-	if err != nil {
-		debugf("%v", err)
-	}
-	return updated
+	return updated, err
 }
 
 // Relaunch re-executes the just-updated binary at its own path with the
@@ -104,7 +105,9 @@ func check(currentCommit string, force bool, status ui.RobotStatus) (string, boo
 	if !force && !checker.Due(now) {
 		return "", false, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Two seconds was too tight for GitHub's redirect to the asset host on
+	// a slow connection, and a timeout meant no update at all.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	status("Checking for updates...")
 	latest, err := checker.LatestCommit(ctx)
 	cancel()

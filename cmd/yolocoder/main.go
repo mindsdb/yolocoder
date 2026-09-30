@@ -44,9 +44,13 @@ func main() {
 	}
 
 	var updated bool
+	var updateErr error
 	ui.WithRobot(os.Stdout, "Starting YoloCoder...", func(status ui.RobotStatus) {
-		updated = update.CheckOnLaunch(version.Commit, status)
+		updated, updateErr = update.CheckOnLaunch(version.Commit, status)
 	})
+	if updateErr != nil {
+		fmt.Fprintf(os.Stderr, "\x1b[2m[^_^] Could not check for updates, starting %s: %v\x1b[0m\n", version.Display(), updateErr)
+	}
 	if updated {
 		// Relaunch replaces the file on disk; without re-executing it,
 		// this process would keep running the old code it already

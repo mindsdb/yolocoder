@@ -541,6 +541,15 @@ modelSelect.addEventListener("change", () => {
 // a reconnect during a long build, a tab opened mid-task — would
 // otherwise leave the UI stuck showing whatever it last knew, forever;
 // this is what lets it catch up instead.
+// A newer build installed while this server was running. It stays until
+// yolocoder is restarted, since that is the only thing that clears it.
+const updateNotice = document.getElementById("update-notice");
+function showUpdate(text) {
+  if (!text) return;
+  updateNotice.textContent = text;
+  updateNotice.hidden = false;
+}
+
 function resyncState() {
   fetch("/state")
     .then((response) => response.json())
@@ -551,6 +560,7 @@ function resyncState() {
       // A tab that (re)connects after an offer was staged still renders it:
       // the offer event is one-shot, but /state carries the unanswered ones.
       for (const offer of state.offers || []) addErrorOffer(offer.id, offer.source, offer.text);
+      showUpdate(state.update);
     })
     .catch(() => {});
 }
@@ -611,6 +621,7 @@ events.addEventListener("error-offer", (event) => {
   const data = JSON.parse(event.data);
   addErrorOffer(data.id, data.source, data.text || "");
 });
+events.addEventListener("update", (event) => showUpdate(JSON.parse(event.data).text));
 events.addEventListener("error-offer-dismissed", (event) => {
   removeErrorOffer(JSON.parse(event.data).id);
 });

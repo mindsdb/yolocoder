@@ -22,6 +22,8 @@ import (
 	"github.com/mindsdb/yolocoder/internal/app"
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/session"
+	"github.com/mindsdb/yolocoder/internal/update"
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 //go:embed static
@@ -140,6 +142,9 @@ type Server struct {
 	stateMutex sync.Mutex
 	busy       bool
 	phase      string
+	// updated is the notice that a newer build was installed while this
+	// server ran, empty until one is.
+	updated string
 	// settleUntil is when errors start being believed again after a turn
 	// changed files. Guarded by stateMutex with busy, because it is the
 	// same question asked about a slightly later moment.
@@ -227,6 +232,7 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 	if task := strings.TrimSpace(initialTask); task != "" {
 		go server.runTask(context.Background(), task, nil, "user")
 	}
+	go server.watchForUpdates(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -417,7 +423,7 @@ func (server *Server) handleConfig(response http.ResponseWriter, request *http.R
 // this whenever its SSE connection (re)opens.
 func (server *Server) handleState(response http.ResponseWriter, request *http.Request) {
 	server.stateMutex.Lock()
-	busy, phase := server.busy, server.phase
+	busy, phase, updated := server.busy, server.phase, server.updated
 	server.stateMutex.Unlock()
 	writeJSON(response, map[string]any{
 		"busy":    busy,
@@ -425,7 +431,50 @@ func (server *Server) handleState(response http.ResponseWriter, request *http.Re
 		"process": server.proc.State(),
 		"port":    server.proc.Port(),
 		"offers":  server.pendingOfferInfos(),
+		"update":  updated,
 	})
+}
+
+// updateInterval is how often a running web server looks for a newer build.
+const updateInterval = time.Hour
+
+// watchForUpdates keeps a long-running web server from sitting on an old
+// build. Updates were only ever checked at launch, and the web server is
+// the process people leave open for days, so it showed the build it
+// started with long after main had moved on.
+//
+// A newer build is downloaded over the binary on disk, exactly as at
+// launch, and the page says so. It is not restarted into: that would drop
+// the chat and the app's ports mid-session, so restarting stays the
+// person's call, and it is instant because the new build is already there.
+func (server *Server) watchForUpdates(ctx context.Context) {
+	if version.Commit == "" {
+		return
+	}
+	ticker := time.NewTicker(updateInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		latest, updated, err := update.CheckNow(version.Commit, func(string) {})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\x1b[2m[^_^] Could not check for updates: %v\x1b[0m\n", err)
+			continue
+		}
+		if !updated {
+			continue
+		}
+		text := "YoloCoder " + latest + " is installed. Restart yolocoder to use it."
+		fmt.Println("[^_^] " + text)
+		server.stateMutex.Lock()
+		server.updated = text
+		server.stateMutex.Unlock()
+		server.hub.publish("update", map[string]string{"text": text})
+		return
+	}
 }
 
 // pendingOfferInfo is an unanswered error card's wire shape, so a tab

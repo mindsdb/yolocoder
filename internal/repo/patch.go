@@ -504,6 +504,87 @@ func (repository *Repository) writePlaced(patches []filePatch, failures []*HunkE
 // one validation pass find every problem in the patch.
 // changesNothing reports a hunk that would write the file back exactly
 // as it found it.
+// minFragment is the shortest removed text that may be matched inside a
+// line, not at its start. Shorter than this and "}" or "return" would match by accident.
+const minFragment = 16
+
+// withinLine replaces part of one long line: an edit that removes a single
+// "line" which is really a piece of a line in the file, found there exactly
+// once. Minified or one-line JSX puts a whole component on one line, and a
+// model changing one button in it writes the button as the line it
+// removes; that is nowhere in the file as a line, and was rejected in a
+// real run as "could not find" on the last edit of its budget. The piece
+// is unique, so where it goes is not in doubt.
+func withinLine(lines []string, current hunk) ([]string, bool) {
+	var removed []string
+	var added []string
+	for _, op := range current.ops {
+		switch op.kind {
+		case '-':
+			if len(added) > 0 {
+				return nil, false
+			}
+			removed = append(removed, op.text)
+		case '+':
+			added = append(added, op.text)
+		default:
+			return nil, false
+		}
+	}
+	// Something must be added: removing a piece of a line with nothing in
+	// its place is more likely a line copied short than a real deletion.
+	if len(removed) != 1 || len(added) == 0 {
+		return nil, false
+	}
+	fragment := strings.TrimSpace(removed[0])
+	if len(fragment) < minFragment {
+		return nil, false
+	}
+	at, count := -1, 0
+	for index, line := range lines {
+		if n := strings.Count(line, fragment); n > 0 {
+			at, count = index, count+n
+		}
+	}
+	if count != 1 || strings.TrimSpace(lines[at]) == fragment {
+		return nil, false
+	}
+	// A piece the line starts with is a line cut short, which placeTruncated
+	// reads for what it is. This is for a piece from inside the line.
+	start := strings.Index(lines[at], fragment)
+	if strings.TrimSpace(lines[at][:start]) == "" {
+		return nil, false
+	}
+	replacement := strings.TrimSpace(strings.Join(added, "\n"))
+	edited := lines[at][:start] + replacement + lines[at][start+len(fragment):]
+	result := append([]string{}, lines[:at]...)
+	result = append(result, strings.Split(edited, "\n")...)
+	return append(result, lines[at+1:]...), true
+}
+
+// candidates are where block matches, by the strictest test that finds it
+// anywhere: exactly, then ignoring surrounding whitespace, then with HTML
+// entities decoded.
+func candidates(lines, block []string) []int {
+	matches := findAll(lines, block, func(a, b string) bool { return a == b })
+	if len(matches) == 0 {
+		// Fall back to ignoring indentation and line-ending drift, which
+		// a model reproducing a file by eye often gets slightly wrong.
+		matches = findAll(lines, block, func(a, b string) bool {
+			return strings.TrimSpace(a) == strings.TrimSpace(b)
+		})
+	}
+	if len(matches) == 0 {
+		// The instructions warn the model that an HTML entity spelled out
+		// is a common way to get this wrong; recovering from it here means
+		// the warning doesn't have to work every time.
+		matches = findAll(lines, block, func(a, b string) bool {
+			return normalizeEntities(a) == normalizeEntities(b)
+		})
+	}
+	return matches
+}
+
 // withoutStrayRemovals is an edit with the removed lines at its edges
 // dropped, when those lines are nowhere in the file and what remains
 // places exactly once. Removing a line that is not there changes nothing,
@@ -621,7 +702,20 @@ func changesNothing(current hunk) bool {
 func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 	lines := strings.Split(content, "\n")
 	var failures []*HunkError
+	// cursor is where the last edit placed in this file ended, or -1 before
+	// any has. An edit whose lines appear more than once takes the first
+	// match from here on: see locateAfter.
+	cursor := -1
 	for _, current := range hunks {
+		// An edit of context alone points at where the next one goes, the
+		// way apply_patch's "@@ const createRoom" does. Found after the
+		// cursor, it moves the cursor; not found, it is still no edit.
+		if changesNothing(current) {
+			if index, ok := firstAfter(lines, current.before, cursor); ok {
+				cursor = index + len(current.before)
+			}
+			continue
+		}
 		// A hunk of pure context changes nothing — its before and after
 		// are the same lines — so placing it can only fail, never help.
 		// Models emit them constantly as a way of pointing at where the
@@ -632,7 +726,7 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		// thrown away with it. Twice more, because the repair then
 		// invented context trying to disambiguate something that was
 		// never an edit.
-		if changesNothing(current) || alreadyInPlace(lines, current) {
+		if alreadyInPlace(lines, current) {
 			continue
 		}
 		if len(current.before) == 0 {
@@ -648,7 +742,7 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 			failures = append(failures, &HunkError{Reason: reason, Detail: detail})
 			continue
 		}
-		index, err := locate(lines, current.before)
+		index, err := locateAfter(lines, current.before, cursor)
 		if err != nil {
 			// The hunk may be several edits written as one — anchors
 			// gathered from all over the file, which is what a model
@@ -670,6 +764,10 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 					continue
 				}
 			}
+			if replaced, ok := withinLine(lines, current); ok {
+				lines = replaced
+				continue
+			}
 			if trimmed, ok := withoutStrayRemovals(lines, current); ok {
 				index, _ := locate(lines, trimmed.before)
 				replaced := make([]string, 0, len(lines)-len(trimmed.before)+len(trimmed.after))
@@ -687,8 +785,34 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		replaced = append(replaced, current.after...)
 		replaced = append(replaced, lines[index+len(current.before):]...)
 		lines = replaced
+		cursor = index + len(current.after)
 	}
 	return strings.Join(lines, "\n"), failures
+}
+
+// locateAfter places block like locate, except that when its lines appear
+// more than once and an earlier edit in the same file has placed, it takes
+// the first match after that edit. Edits in a file are read in order, as
+// apply_patch reads them: a model that writes an anchor, "@@", then a
+// lone "};" means the "};" that follows the anchor. Placed independently,
+// that "};" matched three places and cost two rounds of a real run.
+func locateAfter(lines, block []string, cursor int) (int, *HunkError) {
+	if cursor >= 0 {
+		if index, ok := firstAfter(lines, block, cursor); ok && len(candidates(lines, block)) > 1 {
+			return index, nil
+		}
+	}
+	return locate(lines, block)
+}
+
+// firstAfter is the first place at or after cursor where block matches.
+func firstAfter(lines, block []string, cursor int) (int, bool) {
+	for _, index := range candidates(lines, block) {
+		if index >= cursor {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 // truncatedFloor is how much of a line has to be present before a prefix
@@ -816,22 +940,7 @@ func splitByAnchor(lines []string, current hunk) []hunk {
 // appears more than once is ambiguous, and picking one would risk editing
 // the wrong part of the file, so it is refused instead.
 func locate(lines, block []string) (int, *HunkError) {
-	matches := findAll(lines, block, func(a, b string) bool { return a == b })
-	if len(matches) == 0 {
-		// Fall back to ignoring indentation and line-ending drift, which
-		// a model reproducing a file by eye often gets slightly wrong.
-		matches = findAll(lines, block, func(a, b string) bool {
-			return strings.TrimSpace(a) == strings.TrimSpace(b)
-		})
-	}
-	if len(matches) == 0 {
-		// The instructions warn the model that an HTML entity spelled out
-		// is a common way to get this wrong; recovering from it here means
-		// the warning doesn't have to work every time.
-		matches = findAll(lines, block, func(a, b string) bool {
-			return normalizeEntities(a) == normalizeEntities(b)
-		})
-	}
+	matches := candidates(lines, block)
 	switch {
 	case len(matches) == 0:
 		// Every line is in the file, just not together. This is a whole

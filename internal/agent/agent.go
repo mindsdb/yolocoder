@@ -763,6 +763,11 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string, bo
 		if errors.As(err, &failure) {
 			for _, one := range failure.Failures {
 				session.attempted = appendUnique(session.attempted, one.Path)
+				// Unplaced whether or not anything else in the patch landed:
+				// a turn that changed one file and ran out of edits on
+				// another is as stuck on that one as a turn that changed
+				// nothing, and gets the same whole-file rewrite for it.
+				session.unplaced = appendUnique(session.unplaced, one.Path)
 			}
 		}
 		session.lastFailure = err
@@ -1109,9 +1114,9 @@ type changeSession struct {
 	applied     []string
 	attempted   []string
 	lastFailure error
-	// unplaced are files a partly applied patch could not edit and no
-	// later edit has landed in. Running out of edits with any left is
-	// being stuck, even though other files did change.
+	// unplaced are files an edit failed to place in and no later edit has
+	// landed in. Running out of edits with any left is being stuck, even
+	// though other files did change.
 	unplaced []string
 	// closing is the note the model left with an edit it called its last.
 	// Set only by an edit that actually applied, so a failed one cannot
@@ -1838,7 +1843,13 @@ For modifications:
 Removed lines can anchor a replacement without unchanged context. For an insertion with no
 removed lines in an existing nonempty file, include unchanged context prefixed with a space
 that matches exactly and identifies the insertion point uniquely. Prefer a short anchor
-that appears once. Use @+ only for a new file, with literal content, not added-line prefixes.
+that appears once.
+
+Every edit must match exactly one place. Before writing one, check whether its lines appear
+more than once in the file: a closing "}" or "});", a repeated call, a common line such as
+"return null;". If they do, add the unchanged lines around them, before and after, prefixed
+with a space, until the block as a whole appears only once. Edits in one file are placed in
+order, each after the one before it, so an earlier edit also narrows where a later one goes. Use @+ only for a new file, with literal content, not added-line prefixes.
 To replace an existing file, remove its current contents with - lines before adding the new
 contents with + lines. A blank line separates one edit from the next, and so does a bare @@ if that is
 what comes naturally. No line numbers and no counts — edits are placed by matching your text
@@ -1863,8 +1874,8 @@ And a second file, under its own header:
 
 Preserve whitespace exactly. Copy every context line and every removed line from the file
 character for character, including indentation, escapes and HTML entities such as &amp;. A
-line that differs by even one character cannot be found, and nothing in the patch is written
-unless every edit in it can be placed.
+line that differs by even one character cannot be found, and a file is not written unless
+every edit to it can be placed.
 
 Long lines: copy the whole line. All of it, to the end. Do not stop halfway. Do not write "..."
 or leave the rest off. A cut line matches nothing in the file, so the edit is thrown away and

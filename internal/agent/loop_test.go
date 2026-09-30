@@ -399,6 +399,44 @@ func TestAFileLeftUnplacedIsRewrittenAloneWhenEditsRunOut(t *testing.T) {
 	}
 }
 
+// The run behind this: the backend edit landed on its own, then every
+// edit to App.tsx was rejected until the budget ran out, and the turn
+// ended saying it could not finish, with no rewrite of App.tsx at all.
+func TestAFileRejectedOnItsOwnIsRewrittenWhenEditsRunOut(t *testing.T) {
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n", "b.ts": "const y = 2;\n"})
+	edit := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		if schemaName(body) == "file_rewrite" {
+			payload, _ := json.Marshal(Rewrite{Summary: "Rewrote b.ts", Content: "const y = 8;\n"})
+			fmt.Fprint(writer, finishes(string(payload)))
+			return
+		}
+		edit++
+		switch {
+		case edit == 1:
+			fmt.Fprint(writer, edits("a", "@a.ts\n-const x = 1;\n+const x = 9;\n"))
+		case edit <= toolQuota["apply_diff"]:
+			fmt.Fprint(writer, edits(fmt.Sprint("b", edit), "@b.ts\n-const y = 99;\n+const y = 8;\n"))
+		default:
+			fmt.Fprint(writer, finishes("Not complete: b.ts could not be edited."))
+		}
+	}))
+	defer server.Close()
+
+	outcome, _, err := run(t, repository, server, "update both")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
+	b, _ := os.ReadFile(filepath.Join(repository.Root, "b.ts"))
+	if !outcome.Rewrote || string(a) != "const x = 9;\n" || string(b) != "const y = 8;\n" {
+		t.Fatalf("outcome=%+v a=%q b=%q", outcome, a, b)
+	}
+}
+
 func TestRewriteRefusesToEmptyAFileThatHasContent(t *testing.T) {
 	repository := folder(t, map[string]string{"a.ts": "const real = 1;\n"})
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

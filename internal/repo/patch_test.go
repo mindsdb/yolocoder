@@ -748,3 +748,76 @@ func TestARemovedLineElsewhereInTheFileIsNotDropped(t *testing.T) {
 		t.Fatalf("repaired=%+v ok=%v", repaired, ok)
 	}
 }
+
+// From a real run: an anchor, "@@", then a line that appears several
+// times. The edits of a file are read in order, so the line is the one
+// after the anchor, not an ambiguity.
+func TestEditsInAFileArePlacedInOrderAfterTheirAnchor(t *testing.T) {
+	backend := strings.Join([]string{
+		`app.post("/api/rooms", (_req, res) => {`,
+		`  const room: Room = { code, game: newGame() };`,
+		`  res.json({ player: "X" });`,
+		`});`,
+		``,
+		`app.post("/api/rooms/:code/join", (req, res) => {`,
+		`  res.json({ player: "O" });`,
+		`});`,
+		``,
+		`app.get("/api/rooms/:code", (req, res) => {`,
+		`  res.json({ state: 1 });`,
+		`});`,
+		``,
+	}, "\n")
+	repository := project(t, map[string]string{"index.ts": backend})
+	err := repository.Apply("@index.ts\n app.post(\"/api/rooms\", (_req, res) => {\n@@\n" +
+		"-  const room: Room = { code, game: newGame() };\n+  const room: Room = { code, game: newGame(), solo: false };\n@@\n" +
+		" });\n+\n+app.post(\"/api/solo\", (_req, res) => {\n+  res.json({ player: \"X\" });\n+});\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, repository, "index.ts")
+	rooms := strings.Index(got, `res.json({ player: "X" });`+"\n});")
+	solo := strings.Index(got, `app.post("/api/solo"`)
+	join := strings.Index(got, `app.post("/api/rooms/:code/join"`)
+	if rooms < 0 || solo < rooms || solo > join {
+		t.Fatalf("the new route should follow the /api/rooms handler:\n%s", got)
+	}
+}
+
+func TestAnAnchorOnlyEditPointsAtTheNextOne(t *testing.T) {
+	app := "  const applyRoom = () => {\n    setError(\"\");\n  };\n\n  const createRoom = async () => {\n    setBusy(true);\n  };\n\n  const joinRoom = async () => {\n    setBusy(false);\n  };\n"
+	repository := project(t, map[string]string{"App.tsx": app})
+	err := repository.Apply("@App.tsx\n   const createRoom = async () => {\n@@\n   };\n+\n+  const startSolo = async () => {};\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, repository, "App.tsx")
+	if !strings.Contains(got, "    setBusy(true);\n  };\n\n  const startSolo") {
+		t.Fatalf("startSolo should follow createRoom:\n%s", got)
+	}
+}
+
+// Without an earlier edit to go after, a repeated line is still ambiguous.
+func TestARepeatedLineWithNoAnchorIsStillAmbiguous(t *testing.T) {
+	repository := project(t, map[string]string{"a.ts": "  };\n  };\n"})
+	if err := repository.Apply("@a.ts\n   };\n+  x();\n"); err == nil || !strings.Contains(err.Error(), "too ambiguous") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// One-line JSX: the button the model replaced is a piece of a much longer
+// line, and it appears there once.
+func TestAPieceOfALongLineIsReplacedInPlace(t *testing.T) {
+	line := `  return <main className="lobby"><h1>Title</h1><button className="primary-button full" onClick={createRoom} disabled={busy}>Create room</button><p>After</p></main>;`
+	repository := project(t, map[string]string{"App.tsx": line + "\n"})
+	err := repository.Apply("@App.tsx\n-<button className=\"primary-button full\" onClick={createRoom} disabled={busy}>Create room</button>\n" +
+		"+<button className=\"primary-button full\" onClick={createRoom} disabled={busy}>Create room</button>\n" +
+		"+<button className=\"secondary-button full\" onClick={startSolo} disabled={busy}>Play solo</button>\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, repository, "App.tsx")
+	if !strings.Contains(got, `<h1>Title</h1><button className="primary-button full"`) || !strings.Contains(got, "Play solo</button><p>After</p></main>;") {
+		t.Fatalf("the rest of the line should be kept around the replacement:\n%s", got)
+	}
+}

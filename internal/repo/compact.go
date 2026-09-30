@@ -82,6 +82,58 @@ func compactHeader(line string) *compactHeader_ {
 	return &compactHeader_{mode: mode, path: rest}
 }
 
+// borrowedHeader reads a file header written in another format's shape
+// partway through a compact patch: apply_patch's "*** Update File: path"
+// or a "@@ path". Both used to be taken as plain separators, dropping the
+// header, so every edit under it went looking for its lines in the file
+// named before — traced from a run that spent three rounds on edits to
+// App.tsx and index.css reported as missing from backend/index.ts.
+//
+// "@@ path" counts only with a "/" or "." in it. A bare "@@ render" is the
+// function hint apply_patch puts there, and a unified hunk header carries
+// spaces, so neither is mistaken for a file.
+func borrowedHeader(line string) *compactHeader_ {
+	line = strings.TrimSpace(line)
+	for prefix, mode := range map[string]rune{"*** Update File:": ' ', "*** Add File:": '+'} {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			if rest = strings.TrimSpace(rest); looksLikePath(rest) {
+				return &compactHeader_{mode: mode, path: rest}
+			}
+			return nil
+		}
+	}
+	if rest, ok := strings.CutPrefix(line, "@@"); ok {
+		rest = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "@@"))
+		if looksLikePath(rest) && strings.ContainsAny(rest, "/.") {
+			return &compactHeader_{mode: ' ', path: rest}
+		}
+	}
+	return nil
+}
+
+// plusOnlyFollows reports whether the edit after a blank line would be
+// added lines and nothing else, up to the next blank line or header. Such
+// an edit has nothing to place it by, so it can only be the rest of the
+// addition before the blank. One with context or removals of its own is a
+// separate edit and stays separate.
+func plusOnlyFollows(lines []string, from int) bool {
+	for from < len(lines) && strings.TrimSpace(lines[from]) == "" {
+		from++
+	}
+	seen := false
+	for _, line := range lines[from:] {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" || isHunkSeparator(line) || compactHeader(line) != nil || borrowedHeader(line) != nil {
+			break
+		}
+		if line[0] != '+' {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
 // looksLikePath is what keeps a created file's own contents from being
 // read as the next file's header. A CSS file full of "@media (...)" and
 // "@import url(...)", or a TypeScript file of "@Component({...})", would
@@ -192,7 +244,11 @@ func parseCompact(patch string) ([]filePatch, error) {
 	for index := 0; index < len(lines); index++ {
 		line := strings.TrimRight(lines[index], "\r")
 
-		if header := compactHeader(line); header != nil {
+		header := compactHeader(line)
+		if header == nil && current != nil {
+			header = borrowedHeader(line)
+		}
+		if header != nil {
 			if current != nil {
 				flush()
 			}
@@ -265,8 +321,18 @@ func parseCompact(patch string) ([]filePatch, error) {
 			continue
 		}
 
+		// A blank line inside added code — between two "+" lines, where the
+		// model left the blank unprefixed — belongs to the addition. Split
+		// there, the rest is added lines alone, which can never be placed in
+		// a nonempty file: a run lost a whole round to two new files'
+		// worth of code rejected as "a hunk has no context to place it by".
+		if strings.TrimSpace(line) == "" && added && plusOnlyFollows(lines, index+1) {
+			active.add('+', "")
+			continue
+		}
+
 		if strings.TrimSpace(line) == "" {
-			// A blank line always separates, even though it could also be
+			// Otherwise a blank line separates, even though it could also be
 			// a context line whose single leading space the model dropped
 			// — which they do constantly. Splitting is the safe way to be
 			// wrong: a hunk that loses a line of context still places, and

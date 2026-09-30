@@ -777,3 +777,52 @@ func TestAPureDeletionIsNeverTruncated(t *testing.T) {
 		t.Fatalf("the tail was dropped: %q", got)
 	}
 }
+
+func TestABorrowedHeaderMidPatchStillNamesItsFile(t *testing.T) {
+	for _, header := range []string{
+		"*** Update File: frontend/src/App.tsx",
+		"@@ frontend/src/App.tsx",
+		"@@ frontend/src/App.tsx @@",
+	} {
+		t.Run(header, func(t *testing.T) {
+			repository := project(t, map[string]string{
+				"backend/index.ts":     "const app = express();\n",
+				"frontend/src/App.tsx": "export default function App() {\n  return null;\n}\n",
+			})
+			err := repository.Apply("@backend/index.ts\n-const app = express();\n+const app = express(); // rooms\n\n" +
+				header + "\n-  return null;\n+  return <Game />;\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := read(t, repository, "frontend/src/App.tsx"); !strings.Contains(got, "<Game />") {
+				t.Fatalf("App.tsx = %q", got)
+			}
+		})
+	}
+}
+
+func TestAnApplyPatchFunctionHintIsNotAFile(t *testing.T) {
+	repository := project(t, map[string]string{"app.ts": "function render() {\n  return 1;\n}\n"})
+	err := repository.Apply("@app.ts\n@@ render\n-  return 1;\n+  return 2;\n")
+	if err != nil || read(t, repository, "app.ts") != "function render() {\n  return 2;\n}\n" {
+		t.Fatalf("err=%v content=%q", err, read(t, repository, "app.ts"))
+	}
+}
+
+func TestABlankLineInsideAddedCodeStaysInIt(t *testing.T) {
+	repository := project(t, map[string]string{"App.tsx": "export default function App() {\n  return null;\n}\n"})
+	err := repository.Apply("@App.tsx\n-export default function App() {\n-  return null;\n-}\n" +
+		"+import { useState } from \"react\";\n\n+export default function App() {\n\n\n+  return <Game />;\n+}\n")
+	want := "import { useState } from \"react\";\n\nexport default function App() {\n\n\n  return <Game />;\n}\n"
+	if err != nil || read(t, repository, "App.tsx") != want {
+		t.Fatalf("err=%v content=%q", err, read(t, repository, "App.tsx"))
+	}
+}
+
+func TestABlankLineBeforeAnAnchoredInsertionStillSeparates(t *testing.T) {
+	repository := project(t, map[string]string{"a.ts": "one\ntwo\nthree\nfour\n"})
+	err := repository.Apply("@a.ts\n one\n+one-and-a-half\n\n+three-minus\n three\n")
+	if err != nil || read(t, repository, "a.ts") != "one\none-and-a-half\ntwo\nthree-minus\nthree\nfour\n" {
+		t.Fatalf("err=%v content=%q", err, read(t, repository, "a.ts"))
+	}
+}

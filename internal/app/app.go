@@ -39,6 +39,10 @@ Usage:
   yolocoder model                 pick a model from the endpoint's list
   yolocoder model <name>          set the model directly
   yolocoder update                immediately check and install an update
+  yolocoder --release <tag> [...] run a published release instead of this
+                                  build, e.g. --release v0.0.0-23f5fce;
+                                  downloaded once, then cached, and never
+                                  self-updated
   yolocoder version               show the version
 
 Environment provider:

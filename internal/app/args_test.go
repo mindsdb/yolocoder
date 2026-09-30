@@ -194,3 +194,24 @@ func TestSomethingNothingLikeACommandIsLeftAlone(t *testing.T) {
 		t.Fatalf("LooksLikeCommand() = %q, want no guess at all", got)
 	}
 }
+
+func TestParseRelease(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		tag  string
+		rest string
+		bad  bool
+	}{
+		{args: []string{"--release", "v1", "--web"}, tag: "v1", rest: "--web"},
+		{args: []string{"--web", "--release=v1", "task"}, tag: "v1", rest: "--web task"},
+		{args: []string{"task", "--", "--release", "v1"}, rest: "task -- --release v1"},
+		{args: []string{"--release"}, bad: true},
+		{args: []string{"--release="}, bad: true},
+		{args: []string{"just", "a", "task"}, rest: "just a task"},
+	} {
+		tag, rest, err := ParseRelease(tc.args)
+		if (err != nil) != tc.bad || tag != tc.tag || strings.Join(rest, " ") != tc.rest {
+			t.Fatalf("ParseRelease(%q) = %q, %q, %v", tc.args, tag, rest, err)
+		}
+	}
+}

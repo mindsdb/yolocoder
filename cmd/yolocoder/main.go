@@ -24,6 +24,29 @@ import (
 
 func main() {
 	args := os.Args[1:]
+
+	// Before anything else, and before updating: a release asked for by tag
+	// runs instead of this build, so this build has no business updating
+	// itself first.
+	if tag, rest, err := app.ParseRelease(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	} else if tag != "" {
+		var code int
+		var runErr error
+		var release string
+		ui.WithRobot(os.Stdout, "Starting release "+tag+"...", func(status ui.RobotStatus) {
+			release, runErr = update.ReleaseBinary(tag, status)
+		})
+		if runErr == nil {
+			code, runErr = update.Run(release, tag, rest)
+		}
+		if runErr != nil {
+			fmt.Fprintln(os.Stderr, runErr)
+			os.Exit(1)
+		}
+		os.Exit(code)
+	}
 	if len(args) > 0 && args[0] == "update" {
 		var latest string
 		var updated bool

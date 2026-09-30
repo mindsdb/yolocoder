@@ -78,4 +78,10 @@ jobs:
           name: ${{ github.ref_type == 'tag' && github.ref_name || 'Latest (main)' }}
           body: ${{ github.ref_type == 'tag' && '' || format('Continuous build from main at {0}.', github.sha) }}
           generate_release_notes: ${{ github.ref_type == 'tag' }}
+          # The install scripts install GitHub's "Latest" release, and the
+          # continuous build from main is the one they should get. A tag
+          # (e.g. a pinned v0.0.0-23f5fce, run with yolocoder --release)
+          # never takes that badge, and one with a "-" is a pre-release.
+          prerelease: ${{ github.ref_type == 'tag' && contains(github.ref_name, '-') }}
+          make_latest: ${{ github.ref_type == 'tag' && 'false' || 'true' }}
           files: dist/*

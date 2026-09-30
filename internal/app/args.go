@@ -127,3 +127,34 @@ func Notes(notes []string) []agent.Recollection {
 	}
 	return recalled
 }
+
+// releaseFlag runs a published release instead of this build.
+const releaseFlag = "--release"
+
+// ParseRelease pulls --release out of args, as "--release tag" or
+// "--release=tag", returning the tag ("" when absent) and the arguments
+// left over for the release to run with. "--" ends flag parsing, so a
+// task that begins with a dash still reaches the release untouched.
+func ParseRelease(args []string) (tag string, rest []string, err error) {
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case argument == "--":
+			return tag, append(rest, args[index:]...), nil
+		case argument == releaseFlag:
+			if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
+				return "", nil, fmt.Errorf("%s needs a release tag, e.g. %s v0.0.0-23f5fce", releaseFlag, releaseFlag)
+			}
+			index++
+			tag = strings.TrimSpace(args[index])
+		case strings.HasPrefix(argument, releaseFlag+"="):
+			tag = strings.TrimSpace(strings.TrimPrefix(argument, releaseFlag+"="))
+			if tag == "" {
+				return "", nil, fmt.Errorf("%s needs a release tag, e.g. %s v0.0.0-23f5fce", releaseFlag, releaseFlag)
+			}
+		default:
+			rest = append(rest, argument)
+		}
+	}
+	return tag, rest, nil
+}

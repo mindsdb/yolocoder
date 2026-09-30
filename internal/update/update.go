@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mindsdb/yolocoder/internal/ui"
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 const (
@@ -247,6 +248,7 @@ func (checker *Checker) get(ctx context.Context, name string, limit int64) ([]by
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err

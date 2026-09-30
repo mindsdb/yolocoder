@@ -9,6 +9,7 @@ const btnCollapse = document.getElementById("btn-collapse");
 const btnExpand = document.getElementById("btn-expand");
 const btnRecover = document.getElementById("btn-recover");
 const modelSelect = document.getElementById("model-select");
+const reasoningSelect = document.getElementById("reasoning-select");
 const pendingImagesEl = document.getElementById("pending-images");
 const btnAttach = document.getElementById("btn-attach");
 const fileInput = document.getElementById("file-input");
@@ -512,6 +513,8 @@ fetch("/models")
       for (const model of models) modelSelect.appendChild(modelOptionEl(model));
     }
     if (data.current) modelSelect.value = data.current;
+    listedModels = models;
+    renderReasoning(data.current, data.reasoning || "");
     modelSelect.disabled = !!data.locked || models.length <= 1;
     modelSelect.title = data.locked
       ? "Set by OPENAI_MODEL; restart to change it"
@@ -521,6 +524,37 @@ fetch("/models")
     modelSelect.hidden = true;
   });
 
+// The reasoning picker offers Auto plus the levels the chosen model
+// accepts, and hides itself for a model that has none. Auto has each task's
+// effort chosen for it; a level fixes it.
+let listedModels = [];
+function renderReasoning(modelId, current) {
+  const model = listedModels.find((entry) => entry.id === modelId);
+  const efforts = (model && model.efforts) || [];
+  reasoningSelect.innerHTML = "";
+  reasoningSelect.hidden = efforts.length === 0;
+  if (efforts.length === 0) return;
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Auto";
+  reasoningSelect.appendChild(auto);
+  for (const effort of efforts) {
+    const option = document.createElement("option");
+    option.value = effort;
+    option.textContent = effort + (effort === model.default_effort ? " (default)" : "");
+    reasoningSelect.appendChild(option);
+  }
+  reasoningSelect.value = efforts.includes(current) ? current : "";
+}
+
+reasoningSelect.addEventListener("change", () => {
+  fetch("/reasoning", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reasoning: reasoningSelect.value }),
+  });
+});
+
 function modelOptionEl(model) {
   const option = document.createElement("option");
   option.value = model.id;
@@ -529,6 +563,11 @@ function modelOptionEl(model) {
 }
 
 modelSelect.addEventListener("change", () => {
+  // A level the new model does not have falls back to Auto, here and in
+  // what is saved, rather than being sent to a model that rejects it.
+  const kept = reasoningSelect.value;
+  renderReasoning(modelSelect.value, kept);
+  if (reasoningSelect.value !== kept) reasoningSelect.dispatchEvent(new Event("change"));
   fetch("/model", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

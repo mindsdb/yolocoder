@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/mindsdb/yolocoder/internal/version"
 	"io"
 	"net/http"
 	"os"
@@ -288,6 +289,7 @@ func (client *Client) selectEditFiles(ctx context.Context, model, opening string
 		if err != nil {
 			return nil, Usage{}, err
 		}
+		request.Header.Set("User-Agent", version.UserAgent())
 		request.Header.Set("Authorization", "Bearer "+client.apiKey)
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("User-Agent", "YoloCoder/experimental-edit-router")

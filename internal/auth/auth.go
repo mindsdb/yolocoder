@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 const DefaultTimeout = 3 * time.Minute
@@ -105,6 +107,7 @@ func CreateAPIKey(ctx context.Context, baseURL, accessToken, name string) (strin
 	if err != nil {
 		return "", err
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	response, err := http.DefaultClient.Do(request)
@@ -131,6 +134,7 @@ func exchangeCode(ctx context.Context, config Config, code, redirectURI, verifie
 	if err != nil {
 		return "", err
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

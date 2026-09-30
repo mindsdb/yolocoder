@@ -34,7 +34,21 @@ type LLM struct {
 	// while it costs less than the call it removes, and that is
 	// measured per project rather than assumed.
 	Preselect bool
+	// Reasoning is the reasoning effort asked of the coding model: one of
+	// the model's own levels, or "" (auto) to have the decision model
+	// choose per task.
+	Reasoning string
+	// Efforts are the reasoning levels Model accepts, least first as the
+	// endpoint lists them, and DefaultEffort the one it uses unasked.
+	// EffortsModel is the model they were read for; when it is not Model
+	// they are stale and are read again.
+	Efforts       []string
+	DefaultEffort string
+	EffortsModel  string
 }
+
+// Auto is the Reasoning value that lets each task's effort be chosen.
+const Auto = ""
 
 const (
 	APIResponses = "responses"
@@ -49,6 +63,12 @@ type settings struct {
 	API       string `json:"api,omitempty"`
 	Recall    bool   `json:"recall,omitempty"`
 	Preselect bool   `json:"preselect,omitempty"`
+	Reasoning string `json:"reasoning,omitempty"`
+	// The model's reasoning levels, saved when it is chosen so a turn does
+	// not have to ask the endpoint for them.
+	Efforts       []string `json:"reasoning_efforts,omitempty"`
+	DefaultEffort string   `json:"default_reasoning_effort,omitempty"`
+	EffortsModel  string   `json:"reasoning_efforts_model,omitempty"`
 }
 
 type credentials struct {
@@ -94,7 +114,8 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect}, true, nil
+	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect,
+		Reasoning: saved.Reasoning, Efforts: saved.Efforts, DefaultEffort: saved.DefaultEffort, EffortsModel: saved.EffortsModel}, true, nil
 }
 
 func Save(provider LLM) error {
@@ -109,7 +130,8 @@ func Save(provider LLM) error {
 	if err != nil {
 		return err
 	}
-	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall, Preselect: provider.Preselect}
+	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall, Preselect: provider.Preselect,
+		Reasoning: provider.Reasoning, Efforts: provider.Efforts, DefaultEffort: provider.DefaultEffort, EffortsModel: provider.EffortsModel}
 	if err := writeJSON(filepath.Join(dir, "config.json"), public, 0o644); err != nil {
 		return fmt.Errorf("save configuration: %w", err)
 	}

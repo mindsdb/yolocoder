@@ -151,14 +151,16 @@ func TestCutoffCompletionKeepsEditAndRoundLimits(t *testing.T) {
 			t.Fatal("fifth call was not refused:", output)
 		}
 	})
-	t.Run("round cap", func(t *testing.T) {
+	t.Run("cut-off cap", func(t *testing.T) {
+		// Replies that keep running out of room stop the turn well before
+		// the round cap: each one is a full model call that changed nothing.
 		replies := make([]retryReply, maxRounds)
 		for i := range replies {
 			replies[i] = retryReply{status: 200, body: incompleteReply(t, finishes("Unfinished"), "max_output_tokens")}
 		}
 		session, seen := retryScript(t, replies...)
 		outcome, err := session.work(context.Background(), &recordingProgress{})
-		if !errors.Is(err, errOutOfRounds) || len(*seen) != maxRounds || outcome.Reply != "" || session.used["apply_diff"] != 0 {
+		if err == nil || !strings.Contains(err.Error(), "ran out of output room") || len(*seen) != maxCutOffs+1 || outcome.Reply != "" || session.used["apply_diff"] != 0 {
 			t.Fatalf("outcome=%+v err=%v requests=%d", outcome, err, len(*seen))
 		}
 	})

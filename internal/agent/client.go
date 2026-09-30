@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
 	"github.com/mindsdb/yolocoder/internal/debug"
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 type Client struct {
@@ -31,6 +33,11 @@ type Client struct {
 	// recorded would otherwise keep failing until reconnected by hand.
 	autoDialect bool
 	http        *http.Client
+	// efforts and defaultEffort are the model's reasoning efforts from the
+	// endpoint's listing, fetched the first time a turn needs them.
+	effortsKnown  bool
+	efforts       []string
+	defaultEffort string
 }
 
 type responseRequest struct {
@@ -40,6 +47,13 @@ type responseRequest struct {
 	Tools        []functionTool `json:"tools,omitempty"`
 	ToolChoice   string         `json:"tool_choice,omitempty"`
 	Text         *textConfig    `json:"text,omitempty"`
+	// Reasoning is left out, so the model's own default applies, until a
+	// turn has a reason to ask for less: see changeSession.effort.
+	Reasoning *reasoningConfig `json:"reasoning,omitempty"`
+}
+
+type reasoningConfig struct {
+	Effort string `json:"effort"`
 }
 
 type functionTool struct {
@@ -242,6 +256,7 @@ func (client *Client) post(ctx context.Context, payload []byte, label string, re
 		if err != nil {
 			return nil, nil, err
 		}
+		httpRequest.Header.Set("User-Agent", version.UserAgent())
 		httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
 		httpRequest.Header.Set("Content-Type", "application/json")
 		httpRequest.Header.Set("Accept", "application/json")
@@ -418,6 +433,11 @@ func modelsEndpoint(baseURL string) string {
 type ModelInfo struct {
 	ID      string
 	OwnedBy string
+	// ReasoningEfforts and DefaultReasoningEffort are what a MindsHub-style
+	// listing says the model accepts ("none", "low", ... "max") and uses
+	// when asked for nothing. Empty when the endpoint does not say.
+	ReasoningEfforts       []string
+	DefaultReasoningEffort string
 }
 
 // ListModels queries an endpoint's OpenAI-compatible GET /v1/models listing
@@ -428,6 +448,7 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Accept", "application/json")
 	response, err := http.DefaultClient.Do(request)
@@ -444,8 +465,10 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error
 	}
 	var envelope struct {
 		Data []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
+			ID                     string   `json:"id"`
+			OwnedBy                string   `json:"owned_by"`
+			ReasoningEfforts       []string `json:"reasoning_efforts"`
+			DefaultReasoningEffort string   `json:"default_reasoning_effort"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
@@ -454,7 +477,8 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error
 	models := make([]ModelInfo, 0, len(envelope.Data))
 	for _, item := range envelope.Data {
 		if item.ID != "" {
-			models = append(models, ModelInfo{ID: item.ID, OwnedBy: strings.TrimSpace(item.OwnedBy)})
+			models = append(models, ModelInfo{ID: item.ID, OwnedBy: strings.TrimSpace(item.OwnedBy),
+				ReasoningEfforts: item.ReasoningEfforts, DefaultReasoningEffort: item.DefaultReasoningEffort})
 		}
 	}
 	sort.Slice(models, func(i, j int) bool {
@@ -464,6 +488,63 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]ModelInfo, error
 		return models[i].ID < models[j].ID
 	})
 	return models, nil
+}
+
+// effortOrder ranks the reasoning efforts providers name, least first.
+var effortOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// modelEfforts are the reasoning levels the model accepts and the one it
+// uses unasked, from the endpoint's listing unless the caller already
+// knew them (see KnowEfforts). Asked once per client; a listing that
+// fails is not asked again, and leaves both empty.
+func (client *Client) modelEfforts(ctx context.Context) ([]string, string) {
+	if !client.effortsKnown {
+		client.effortsKnown = true
+		models, err := ListModels(ctx, client.baseURL, client.apiKey)
+		if err == nil {
+			for _, model := range models {
+				if model.ID == client.model {
+					client.efforts, client.defaultEffort = model.ReasoningEfforts, model.DefaultReasoningEffort
+				}
+			}
+		}
+	}
+	return client.efforts, client.defaultEffort
+}
+
+// KnowEfforts records the model's reasoning levels when they were saved
+// with its configuration, so no turn has to list models to learn them.
+func (client *Client) KnowEfforts(efforts []string, defaultEffort string) {
+	client.effortsKnown, client.efforts, client.defaultEffort = true, efforts, defaultEffort
+}
+
+// Efforts reports the model's reasoning levels as this client knows them,
+// and whether it knows them at all, so a caller can save what was learned.
+func (client *Client) Efforts() ([]string, string, bool) {
+	return client.efforts, client.defaultEffort, client.effortsKnown
+}
+
+// lowerEffort is the next reasoning effort below from ("" meaning the
+// model's default) that the model accepts, or "" when there is none or the
+// endpoint does not say.
+//
+// A reasoning model can spend its whole output allowance thinking and
+// return nothing: seen on mindshub_blaze, default effort "high", as 35
+// seconds and an empty reply, three times running, because asking again
+// the same way thinks the same way. Less reasoning is what gets a reply.
+func (client *Client) lowerEffort(ctx context.Context, from string) string {
+	efforts, defaultEffort := client.modelEfforts(ctx)
+	if from == "" {
+		from = defaultEffort
+	}
+	current := slices.Index(effortOrder, from)
+	best := ""
+	for _, effort := range efforts {
+		if rank := slices.Index(effortOrder, effort); rank >= 0 && rank < current && (best == "" || rank > slices.Index(effortOrder, best)) {
+			best = effort
+		}
+	}
+	return best
 }
 
 func strictSchema(name string, schema map[string]any) *textConfig {

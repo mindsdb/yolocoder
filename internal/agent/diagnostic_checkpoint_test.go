@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,7 +109,7 @@ func TestDiagnosticCheckpointExclusions(t *testing.T) {
 			if which == "last round" {
 				replies = nil
 				for i := 0; i < maxRounds-1; i++ {
-					replies = append(replies, retryReply{status: 200, body: cutOff()})
+					replies = append(replies, retryReply{status: 200, body: reads(fmt.Sprintf("fill%d", i), "a.txt")})
 				}
 				replies = append(replies, retryReply{status: 200, body: first})
 			}

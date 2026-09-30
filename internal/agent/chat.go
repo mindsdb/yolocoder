@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mindsdb/yolocoder/internal/config"
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 // Most OpenAI-compatible providers implement /v1/chat/completions and not
@@ -25,6 +26,8 @@ type chatRequest struct {
 	Tools          []chatTool    `json:"tools,omitempty"`
 	ToolChoice     string        `json:"tool_choice,omitempty"`
 	ResponseFormat *chatFormat   `json:"response_format,omitempty"`
+	// ReasoningEffort is chat completions' spelling of Responses' reasoning.effort.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Content is `any` rather than `string`: plain text marshals as a bare
@@ -106,6 +109,9 @@ type chatUsage struct {
 // still JSON we can read.
 func toChat(request responseRequest, dropSchema bool) (chatRequest, error) {
 	converted := chatRequest{Model: request.Model, ToolChoice: request.ToolChoice}
+	if request.Reasoning != nil {
+		converted.ReasoningEffort = request.Reasoning.Effort
+	}
 	instructions := request.Instructions
 	if dropSchema && request.Text != nil {
 		if hint := schemaHint(request.Text.Format); hint != "" {
@@ -357,6 +363,7 @@ func DetectAPI(ctx context.Context, baseURL, apiKey string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)

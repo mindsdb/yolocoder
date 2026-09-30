@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mindsdb/yolocoder/internal/debug"
+	"github.com/mindsdb/yolocoder/internal/version"
 )
 
 // Choosing the files a task needs, before the model is asked anything.
@@ -116,6 +117,7 @@ func (runner *Runner) chooseFiles(ctx context.Context, task string, paths []stri
 	if err != nil {
 		return nil
 	}
+	request.Header.Set("User-Agent", version.UserAgent())
 	request.Header.Set("Authorization", "Bearer "+runner.client.apiKey)
 	request.Header.Set("Content-Type", "application/json")
 
@@ -179,4 +181,90 @@ func (session *changeSession) preread(paths []string, progress Progress) {
 			"Read anything else you want with read_files.\n\n%s", text),
 	})
 	progress.Log("  picked " + strings.Join(paths, ", "))
+}
+
+// Choosing how hard the coding model should think, before it starts.
+//
+// A reasoning model left at its default thinks as hard for "make the
+// button blue" as for a two-player game spec: seconds wasted on the first,
+// and on a model whose default is its highest level, whole replies spent
+// thinking with nothing written. The decision model tells the two apart in
+// about a second — asked both on MindsHub, it answered none at 0.98 and
+// high at 1.00 — which is what "auto" is.
+
+// effortTimeout bounds the choice. Past it the model's default is used.
+const effortTimeout = 3 * time.Second
+
+// effortCriteria describe each level for the decision model. Levels above
+// high are never chosen automatically: they buy quality at a cost in time
+// that a person should decide to pay, not a classifier.
+var effortCriteria = map[string]string{
+	"none":    "Mechanical: a rename, wording, colour or spacing change, a one-line fix, or a plain question about the code",
+	"minimal": "Trivial and fully specified, with nothing to work out",
+	"low":     "Small and clear: a contained change to one or two files with an obvious approach",
+	"medium":  "Ordinary feature work, or a bug whose cause is not yet known",
+	"high":    "New multi-part features, design across several files, or tricky logic and algorithms",
+}
+
+type effortReply struct {
+	Answers map[string]struct {
+		Choice     string  `json:"choice"`
+		Confidence float64 `json:"confidence"`
+	} `json:"answers"`
+}
+
+// chooseEffort is the reasoning level this task needs, among the ones the
+// model accepts, or "" to leave the model's default. Like chooseFiles, any
+// failure is the ordinary answer and costs the turn nothing but the wait.
+func (runner *Runner) chooseEffort(ctx context.Context, task string, efforts []string) string {
+	criteria := map[string]string{}
+	for _, effort := range efforts {
+		if description, ok := effortCriteria[effort]; ok {
+			criteria[effort] = description
+		}
+	}
+	if len(criteria) < 2 {
+		return ""
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model": "jev",
+		"state": map[string]any{"task": task},
+		"questions": map[string]any{"effort": map[string]any{
+			"type":         "choice",
+			"instructions": "How much reasoning does a coding model need to do this task well, as fast as possible? Choose the least that will still get it right.",
+			"criteria":     criteria,
+		}},
+	})
+	if err != nil {
+		return ""
+	}
+	callCtx, cancel := context.WithTimeout(ctx, effortTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(callCtx, http.MethodPost, decisionsEndpoint(runner.client.baseURL), bytes.NewReader(payload))
+	if err != nil {
+		return ""
+	}
+	request.Header.Set("User-Agent", version.UserAgent())
+	request.Header.Set("Authorization", "Bearer "+runner.client.apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := runner.client.http.Do(request)
+	if err != nil {
+		debug.Logf("EFFORT", "%v", err)
+		return ""
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		debug.Logf("EFFORT", "%s: %s", response.Status, snippet(string(body)))
+		return ""
+	}
+	var reply effortReply
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return ""
+	}
+	choice := reply.Answers["effort"].Choice
+	if _, ok := criteria[choice]; !ok {
+		return ""
+	}
+	return choice
 }

@@ -704,3 +704,54 @@ func TestACutOffReplyAsksAgainInsteadOfFailing(t *testing.T) {
 		t.Fatalf("the trail should show the retry:\n%s", trail)
 	}
 }
+
+func TestLowerEffortIsTheNextOneTheModelAccepts(t *testing.T) {
+	for _, tc := range []struct {
+		name, def, want string
+		efforts         []string
+	}{
+		{"luna", "medium", "low", []string{"none", "low", "medium", "high", "xhigh", "max"}},
+		{"blaze", "high", "none", []string{"none", "high"}},
+		{"already lowest", "none", "", []string{"none", "high"}},
+		{"not listed", "", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &Client{effortsKnown: true, efforts: tc.efforts, defaultEffort: tc.def}
+			if got := client.lowerEffort(context.Background(), ""); got != tc.want {
+				t.Fatalf("lowerEffort = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The run behind this: a reasoning model spent its whole allowance
+// thinking, three times, because each retry asked the same way.
+func TestACutOffReplyIsRetriedWithLessReasoning(t *testing.T) {
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n"})
+	var efforts []any
+	replies := []string{cutOff(), finishes("Done.")}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/v1/models" {
+			fmt.Fprint(writer, `{"data":[{"id":"m","reasoning_efforts":["none","high"],"default_reasoning_effort":"high"}]}`)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		efforts = append(efforts, body["reasoning"])
+		fmt.Fprint(writer, replies[len(efforts)-1])
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL + "/v1/responses", baseURL: server.URL, apiKey: "k", model: "m", http: server.Client()}
+	progress := &recordingProgress{}
+	outcome, err := NewRunner(client, repository).Run(context.Background(), "look", nil, nil, progress)
+	if err != nil || outcome.Reply != "Done." || len(efforts) != 2 {
+		t.Fatalf("outcome=%+v err=%v requests=%d", outcome, err, len(efforts))
+	}
+	if efforts[0] != nil || fmt.Sprint(efforts[1]) != "map[effort:none]" {
+		t.Fatalf("reasoning per request = %v, want the default and then none", efforts)
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "asking again with reasoning effort none") {
+		t.Fatalf("the trail should name the lowered effort:\n%s", trail)
+	}
+}

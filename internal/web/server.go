@@ -119,6 +119,9 @@ type Server struct {
 	// by a model change from the UI while one may be in flight.
 	providerMutex sync.Mutex
 	provider      config.LLM
+	// listed is the endpoint's last model listing, so a model picked from
+	// it is saved with its reasoning levels. Guarded by providerMutex.
+	listed []agent.ModelInfo
 
 	// appProxyPort is the app proxy's own listener port (see
 	// newAppProxy), set once before the HTTP servers start accepting
@@ -391,6 +394,7 @@ func (server *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/state", server.handleState)
 	mux.HandleFunc("/models", server.handleModels)
 	mux.HandleFunc("/model", server.handleModel)
+	mux.HandleFunc("/reasoning", server.handleReasoning)
 	mux.Handle("/events", server.hub)
 	mux.HandleFunc("/chat", server.handleChat)
 	mux.HandleFunc("/client-error", server.handleClientError)
@@ -512,6 +516,10 @@ const listModelsTimeout = 10 * time.Second
 type modelOption struct {
 	ID       string `json:"id"`
 	Provider string `json:"provider,omitempty"`
+	// Efforts are the reasoning levels the model accepts, empty when it
+	// has none or the endpoint does not say; Default is the one it uses.
+	Efforts []string `json:"efforts,omitempty"`
+	Default string   `json:"default_effort,omitempty"`
 }
 
 func (server *Server) handleModels(response http.ResponseWriter, request *http.Request) {
@@ -521,13 +529,49 @@ func (server *Server) handleModels(response http.ResponseWriter, request *http.R
 	models, _ := agent.ListModels(ctx, provider.BaseURL, provider.APIKey)
 	options := make([]modelOption, len(models))
 	for index, model := range models {
-		options[index] = modelOption{ID: model.ID, Provider: model.OwnedBy}
+		options[index] = modelOption{ID: model.ID, Provider: model.OwnedBy, Efforts: model.ReasoningEfforts, Default: model.DefaultReasoningEffort}
+	}
+	if len(models) > 0 {
+		server.providerMutex.Lock()
+		server.listed = models
+		server.providerMutex.Unlock()
 	}
 	writeJSON(response, map[string]any{
-		"models":  options,
-		"current": provider.Model,
-		"locked":  server.fromEnvironment,
+		"models":    options,
+		"current":   provider.Model,
+		"reasoning": provider.Reasoning,
+		"locked":    server.fromEnvironment,
 	})
+}
+
+type reasoningRequest struct {
+	Reasoning string `json:"reasoning"`
+}
+
+// handleReasoning sets the reasoning effort used from the next turn on:
+// one of the model's levels, or "" for auto, chosen per task.
+func (server *Server) handleReasoning(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(response, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body reasoningRequest
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(response, err.Error(), http.StatusBadRequest)
+		return
+	}
+	server.providerMutex.Lock()
+	server.provider.Reasoning = strings.TrimSpace(body.Reasoning)
+	provider := server.provider
+	server.providerMutex.Unlock()
+	// An environment provider has no file to save to; the choice still
+	// holds for as long as this server runs.
+	if !server.fromEnvironment {
+		if err := config.Save(provider); err != nil {
+			server.hub.publish("chat", chatMessage{Role: "system", Text: "Could not save the reasoning choice: " + err.Error()})
+		}
+	}
+	response.WriteHeader(http.StatusAccepted)
 }
 
 type modelRequest struct {
@@ -870,6 +914,7 @@ func (server *Server) runTask(ctx context.Context, task string, images []string,
 
 	turns, _ := session.Recent(server.root)
 	outcome, err := app.RunTask(ctx, task, images, server.currentProvider(), app.Recollections(turns), hubProgress{server.hub})
+	server.learnEfforts()
 	if err != nil {
 		server.hub.publish("chat", chatMessage{Role: "system", Text: "Error: " + err.Error()})
 		return outcome, err
@@ -937,6 +982,23 @@ func (server *Server) setPhase(phase string) {
 // currentProvider is what every task actually runs against; read through
 // this rather than the field directly, since a model change from the UI
 // can land between one task and the next.
+// learnEfforts picks up the model's reasoning levels when a run saved them,
+// so the next turn here starts knowing them rather than listing models.
+func (server *Server) learnEfforts() {
+	if server.fromEnvironment {
+		return
+	}
+	saved, configured, err := config.Load()
+	if err != nil || !configured {
+		return
+	}
+	server.providerMutex.Lock()
+	defer server.providerMutex.Unlock()
+	if saved.EffortsModel == server.provider.Model && server.provider.EffortsModel != server.provider.Model {
+		server.provider.Efforts, server.provider.DefaultEffort, server.provider.EffortsModel = saved.Efforts, saved.DefaultEffort, saved.EffortsModel
+	}
+}
+
 func (server *Server) currentProvider() config.LLM {
 	server.providerMutex.Lock()
 	defer server.providerMutex.Unlock()
@@ -950,6 +1012,11 @@ func (server *Server) currentProvider() config.LLM {
 func (server *Server) setModel(model string) {
 	server.providerMutex.Lock()
 	server.provider.Model = model
+	for _, listed := range server.listed {
+		if listed.ID == model {
+			server.provider.Efforts, server.provider.DefaultEffort, server.provider.EffortsModel = listed.ReasoningEfforts, listed.DefaultReasoningEffort, model
+		}
+	}
 	provider := server.provider
 	server.providerMutex.Unlock()
 	if err := config.Save(provider); err != nil {

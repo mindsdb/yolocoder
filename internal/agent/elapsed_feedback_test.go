@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,7 +174,7 @@ func TestElapsedFeedbackKeepsCancellationAndRoundLimit(t *testing.T) {
 	t.Run("round limit", func(t *testing.T) {
 		replies := make([]retryReply, maxRounds)
 		for i := range replies {
-			replies[i] = retryReply{status: 200, body: incompleteReply(t, finishes("Still partial"), "max_output_tokens")}
+			replies[i] = retryReply{status: 200, body: reads(fmt.Sprintf("fill%d", i), "a.txt")}
 		}
 		session, seen := retryScript(t, replies...)
 		_, err := session.work(context.Background(), &recordingProgress{})

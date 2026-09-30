@@ -81,20 +81,36 @@ func RunTask(ctx context.Context, task string, images []string, provider config.
 	runner := agent.NewRunner(client, repository)
 	runner.UseRecall(provider.Recall)
 	runner.UsePreselect(provider.Preselect)
+	runner.UseReasoning(provider.Reasoning)
+	if provider.EffortsModel != "" && provider.EffortsModel == provider.Model {
+		client.KnowEfforts(provider.Efforts, provider.DefaultEffort)
+	}
 	outcome, runErr := runner.Run(ctx, task, images, history, progress)
-	rememberDialect(provider, client)
+	remember(provider, client)
 	return outcome, runErr
 }
 
-// rememberDialect saves which API the endpoint turned out to speak, so a
-// provider saved before that was recorded costs one 404 to discover rather
-// than one on every run. An environment provider isn't ours to write.
-func rememberDialect(provider config.LLM, client *agent.Client) {
-	if provider.Provider == "environment" || provider.API == client.Dialect() {
+// remember saves what a run learned about the endpoint, so the next run
+// does not have to learn it again: which API it speaks (a provider saved
+// before that was recorded costs one 404 to discover, rather than one on
+// every run), and the model's reasoning levels (one listing, rather than
+// one per turn). An environment provider isn't ours to write.
+func remember(provider config.LLM, client *agent.Client) {
+	if provider.Provider == "environment" {
 		return
 	}
-	provider.API = client.Dialect()
-	_ = config.Save(provider)
+	changed := false
+	if provider.API != client.Dialect() {
+		provider.API = client.Dialect()
+		changed = true
+	}
+	if efforts, defaultEffort, known := client.Efforts(); known && provider.EffortsModel != provider.Model {
+		provider.Efforts, provider.DefaultEffort, provider.EffortsModel = efforts, defaultEffort, provider.Model
+		changed = true
+	}
+	if changed {
+		_ = config.Save(provider)
+	}
 }
 
 func resolveProvider(fromEnvironment bool) (config.LLM, error) {

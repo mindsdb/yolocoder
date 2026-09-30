@@ -636,7 +636,7 @@ main {
   #chat-send { transition: none; }
 }
 
-#model-select {
+#model-select, #reasoning-select {
   border: none;
   background: transparent;
   color: var(--muted);
@@ -645,6 +645,8 @@ main {
   cursor: pointer;
 }
 #model-select:disabled { cursor: default; opacity: 0.6; }
+#reasoning-select { max-width: 110px; }
+#reasoning-select[hidden] { display: none; }
 /* Pushed to the right end of the bar, now the hint is gone: attach stays
    left, model and send sit right. */
 #composer-bar #model-select { margin-left: auto; }

@@ -140,10 +140,10 @@ func RunModel(args []string) int {
 	if !configured {
 		return fail(fmt.Errorf("no LLM inference provider configured; run `yolocoder config connect` first"))
 	}
-	var model string
+	var model agent.ModelInfo
 	if len(args) > 0 {
-		model = strings.TrimSpace(strings.Join(args, " "))
-		if model == "" {
+		model.ID = strings.TrimSpace(strings.Join(args, " "))
+		if model.ID == "" {
 			return fail(fmt.Errorf("model name is required"))
 		}
 	} else {
@@ -155,19 +155,75 @@ func RunModel(args []string) int {
 		if err != nil {
 			return fail(err)
 		}
+		if len(model.ReasoningEfforts) > 0 {
+			fmt.Println()
+			provider.Reasoning, err = pickReasoning(os.Stdout, reader, model, provider.Reasoning)
+			if err != nil {
+				return fail(err)
+			}
+		}
 	}
-	provider.Model = model
+	setModel(&provider, model)
 	if err := config.Save(provider); err != nil {
 		return fail(err)
 	}
-	fmt.Printf("Model set to %s.\n", model)
+	fmt.Printf("Model set to %s.\n", model.ID)
+	if len(model.ReasoningEfforts) > 0 {
+		fmt.Printf("Reasoning: %s.\n", reasoningLabel(provider.Reasoning))
+	}
 	return 0
+}
+
+// setModel records a chosen model with the reasoning levels its listing
+// gave, so no turn has to list models to learn them. A model named by hand
+// has none recorded, and its first turn learns them.
+func setModel(provider *config.LLM, model agent.ModelInfo) {
+	provider.Model = model.ID
+	provider.Efforts, provider.DefaultEffort, provider.EffortsModel = nil, "", ""
+	if model.ReasoningEfforts != nil || model.DefaultReasoningEffort != "" {
+		provider.Efforts, provider.DefaultEffort, provider.EffortsModel = model.ReasoningEfforts, model.DefaultReasoningEffort, model.ID
+	}
+}
+
+func reasoningLabel(effort string) string {
+	if effort == config.Auto {
+		return "auto, chosen for each task"
+	}
+	return effort
+}
+
+// pickReasoning lets the user choose how hard the model reasons: Auto has
+// the decision model choose for each task, or one of the model's levels
+// fixes it.
+func pickReasoning(output *os.File, reader *terminal.Reader, model agent.ModelInfo, current string) (string, error) {
+	choices := []terminal.Choice{{Label: "Auto (recommended)", Detail: "chosen for each task: quick for small edits, deeper for new features"}}
+	initial := 0
+	for index, effort := range model.ReasoningEfforts {
+		choice := terminal.Choice{Label: effort}
+		if effort == model.DefaultReasoningEffort {
+			choice.Detail = "the model's default"
+		}
+		choices = append(choices, choice)
+		if effort == current {
+			initial = index + 1
+		}
+	}
+	fmt.Fprintln(output, "Choose the reasoning effort")
+	fmt.Fprintln(output)
+	selected, err := reader.Select(output, choices, initial)
+	if err != nil {
+		return "", err
+	}
+	if selected == 0 {
+		return config.Auto, nil
+	}
+	return model.ReasoningEfforts[selected-1], nil
 }
 
 // pickModel lists provider's available models and lets the user select
 // one, falling back to a free-text prompt if the endpoint doesn't support
 // listing them.
-func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (string, error) {
+func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (agent.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), listModelsTimeout)
 	defer cancel()
 	models, err := agent.ListModels(ctx, provider.BaseURL, provider.APIKey)
@@ -175,13 +231,13 @@ func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (s
 		fmt.Fprint(output, "Model\n> ")
 		typed, readErr := reader.ReadLine()
 		if readErr != nil {
-			return "", fmt.Errorf("read model: %w", readErr)
+			return agent.ModelInfo{}, fmt.Errorf("read model: %w", readErr)
 		}
 		typed = strings.TrimSpace(typed)
 		if typed == "" {
-			return "", fmt.Errorf("model is required")
+			return agent.ModelInfo{}, fmt.Errorf("model is required")
 		}
-		return typed, nil
+		return agent.ModelInfo{ID: typed}, nil
 	}
 	choices := make([]terminal.Choice, len(models))
 	initial := 0
@@ -199,9 +255,9 @@ func pickModel(output *os.File, reader *terminal.Reader, provider config.LLM) (s
 	fmt.Fprintln(output)
 	selected, err := reader.Select(output, choices, initial)
 	if err != nil {
-		return "", err
+		return agent.ModelInfo{}, err
 	}
-	return models[selected].ID, nil
+	return models[selected], nil
 }
 
 func connect(input *os.File, output *os.File) (config.LLM, error) {
@@ -248,9 +304,9 @@ func connectMindsHub(output *os.File, reader *terminal.Reader) (config.LLM, erro
 	model, err := pickModel(output, reader, provider)
 	if err != nil {
 		fmt.Fprintf(output, "Could not choose a model (%v); using the default.\n", err)
-		model = defaultMindsHubModel
+		model = agent.ModelInfo{ID: defaultMindsHubModel}
 	}
-	provider.Model = model
+	setModel(&provider, model)
 	return saveProvider(output, provider)
 }
 

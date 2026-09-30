@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
@@ -14,7 +15,8 @@ func TestSaveAndLoad(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	want := LLM{Provider: "openai-compatible", BaseURL: "https://llm.example/v1/", APIKey: "secret", Model: "test-model"}
+	want := LLM{Provider: "openai-compatible", BaseURL: "https://llm.example/v1/", APIKey: "secret", Model: "test-model",
+		Reasoning: "low", Efforts: []string{"none", "low", "high"}, DefaultEffort: "high", EffortsModel: "test-model"}
 	if err := Save(want); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +25,7 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Fatalf("Load() = %+v, %v, %v", got, configured, err)
 	}
 	want.BaseURL = "https://llm.example/v1"
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Load() = %+v, want %+v", got, want)
 	}
 	_, credentialsPath, _ := Paths()
@@ -60,7 +62,7 @@ func TestFromEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := LLM{Provider: "environment", BaseURL: "https://api.example/v1", APIKey: "key", Model: "model"}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("FromEnvironment() = %+v, want %+v", got, want)
 	}
 }

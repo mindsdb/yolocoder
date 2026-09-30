@@ -234,6 +234,14 @@ type Runner struct {
 	// preloadWhole sends a small enough project whole before the first
 	// round. On unless a test is exercising what happens without it.
 	preloadWhole bool
+	// reasoning is the configured effort for the task, "" to choose one per
+	// task. taskEffort is what this turn uses for the change, and
+	// exploreEffort what it uses before any file has been read; "" leaves
+	// the model's default.
+	reasoningOn   bool
+	reasoning     string
+	taskEffort    string
+	exploreEffort string
 	// preselect reports whether the files a task needs are chosen before
 	// the model is asked, rather than by it.
 	preselect bool
@@ -255,6 +263,52 @@ func NewRunner(client *Client, repository *repo.Repository) *Runner {
 // UseRecall offers (or withholds) the tool for reading further back than
 // the turns carried inline.
 func (runner *Runner) UseRecall(on bool) { runner.recall = on }
+
+// startEfforts settles this turn's reasoning efforts alongside whatever
+// else the turn does first, and returns the wait for them. Choosing one
+// takes the decision model about a second, which the file choice running
+// meanwhile overlaps; everything else here is free.
+func (runner *Runner) startEfforts(ctx context.Context, task string) func(Progress) {
+	if !runner.reasoningOn {
+		return func(Progress) {}
+	}
+	efforts, defaultEffort := runner.client.modelEfforts(ctx)
+	if len(efforts) == 0 {
+		return func(Progress) {}
+	}
+	if slices.Contains(efforts, "none") {
+		runner.exploreEffort = "none"
+	}
+	if runner.reasoning != "" {
+		return func(progress Progress) {
+			if slices.Contains(efforts, runner.reasoning) {
+				runner.taskEffort = runner.reasoning
+				progress.Log("  reasoning: " + runner.reasoning + " (your setting)")
+				return
+			}
+			progress.Log(fmt.Sprintf("  reasoning: %s is not one of %s's levels; using its default", runner.reasoning, runner.client.model))
+		}
+	}
+	started := time.Now()
+	chosen := make(chan string, 1)
+	go func() { chosen <- runner.chooseEffort(ctx, task, efforts) }()
+	return func(progress Progress) {
+		runner.taskEffort = <-chosen
+		spent := time.Since(started)
+		runner.profile.record(StepFiles, spent)
+		if runner.taskEffort == "" {
+			progress.Log(fmt.Sprintf("  reasoning: %s (the model's default; none was chosen) · %s", defaultEffort, formatDuration(spent)))
+			return
+		}
+		progress.Log(fmt.Sprintf("  reasoning: %s, chosen for this task · %s", runner.taskEffort, formatDuration(spent)))
+	}
+}
+
+// UseReasoning sets the reasoning effort for coding: one of the model's
+// levels, or "" to have the decision model choose one for each task.
+func (runner *Runner) UseReasoning(effort string) {
+	runner.reasoningOn, runner.reasoning = true, strings.TrimSpace(effort)
+}
 
 // UsePreselect turns on choosing a turn's files before the model is
 // asked for them.
@@ -330,6 +384,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	progress.Log(fmt.Sprintf("  mapped %d files · %s", len(mapped), formatDuration(mapSpent)))
 
 	session := runner.newChangeSession(task, repoMap, notes, images)
+	efforts := runner.startEfforts(ctx, task)
 
 	// A project small enough to send whole is sent whole, before the model
 	// is asked anything: its first round would otherwise be spent asking
@@ -364,6 +419,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	if len(images) == 0 {
 		runner.prefetchEdit(ctx, session, mapped, progress)
 	}
+	efforts(progress)
 	progress.Status("Working out the change...")
 	outcome, err := session.work(ctx, progress)
 	// The whole-file fallback is for a model that ran out of room, not
@@ -397,12 +453,17 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 		}
 		callCtx, cancel := context.WithTimeout(ctx, produceTimeout)
 		started := time.Now()
-		response, err := session.create(callCtx, responseRequest{
+		request := responseRequest{
 			Instructions: session.instructions(),
 			Input:        input,
 			Tools:        session.tools(),
 			ToolChoice:   "auto",
-		}, progress)
+		}
+		if effort := session.roundEffort(); effort != "" {
+			request.Reasoning = &reasoningConfig{Effort: effort}
+		}
+		session.lastEffort = session.roundEffort()
+		response, err := session.create(callCtx, request, progress)
 		spent := time.Since(started)
 		cancel()
 		runner.profile.record(StepThink, spent)
@@ -416,6 +477,11 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 		progress.Log("  thought · " + formatDuration(spent))
 
 		calls := response.calls()
+		if len(calls) > 0 || !response.cutOff() {
+			session.cutOffs = 0
+		} else if err := session.cutOff(ctx, progress); err != nil {
+			return Outcome{}, err
+		}
 		if len(calls) == 0 {
 			reply, err := response.text()
 			if !session.prefetched && response.cutOff() && err == nil {
@@ -435,7 +501,7 @@ func (session *changeSession) work(ctx context.Context, progress Progress) (Outc
 				// an incomplete reply with empty text ended everything.
 				// Ask again, shorter, in the same conversation instead.
 				if response.cutOff() {
-					progress.Log("  reply was cut off, asking again...")
+					progress.Log("  reply was cut off, asking again" + session.effortNote() + "...")
 					session.report("Your last reply was cut off before it finished (you ran out of output room). " +
 						"Continue what you were doing, keeping this reply short: finish the tool call or message you started without repeating what is already above.")
 					continue
@@ -758,6 +824,59 @@ func (session *changeSession) partlyApplied(failure *repo.PatchError) string {
 	return message
 }
 
+// maxCutOffs is how many replies in a row may run out of output room
+// before the turn stops. Each one cost the run that prompted this 36
+// seconds and changed nothing; asking forever is not a strategy.
+const maxCutOffs = 3
+
+// cutOff counts a reply that ran out of output room with no tool call in
+// it, and asks for less reasoning from the next one. A model that spent
+// its allowance thinking thinks the same way when asked again unchanged.
+func (session *changeSession) cutOff(ctx context.Context, progress Progress) error {
+	session.cutOffs++
+	if session.cutOffs > maxCutOffs {
+		message := fmt.Sprintf("the model ran out of output room %d times in a row without producing a reply", session.cutOffs)
+		if len(session.applied) > 0 {
+			message += "; edits already applied to " + strings.Join(session.applied, ", ") + " were kept"
+		}
+		return errors.New(message)
+	}
+	if lower := session.writerClient().lowerEffort(ctx, session.lastEffort); lower != "" {
+		session.effort = lower
+	}
+	return nil
+}
+
+// roundEffort is the reasoning effort for the next request. A round with
+// no file in front of the model yet is choosing what to read, and needs
+// none of the reasoning the change itself does. After that it is the
+// effort chosen for the task, unless a cut-off has asked for less.
+func (session *changeSession) roundEffort() string {
+	if session.effort != "" {
+		return session.effort
+	}
+	if len(session.runner.served) == 0 {
+		return session.runner.exploreEffort
+	}
+	return session.runner.taskEffort
+}
+
+// effortNote is the trail's mention of a lowered reasoning effort.
+func (session *changeSession) effortNote() string {
+	if session.effort == "" {
+		return ""
+	}
+	return " with reasoning effort " + session.effort
+}
+
+// writerClient is the client this session's requests go to.
+func (session *changeSession) writerClient() *Client {
+	if session.writer != nil {
+		return session.writer
+	}
+	return session.runner.client
+}
+
 func (session *changeSession) editBudgetFeedback() string {
 	return fmt.Sprintf("\nRemaining edit calls this turn: %d. Rejected calls also use the edit budget.",
 		max(0, toolQuota["apply_diff"]-session.used["apply_diff"]))
@@ -1003,6 +1122,13 @@ type changeSession struct {
 	complete bool
 	// used counts calls per tool, against toolQuota.
 	used map[string]int
+	// effort overrides the round's reasoning effort once a reply runs out
+	// of room, for the rest of the turn; "" until one does.
+	effort string
+	// lastEffort is what the latest request asked for, "" for the default.
+	lastEffort string
+	// cutOffs counts replies in a row that ran out of room with no call.
+	cutOffs int
 }
 
 // maxRounds bounds the whole conversation; toolQuota bounds each tool

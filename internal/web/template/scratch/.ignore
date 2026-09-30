@@ -1,0 +1,4 @@
+# Hidden from search (ripgrep reads this file); git still tracks it. A
+# lockfile answers no question about the app, and its lines drown out
+# real matches for anything like "/api" or a package name.
+package-lock.json

@@ -11,15 +11,15 @@ frontend/          Vite + React + Tailwind v4
 
 backend/           Express + Drizzle + better-sqlite3
   index.ts         app + routes
-  db.ts            schema + client (one file, both)
-  data.db          gitignored, created on first run
+  db.ts            schema + client; each table also has its CREATE TABLE there
+  data.db          gitignored, created when db.ts is first imported
 
 scripts/           start.sh, restart.sh, stop.sh — the standard interface;
                    the UI's buttons and a person by hand both just run these
 components.json    shadcn config: Tailwind v4, "@/*" aliases -> frontend/src
 ```
 
-Ports: frontend 5173 (served through yolocoder's proxy, not directly),
+Ports: frontend 5173 (set in vite.config.ts; served through yolocoder's proxy, not directly),
 backend 3001 (only reached via the frontend's `/api` proxy).
 
 State: `.yolocoder/web/` (gitignored) — `server.pid`, `server.log`, `port`.

@@ -1,6 +1,14 @@
 node_modules
 dist
 data.db
+*.db-journal
+*.db-wal
+*.db-shm
 .yolocoder
 *.log
 .env
+.env.*
+!.env.example
+*.tsbuildinfo
+coverage
+.DS_Store

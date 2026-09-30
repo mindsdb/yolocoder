@@ -16,6 +16,11 @@ export const notes = sqliteTable("notes", {
 const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "data.db");
 
 const sqlite = new Database(dbPath);
+
+// Each table is written twice: once above for Drizzle's types and queries,
+// and once below as the SQL that creates it. Nothing runs drizzle-kit on
+// start, so a table added above and not here does not exist at runtime,
+// and the type check cannot tell. Add, rename or change a column in both.
 sqlite.exec(`
   CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

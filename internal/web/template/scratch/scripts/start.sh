@@ -19,10 +19,11 @@ fi
 nohup node_modules/.bin/tsx watch backend/index.ts >> .yolocoder/web/server.log 2>&1 &
 api_pid=$!
 
-nohup node_modules/.bin/vite --config frontend/vite.config.ts --port 5173 --strictPort >> .yolocoder/web/server.log 2>&1 &
+nohup node_modules/.bin/vite --config frontend/vite.config.ts >> .yolocoder/web/server.log 2>&1 &
 web_pid=$!
 
 printf '%s\n%s\n' "$web_pid" "$api_pid" > .yolocoder/web/server.pid
+# The port is set in frontend/vite.config.ts; this must match it.
 echo 5173 > .yolocoder/web/port
 
 echo "started (web pid $web_pid, api pid $api_pid, port 5173)"

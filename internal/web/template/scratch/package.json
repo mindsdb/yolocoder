@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev:client": "vite --config frontend/vite.config.ts --port 5173 --strictPort",
+    "dev:client": "vite --config frontend/vite.config.ts",
     "dev:server": "tsx watch backend/index.ts",
     "build": "vite build --config frontend/vite.config.ts",
     "test": "tsc --noEmit",

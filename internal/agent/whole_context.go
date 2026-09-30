@@ -92,17 +92,10 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 // are deliberately outside the set. Other formats remain available to normal
 // model-requested reads.
 func wholeContextPath(path string) bool {
-	parts := strings.Split(path, "/")
-	for _, dir := range parts[:len(parts)-1] {
-		switch dir {
-		case ".git", ".yolocoder", "node_modules", "vendor", "dist", "build", ".next", ".nuxt", "target", "__pycache__", ".venv", "venv", ".cache", ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".tox":
-			return false
-		}
-	}
-	name := strings.ToLower(parts[len(parts)-1])
-	if strings.HasSuffix(name, ".lock") || strings.Contains(name, "-lock.") || name == "lock.json" || strings.Contains(name, ".min.") {
+	if generatedPath(path) {
 		return false
 	}
+	name := strings.ToLower(path[strings.LastIndex(path, "/")+1:])
 	switch name {
 	case ".gitignore", ".gitattributes", ".editorconfig":
 		return true
@@ -112,6 +105,21 @@ func wholeContextPath(path string) bool {
 		return true
 	}
 	return false
+}
+
+// generatedPath is a file no one writes by hand: dependencies, build output,
+// caches, lockfiles and minified bundles. Their contents are what a tool
+// produced, so they answer no question about the project and can be huge.
+func generatedPath(path string) bool {
+	parts := strings.Split(path, "/")
+	for _, dir := range parts[:len(parts)-1] {
+		switch dir {
+		case ".git", ".yolocoder", "node_modules", "vendor", "dist", "build", ".next", ".nuxt", "target", "__pycache__", ".venv", "venv", ".cache", ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".tox":
+			return true
+		}
+	}
+	name := strings.ToLower(parts[len(parts)-1])
+	return strings.HasSuffix(name, ".lock") || strings.Contains(name, "-lock.") || name == "lock.json" || strings.Contains(name, ".min.")
 }
 
 // The rooted handle prevents reads from escaping the project. Reject symlinks

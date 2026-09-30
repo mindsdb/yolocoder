@@ -1227,6 +1227,26 @@ func (runner *Runner) filesBehind(output string) string {
 	if len(fresh) == 0 || len(fresh) > maxSearchFiles {
 		return ""
 	}
+	// A lockfile or bundle that happens to match is not what the search was
+	// for, and a large file costs its size again on every round after. One
+	// search for "/api" matched a line of package-lock.json and attached all
+	// 179 KB of it, which made each of the turn's later requests five times
+	// the size it needed to be. Such files stay in the match list above.
+	total := 0
+	fresh = slices.DeleteFunc(fresh, func(path string) bool {
+		if generatedPath(path) {
+			return true
+		}
+		content, err := runner.repository.ReadFile(path)
+		if err != nil || len(content) > maxSearchFileBytes || total+len(content) > maxSearchFilesBytes {
+			return true
+		}
+		total += len(content)
+		return false
+	})
+	if len(fresh) == 0 {
+		return ""
+	}
 	text, err := runner.readFiles(fresh)
 	if err != nil {
 		// Too large to be worth it, unreadable, whatever it was: the
@@ -1242,6 +1262,14 @@ func (runner *Runner) filesBehind(output string) string {
 // maxSearchFiles is how many files a search may hand back with it. Past
 // this the search did not narrow anything and the list is the answer.
 const maxSearchFiles = 4
+
+// maxSearchFileBytes and maxSearchFilesBytes bound what a search hands back
+// unasked: a file past the first, or the set past the second, is left for
+// the model to read if it actually wants it.
+const (
+	maxSearchFileBytes  = 32 << 10
+	maxSearchFilesBytes = 64 << 10
+)
 
 // searchPaths are the distinct files named in ripgrep output, in the
 // order they first appear. Lines are "path:line:text"; anything without

@@ -85,3 +85,20 @@ func TestASearchWithNoMatchesHandsBackNothing(t *testing.T) {
 		t.Fatalf("got %q", answer)
 	}
 }
+
+// A lockfile that happens to match, or a file too big to be worth
+// resending every round, stays in the match list and is not attached.
+func TestASearchDoesNotAttachLockfilesOrLargeFiles(t *testing.T) {
+	runner := folderWith(t, map[string]string{
+		"vite.config.ts":    "proxy: { \"/api\": \"http://localhost:3001\" }\n",
+		"package-lock.json": "\"@opentelemetry/api\": \"^1.4.1\"\n" + strings.Repeat("{}\n", 1000),
+		"big.ts":            "// /api\n" + strings.Repeat("x", maxSearchFileBytes),
+	})
+	answer := runner.filesBehind("vite.config.ts:1:proxy\npackage-lock.json:1:api\nbig.ts:1:// /api\n")
+	if !strings.Contains(answer, "--- vite.config.ts ---") || !strings.Contains(answer, "in 1 file") {
+		t.Fatalf("the small source file should still be attached:\n%s", answer)
+	}
+	if strings.Contains(answer, "package-lock.json") || strings.Contains(answer, "big.ts") {
+		t.Fatalf("attached a lockfile or an oversized file:\n%.300s", answer)
+	}
+}

@@ -65,7 +65,7 @@ func (session *changeSession) tools() []functionTool {
 				tools[i].Description = "Read current repository files needed to resolve a concrete uncertainty in the user's task. Reuse source already supplied by read_files; batch needed unread or changed files. Use matching for a contents pattern alongside known paths; leave it empty when all paths are known."
 			}
 			if tools[i].Name == "apply_diff" {
-				tools[i].Description = "Apply a compact patch. Nothing is written unless every edit can be placed. Set task_complete=true only when this edit completes the entire request and is your final tool call; the project check still runs. Set false while work remains. response_comment_for_user may be empty and does not determine completion."
+				tools[i].Description = "Apply a compact patch. A file is written only when every edit to it places; files that do place are written even when another file's edits fail. Set task_complete=true only when this edit completes the entire request and is your final tool call; the project check still runs. Set false while work remains. response_comment_for_user may be empty and does not determine completion."
 				properties := tools[i].Parameters["properties"].(map[string]any)
 				properties["task_complete"] = map[string]any{"type": "boolean"}
 				tools[i].Parameters["required"] = []string{"patch", "response_comment_for_user", "task_complete"}

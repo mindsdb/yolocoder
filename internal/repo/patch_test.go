@@ -613,21 +613,49 @@ func TestOnePassReportsEveryEditThatCannotBePlaced(t *testing.T) {
 	}
 }
 
-func TestNothingIsWrittenWhenAnyEditFails(t *testing.T) {
+func TestOnlyFilesWhoseEditsAllPlaceAreWritten(t *testing.T) {
 	repository := threeFiles(t)
-	// The first edit is perfectly good; the second is not. Neither lands.
+	// The first file's edit is perfectly good; the second's is not. The
+	// first lands, the second's file is left as it was.
 	patch := "--- a/app.tsx\n+++ b/app.tsx\n@@\n const a = 1;\n-const board = useState(empty());\n+const board = useState(fresh());\n const c = 3;\n" +
 		"--- a/main.css\n+++ b/main.css\n@@\n-  --bg: #001933;\n+  --bg: #123456;\n"
+	before, _ := os.ReadFile(filepath.Join(repository.Root, "main.css"))
 
-	if err := repository.Apply(patch); err == nil {
-		t.Fatal("the patch should be refused")
+	err := repository.Apply(patch)
+	var failure *PatchError
+	if !errors.As(err, &failure) || len(failure.Applied) != 1 || failure.Applied[0] != "app.tsx" {
+		t.Fatalf("want app.tsx applied and main.css refused, got %v", err)
 	}
-	content, err := os.ReadFile(filepath.Join(repository.Root, "app.tsx"))
-	if err != nil {
+	content, _ := os.ReadFile(filepath.Join(repository.Root, "app.tsx"))
+	if !strings.Contains(string(content), "fresh()") {
+		t.Fatalf("the placeable edit was held back:\n%s", content)
+	}
+	if after, _ := os.ReadFile(filepath.Join(repository.Root, "main.css")); string(after) != string(before) {
+		t.Fatalf("the refused file changed:\n%s", after)
+	}
+}
+
+func TestAFileWithAnyFailedEditIsNotWritten(t *testing.T) {
+	repository := project(t, map[string]string{"a.ts": "one\ntwo\n"})
+	err := repository.Apply("@a.ts\n-one\n+uno\n\n-three\n+tres\n")
+	var failure *PatchError
+	if !errors.As(err, &failure) || len(failure.Applied) != 0 || read(t, repository, "a.ts") != "one\ntwo\n" {
+		t.Fatalf("err=%v content=%q", err, read(t, repository, "a.ts"))
+	}
+}
+
+func TestResendingALandedEditIsNotAppliedTwice(t *testing.T) {
+	repository := project(t, map[string]string{"a.ts": "anchor\nend\n", "b.ts": "old\n"})
+	patch := "@a.ts\n anchor\n+inserted\n\n@b.ts\n-old\n+new\n"
+	if err := repository.Apply(patch); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(content), "fresh()") {
-		t.Fatalf("the placeable edit was written even though the patch failed:\n%s", content)
+	// The whole patch again, plus a real edit: only the real edit changes anything.
+	if err := repository.Apply(patch + "\n@a.ts\n-end\n+fin\n"); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, repository, "a.ts") != "anchor\ninserted\nfin\n" || read(t, repository, "b.ts") != "new\n" {
+		t.Fatalf("a=%q b=%q", read(t, repository, "a.ts"), read(t, repository, "b.ts"))
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -353,7 +354,7 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 	// it just asked for. Running out of rounds or out of apply_diff calls
 	// is the opposite: no decision was reached, and the conversation
 	// already knows everything the rewrite needs.
-	outOfEdits := err == nil && !outcome.Applied && session.used["apply_diff"] >= toolQuota["apply_diff"]
+	outOfEdits := err == nil && (!outcome.Applied || len(session.unplaced) > 0) && session.used["apply_diff"] >= toolQuota["apply_diff"]
 	stuck := len(session.attempted) > 0 && (outOfEdits || errors.Is(err, errOutOfRounds))
 	if stuck {
 		return runner.rewriteInstead(ctx, task, session, mapped, images, progress)
@@ -681,6 +682,10 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string, bo
 		}
 		session.lastFailure = err
 		session.recordFailure(patch, err)
+		if failure != nil && len(failure.Applied) > 0 {
+			return session.partlyApplied(failure) + "\n\n" + err.Error() + session.staleContents(err),
+				append([]string{"applied " + strings.Join(failure.Applied, ", ")}, repo.Explain(err)...), false
+		}
 		message := "The patch did not apply and nothing was changed."
 		if !session.prefetched {
 			message = "The patch failed."
@@ -696,6 +701,7 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string, bo
 			repo.Explain(err), false
 	}
 	changed := repo.PatchPaths(patch)
+	session.unplaced = slices.DeleteFunc(session.unplaced, func(path string) bool { return slices.Contains(changed, path) })
 	// Recorded only now, after the edit actually landed: a note left on a
 	// patch that could not be placed would end the turn on a promise.
 	// Said plainly, because the alternative is what happened on the first
@@ -708,6 +714,29 @@ func (session *changeSession) applyDiff(call responseItem) (string, []string, bo
 		output += session.editBudgetFeedback()
 	}
 	return output, nil, true
+}
+
+// partlyApplied records the files a failed patch wrote anyway and tells
+// the model to resend only the rest. Without saying so plainly, a repair
+// resends the whole patch, and the files that landed then fail as edits
+// against lines they no longer contain.
+func (session *changeSession) partlyApplied(failure *repo.PatchError) string {
+	var failed []string
+	for _, one := range failure.Failures {
+		failed = appendUnique(failed, one.Path)
+		session.unplaced = appendUnique(session.unplaced, one.Path)
+	}
+	for _, path := range failure.Applied {
+		session.applied = appendUnique(session.applied, path)
+		session.unplaced = slices.DeleteFunc(session.unplaced, func(other string) bool { return other == path })
+	}
+	message := "Part of the patch applied. Written now, with every edit for them in place: " +
+		strings.Join(failure.Applied, ", ") + ". Do not resend or re-read those files. " +
+		"Not applied: " + strings.Join(failed, ", ") + ". Resend only the edits for those files, fixed as below."
+	if !session.prefetched {
+		message += session.editBudgetFeedback()
+	}
+	return message
 }
 
 func (session *changeSession) editBudgetFeedback() string {
@@ -765,7 +794,11 @@ func (session *changeSession) staleContents(err error) string {
 // landing an edit, so the files it was trying to patch are asked for
 // whole instead of in pieces.
 func (runner *Runner) rewriteInstead(ctx context.Context, task string, session *changeSession, mapped []string, images []string, progress Progress) (Outcome, error) {
-	targets := rewriteTargets(session.attempted, session.readPaths, mapped)
+	named := session.attempted
+	if len(session.unplaced) > 0 {
+		named = session.unplaced
+	}
+	targets := rewriteTargets(named, session.readPaths, mapped)
 	if len(targets) == 0 {
 		return Outcome{Profile: runner.profile}, fmt.Errorf("no edit would apply and there was no file to rewrite")
 	}
@@ -810,7 +843,11 @@ func (runner *Runner) rewriteInstead(ctx context.Context, task string, session *
 	if summary == "" {
 		summary = "Rewrote " + strings.Join(targets, ", ")
 	}
-	return Outcome{Reply: summary, Coding: true, Files: targets, Applied: true, Attempts: session.used["apply_diff"], Rewrote: true, Usage: runner.usage, Profile: runner.profile}, nil
+	files := slices.Clone(session.applied)
+	for _, path := range targets {
+		files = appendUnique(files, path)
+	}
+	return Outcome{Reply: summary, Coding: true, Files: files, Applied: true, Attempts: session.used["apply_diff"], Rewrote: true, Usage: runner.usage, Profile: runner.profile}, nil
 }
 
 func appendUnique(list []string, value string) []string {
@@ -934,6 +971,10 @@ type changeSession struct {
 	applied     []string
 	attempted   []string
 	lastFailure error
+	// unplaced are files a partly applied patch could not edit and no
+	// later edit has landed in. Running out of edits with any left is
+	// being stuck, even though other files did change.
+	unplaced []string
 	// closing is the note the model left with an edit it called its last.
 	// Set only by an edit that actually applied, so a failed one cannot
 	// end the turn on a promise.
@@ -1492,7 +1533,7 @@ func repositoryTools(recall bool) []functionTool {
 		// patch is named first, and required first, so a long comment
 		// cannot spend the output room the patch needs — which is the
 		// failure a summary field written ahead of a diff used to cause.
-		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. Nothing is written unless every edit in it can be placed. On your last edit, put your closing note to the user in response_comment_for_user and the turn ends there; leave it empty while you still have work to do.", Strict: true, Parameters: map[string]any{
+		{Type: "function", Name: "apply_diff", Description: "Apply edits to the repository, as a patch in the compact format. A file is written only when every edit to it places; files that do place are written even when another file's edits fail, and the result names which. On your last edit, put your closing note to the user in response_comment_for_user and the turn ends there; leave it empty while you still have work to do.", Strict: true, Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"patch":                     map[string]any{"type": "string"},

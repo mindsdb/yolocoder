@@ -69,8 +69,9 @@ func TestCompactAnchorContractRefusalAndRepairAreAtomic(t *testing.T) {
 				"settings.txt": test.before,
 				"other.txt":    "old\n",
 			})
-			// A later placement failure must not land either an earlier valid
-			// replacement or a staged new file in the same patch.
+			// A placement failure leaves its own file untouched, while the other
+			// files in the patch, whose edits all placed, are written. Resending
+			// the whole patch after that still lands: their edits are in place.
 			const prefix = "@other.txt\n-old\n+changed\n@+notes.txt\nNotes\n+ literal plus\n"
 			err := repository.Apply(prefix + test.refused)
 			var failure *PatchError
@@ -80,11 +81,14 @@ func TestCompactAnchorContractRefusalAndRepairAreAtomic(t *testing.T) {
 			if got := read(t, repository, "settings.txt"); got != test.before {
 				t.Fatalf("rejected target changed: %q", got)
 			}
-			if got := read(t, repository, "other.txt"); got != "old\n" {
-				t.Fatalf("earlier edit landed despite rejection: %q", got)
+			if got := read(t, repository, "other.txt"); got != "changed\n" {
+				t.Fatalf("placed edit was held back: %q", got)
 			}
-			if _, err := os.Stat(filepath.Join(repository.Root, "notes.txt")); !os.IsNotExist(err) {
-				t.Fatalf("new file exists after rejection: %v", err)
+			if _, err := os.Stat(filepath.Join(repository.Root, "notes.txt")); err != nil {
+				t.Fatalf("placed new file was held back: %v", err)
+			}
+			if len(failure.Applied) != 2 || failure.Applied[0] != "other.txt" || failure.Applied[1] != "notes.txt" {
+				t.Fatalf("applied = %v", failure.Applied)
 			}
 			if err := repository.Apply(prefix + test.repaired); err != nil {
 				t.Fatal(err)

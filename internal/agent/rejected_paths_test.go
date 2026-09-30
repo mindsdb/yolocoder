@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -24,13 +25,14 @@ func TestRejectedPathsPreservesBatchAndEarlierEdits(t *testing.T) {
 	output, _, ok := session.runTool(ctx, feedbackCall(t, editsAndFinishes("bad", patch, "Premature completion.")))
 	store, _ := repository.ReadFile("store.txt")
 	view, _ := repository.ReadFile("view.txt")
-	if ok || store != "saved\n" || view != "old\n" || session.used["apply_diff"] != 2 || session.complete || session.closing != "" {
-		t.Fatalf("batch/earlier edit changed: output=%s store=%q view=%q used=%d", output, store, view, session.used["apply_diff"])
+	// store.txt's edits all placed, so it lands; view.txt's did not, so it
+	// stays. Completion is still refused while anything is unplaced.
+	if ok || store != "extra\nfinal\n" || view != "old\n" || session.used["apply_diff"] != 2 || session.complete || session.closing != "" {
+		t.Fatalf("partial batch misapplied: output=%s store=%q view=%q used=%d", output, store, view, session.used["apply_diff"])
 	}
-	if !strings.Contains(output, "earlier accepted edits were not rolled back") ||
-		!strings.Contains(output, "\n- \"store.txt\"\n- \"view.txt\" [placement error]\n") ||
-		strings.Count(output, "\n- \"store.txt\"") != 1 {
-		t.Fatalf("batch paths, classification, order or dedup lost: %s", output)
+	if !strings.Contains(output, "in place: store.txt.") || !strings.Contains(output, "Not applied: view.txt.") ||
+		!slices.Equal(session.unplaced, []string{"view.txt"}) {
+		t.Fatalf("landed and unplaced files not told apart: %s unplaced=%v", output, session.unplaced)
 	}
 	assertRemainingEdits(t, output, 2)
 }
@@ -52,8 +54,8 @@ func TestRejectedPathsReachRepairRequestBeforeRealCheck(t *testing.T) {
 		t.Fatalf("repair/check sequence changed: outcome=%+v err=%v requests=%d checks=%q", outcome, err, len(*seen), checked)
 	}
 	output := feedbackResult(t, (*seen)[1]["input"], "bad")
-	if !strings.Contains(output, "\n- \"store.txt\"\n- \"view.txt\" [placement error]\n") || !strings.Contains(output, "Unmarked paths were not applied either") {
-		t.Fatalf("outgoing request lost unlanded companion evidence: %s", output)
+	if !strings.Contains(output, "in place: store.txt.") || !strings.Contains(output, "Not applied: view.txt.") {
+		t.Fatalf("outgoing request does not say what landed: %s", output)
 	}
 	assertRemainingEdits(t, output, 3)
 	assertCompletionSchema(t, (*seen)[1]["tools"], true)

@@ -3,6 +3,7 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -66,6 +67,9 @@ func (failure *HunkError) Summary() []string {
 // still beat one exact one when each costs a round trip.
 type PatchError struct {
 	Failures []*HunkError
+	// Applied are the files this patch wrote anyway, because every edit
+	// for them placed. Empty means nothing was written.
+	Applied []string
 }
 
 // trailLimit is how many failures the progress trail shows before saying
@@ -395,7 +399,8 @@ func (repository *Repository) applyByContent(patch string) error {
 		return err
 	}
 	// Work out every file's new contents before writing anything, so a
-	// failure on the second file doesn't leave the first one changed.
+	// failed edit never leaves its own file half changed. Files whose
+	// edits all placed are still written; see writePlaced.
 	updated := make(map[string]string, len(patches))
 	// originals is what each file said before, so a patch that places
 	// perfectly and changes nothing can be told apart from one that did
@@ -440,7 +445,11 @@ func (repository *Repository) applyByContent(patch string) error {
 	// on it, so a patch that validates here cannot then fail to apply.
 	if len(failures) > 0 {
 		misrouted(failures, originals)
-		return &PatchError{Failures: failures}
+		applied, err := repository.writePlaced(patches, failures, updated, originals)
+		if err != nil {
+			return err
+		}
+		return &PatchError{Failures: failures, Applied: applied}
 	}
 	if len(updated) == 0 {
 		return fmt.Errorf("patch changed nothing")
@@ -465,12 +474,77 @@ func (repository *Repository) applyByContent(patch string) error {
 	return nil
 }
 
+// writePlaced writes the files in a failed patch whose every edit placed.
+// Holding them back made each repair resend them: a run rewrote a whole
+// backend file four times over, correctly each time, because edits to two
+// other files would not place — and spent its edit budget before ever
+// getting to those. A file with any failed edit is left exactly as it was.
+func (repository *Repository) writePlaced(patches []filePatch, failures []*HunkError, updated, originals map[string]string) ([]string, error) {
+	failed := make(map[string]bool, len(failures))
+	for _, failure := range failures {
+		failed[failure.Path] = true
+	}
+	var applied []string
+	for _, file := range patches {
+		content, touched := updated[file.path]
+		if !touched || failed[file.path] || content == originals[file.path] || slices.Contains(applied, file.path) {
+			continue
+		}
+		if err := repository.Write(file.path, content); err != nil {
+			return applied, err
+		}
+		applied = append(applied, file.path)
+	}
+	return applied, nil
+}
+
 // applyHunks places every hunk it can and reports every one it cannot.
 // A hunk that fails is skipped rather than aborting the pass, so the rest
 // are still checked against the content as it stands — which is what lets
 // one validation pass find every problem in the patch.
 // changesNothing reports a hunk that would write the file back exactly
 // as it found it.
+// alreadyInPlace reports an edit the file already contains: its after
+// lines sit, exactly and once, where its before lines would be. Since the
+// files of a failed patch that did place are written, a repair that
+// resends the whole patch anyway carries edits that have landed. Taking
+// them again would fail a replacement, whose old lines are gone, and
+// double an insertion, whose anchor is still there.
+//
+// Only an edit that adds something counts. One that only removes would
+// read as in place whenever its context survives, including when its
+// removed lines were simply copied wrong.
+func alreadyInPlace(lines []string, current hunk) bool {
+	if len(current.ops) == 0 && len(current.before) == 0 && len(current.after) > 0 {
+		// A created file's contents, resent after it was created: in
+		// place only when they are the whole file, not merely inside it.
+		trim := func(block []string) string { return strings.TrimRight(strings.Join(block, "\n"), "\n") }
+		return trim(lines) == trim(current.after)
+	}
+	adds := false
+	for _, op := range current.ops {
+		adds = adds || op.kind == '+'
+	}
+	if !adds {
+		return false
+	}
+	exact := func(a, b string) bool { return a == b }
+	at := findAll(lines, current.after, exact)
+	if len(at) != 1 {
+		return false
+	}
+	befores := findAll(lines, current.before, exact)
+	if len(befores) == 0 {
+		return true
+	}
+	for _, start := range befores {
+		if start >= at[0] && start+len(current.before) <= at[0]+len(current.after) {
+			return true
+		}
+	}
+	return false
+}
+
 func changesNothing(current hunk) bool {
 	if len(current.before) != len(current.after) || len(current.before) == 0 {
 		return false
@@ -497,7 +571,7 @@ func applyHunks(content string, hunks []hunk) (string, []*HunkError) {
 		// thrown away with it. Twice more, because the repair then
 		// invented context trying to disambiguate something that was
 		// never an edit.
-		if changesNothing(current) {
+		if changesNothing(current) || alreadyInPlace(lines, current) {
 			continue
 		}
 		if len(current.before) == 0 {

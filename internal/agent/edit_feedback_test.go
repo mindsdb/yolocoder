@@ -60,12 +60,12 @@ func assertRemainingEdits(t *testing.T, output string, remaining int) {
 // multi-file patch whose placeable half must not overwrite an earlier success.
 // A later accepted completion still has to survive the detected project check.
 func TestEditFeedbackPreservesEarlierSuccessThroughRepairAndCheck(t *testing.T) {
-	check := `node -e "const fs=require('fs');const state=[fs.readFileSync('store.txt','utf8').trim(),fs.readFileSync('view.txt','utf8').trim()];fs.appendFileSync('checked',JSON.stringify(state)+'\n');process.exitCode=state[0]==='saved'&&state[1]==='good'?0:1"`
+	check := `node -e "const fs=require('fs');const state=[fs.readFileSync('store.txt','utf8').trim(),fs.readFileSync('view.txt','utf8').trim()];fs.appendFileSync('checked',JSON.stringify(state)+'\n');process.exitCode=state[0]==='final'&&state[1]==='good'?0:1"`
 	pkg, _ := json.Marshal(map[string]any{"scripts": map[string]string{"test": check}})
 	repository := folder(t, map[string]string{"store.txt": "old\n", "view.txt": "old\n", "package.json": string(pkg)})
 	server, seen := scripted(t,
 		edits("save", "@store.txt\n-old\n+saved\n"),
-		editsAndFinishes("reject", "@store.txt\n-saved\n+overwritten\n\n@view.txt\n-absent\n+good\n", "Premature completion."),
+		editsAndFinishes("reject", "@store.txt\n-saved\n+final\n\n@view.txt\n-absent\n+good\n", "Premature completion."),
 		editsAndFinishes("repair", "@view.txt\n-old\n+bad\n", "Check must reject this."),
 		editsAndFinishes("finish", "@view.txt\n-bad\n+good\n", "Both parts complete."),
 	)
@@ -76,7 +76,7 @@ func TestEditFeedbackPreservesEarlierSuccessThroughRepairAndCheck(t *testing.T) 
 	outcome, err := session.work(context.Background(), progress)
 	server.Close()
 	checked, _ := os.ReadFile(filepath.Join(repository.Root, "checked"))
-	wantChecked := "[\"saved\",\"bad\"]\n[\"saved\",\"good\"]\n"
+	wantChecked := "[\"final\",\"bad\"]\n[\"final\",\"good\"]\n"
 	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
 		wantChecked = "[\"saved\",\"old\"]\n" + wantChecked // Earlier diagnostic does not replace final repair.
 	}
@@ -92,8 +92,10 @@ func TestEditFeedbackPreservesEarlierSuccessThroughRepairAndCheck(t *testing.T) 
 	// merely to transmit its remaining-zero feedback after checked completion.
 	assertRemainingEdits(t, feedbackResult(t, session.transcript, "finish"), 0)
 	rejected := feedbackResult(t, (*seen)[2]["input"], "reject")
-	if !strings.Contains(rejected, "this call") || !strings.Contains(rejected, "earlier accepted edits") {
-		t.Fatalf("rejection loses the scope of its rollback claim: %s", rejected)
+	// The file whose edit placed landed; only the one that did not is asked for again.
+	if !strings.Contains(rejected, "Part of the patch applied") || !strings.Contains(rejected, "in place: store.txt.") ||
+		!strings.Contains(rejected, "Not applied: view.txt.") {
+		t.Fatalf("partial rejection does not say what landed: %s", rejected)
 	}
 	logs := strings.Join(progress.logs, "\n")
 	if strings.Count(logs, "diagnostic checkpoint:") != 1 || strings.Count(logs, "check failed, back to it") != 1 || strings.Count(logs, "check passed") != 1 || session.used["read_files"] != 0 {

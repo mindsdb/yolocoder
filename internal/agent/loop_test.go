@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -283,7 +284,7 @@ func TestTheOutcomeReportsWhatLandedNotWhatWasClaimed(t *testing.T) {
 	}
 }
 
-func TestNothingLandsWhenOneEditInAPatchCannotBePlaced(t *testing.T) {
+func TestThePlaceableFileLandsWhenAnotherCannotBePlaced(t *testing.T) {
 	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n", "b.ts": "const y = 2;\n"})
 	server, _ := scripted(t,
 		edits("c1", "@a.ts\n-const x = 1;\n+const x = 9;\n\n@b.ts\n-const y = 99;\n+const y = 8;\n"),
@@ -295,12 +296,13 @@ func TestNothingLandsWhenOneEditInAPatchCannotBePlaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.Applied {
-		t.Fatalf("outcome = %+v, want nothing applied", outcome)
+	if !outcome.Applied || len(outcome.Files) != 1 || outcome.Files[0] != "a.ts" {
+		t.Fatalf("outcome = %+v, want a.ts applied", outcome)
 	}
-	content, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
-	if string(content) != "const x = 1;\n" {
-		t.Fatalf("the placeable half was written anyway: %q", content)
+	a, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
+	b, _ := os.ReadFile(filepath.Join(repository.Root, "b.ts"))
+	if string(a) != "const x = 9;\n" || string(b) != "const y = 2;\n" {
+		t.Fatalf("a=%q b=%q", a, b)
 	}
 }
 
@@ -356,6 +358,39 @@ func TestEditsThatNeverLandFallBackToWholeFiles(t *testing.T) {
 	}
 	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "wrote a.ts") {
 		t.Fatalf("the trail should say the file was written whole:\n%s", trail)
+	}
+}
+
+func TestAFileLeftUnplacedIsRewrittenAloneWhenEditsRunOut(t *testing.T) {
+	repository := folder(t, map[string]string{"a.ts": "const x = 1;\n", "b.ts": "const y = 2;\n"})
+	var rewritten []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		writer.Header().Set("Content-Type", "application/json")
+		if schemaName(body) == "file_rewrite" {
+			encoded, _ := json.Marshal(body)
+			rewritten = append(rewritten, string(encoded))
+			payload, _ := json.Marshal(Rewrite{Summary: "Rewrote b.ts", Content: "const y = 8;\n"})
+			fmt.Fprint(writer, finishes(string(payload)))
+			return
+		}
+		// a.ts places every time; b.ts never does.
+		fmt.Fprint(writer, edits("c", "@a.ts\n-const x = 1;\n+const x = 9;\n\n@b.ts\n-const y = 99;\n+const y = 8;\n"))
+	}))
+	defer server.Close()
+
+	outcome, _, err := run(t, repository, server, "update both")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(filepath.Join(repository.Root, "a.ts"))
+	b, _ := os.ReadFile(filepath.Join(repository.Root, "b.ts"))
+	if !outcome.Rewrote || string(a) != "const x = 9;\n" || string(b) != "const y = 8;\n" || len(rewritten) != 1 {
+		t.Fatalf("outcome=%+v a=%q b=%q rewrites=%d", outcome, a, b, len(rewritten))
+	}
+	if !slices.Equal(outcome.Files, []string{"a.ts", "b.ts"}) {
+		t.Fatalf("files = %v, want the landed file and the rewritten one", outcome.Files)
 	}
 }
 

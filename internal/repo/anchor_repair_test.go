@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestAnchorRepairRejectsWholeBatchThenPlacesRepair(t *testing.T) {
+func TestAnchorRepairWritesTheCompanionThenPlacesRepair(t *testing.T) {
 	const original = "start\n  anchor\tvalue\nend\n"
 	for _, test := range []struct {
 		name, repair, want string
@@ -36,8 +36,11 @@ func TestAnchorRepairRejectsWholeBatchThenPlacesRepair(t *testing.T) {
 				!strings.Contains(one.Detail, "current file") || strings.Contains(one.Detail, "anchor\tvalue") {
 				t.Fatalf("missing or fabricated placement explanation: %q", one.Detail)
 			}
-			if read(t, repository, "target.txt") != original || read(t, repository, "companion.txt") != "old\n" {
-				t.Fatal("rejected batch wrote the target or its valid companion")
+			if read(t, repository, "target.txt") != original {
+				t.Fatal("rejected edit wrote its target")
+			}
+			if read(t, repository, "companion.txt") != "new\n" || len(failure.Applied) != 1 || failure.Applied[0] != "companion.txt" {
+				t.Fatalf("valid companion was not written: applied=%v", failure.Applied)
 			}
 			if err := repository.Apply(companion + "@target.txt\n" + test.repair + "\n"); err != nil {
 				t.Fatal(err)

@@ -106,6 +106,7 @@ func TestPreselectionRemovesTheCallThatOnlyPicked(t *testing.T) {
 	client := &Client{endpoint: model.URL, baseURL: decider.URL, apiKey: "k", model: "m", http: model.Client()}
 	runner := NewRunner(client, repository)
 	runner.UsePreselect(true)
+	runner.preloadWhole = false // Stands in for a project too big to send whole.
 	progress := &recordingProgress{}
 	outcome, err := runner.Run(context.Background(), "bump x", nil, nil, progress)
 	if err != nil {

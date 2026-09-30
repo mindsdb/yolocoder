@@ -231,6 +231,9 @@ type Runner struct {
 	// few turns of it ride along in the opening message; the rest is held
 	// here for the recall tool to serve, when that tool is offered at all.
 	earlier []Recollection
+	// preloadWhole sends a small enough project whole before the first
+	// round. On unless a test is exercising what happens without it.
+	preloadWhole bool
 	// preselect reports whether the files a task needs are chosen before
 	// the model is asked, rather than by it.
 	preselect bool
@@ -246,7 +249,7 @@ type Runner struct {
 }
 
 func NewRunner(client *Client, repository *repo.Repository) *Runner {
-	return &Runner{client: client, repository: repository, served: map[string]string{}, editRouterModel: editRouterModel, smallEditModel: smallEditModel}
+	return &Runner{client: client, repository: repository, served: map[string]string{}, preloadWhole: true, editRouterModel: editRouterModel, smallEditModel: smallEditModel}
 }
 
 // UseRecall offers (or withholds) the tool for reading further back than
@@ -328,10 +331,26 @@ func (runner *Runner) Run(ctx context.Context, task string, images []string, his
 
 	session := runner.newChangeSession(task, repoMap, notes, images)
 
+	// A project small enough to send whole is sent whole, before the model
+	// is asked anything: its first round would otherwise be spent asking
+	// to read files it could simply have been given, and choosing among
+	// them is not worth a call when all of them together cost less.
+	// The edit router makes the same attempt once it knows the route.
+	wholeProject := false
+	if runner.editRouterModel == "" && runner.preloadWhole {
+		started := time.Now()
+		wholeProject = runner.completeWholeContext(ctx, session, mapped)
+		runner.profile.record(StepTools, time.Since(started))
+		if wholeProject {
+			progress.Log(fmt.Sprintf("  read the whole project up front: %d files · %s",
+				len(session.readPaths), formatDuration(time.Since(started))))
+		}
+	}
+
 	// The files first, if that is switched on. It is an optimization and
 	// behaves like one: anything at all going wrong leaves the turn
 	// exactly as it was, with the model asking for what it wants.
-	if runner.editRouterModel == "" && runner.preselect {
+	if runner.editRouterModel == "" && runner.preselect && !wholeProject {
 		progress.Status("Choosing the files...")
 		started := time.Now()
 		chosen := runner.chooseFiles(ctx, task, mapped)

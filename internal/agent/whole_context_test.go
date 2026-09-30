@@ -197,10 +197,10 @@ func TestWholeContextBoundsCommitAllOrNothing(t *testing.T) {
 		used  int
 		want  bool
 	}{
-		{"exact_file_limit", map[string]string{"a.ts": strings.Repeat("x", 16000)}, 0, true},
-		{"file_over_limit", map[string]string{"a.ts": strings.Repeat("x", 16001)}, 0, false},
-		{"exact_framed_limit", map[string]string{"a.ts": strings.Repeat("x", 12000), "b.ts": strings.Repeat("y", 11972)}, 0, true},
-		{"framed_over_limit", map[string]string{"a.ts": strings.Repeat("x", 12000), "b.ts": strings.Repeat("y", 11973)}, 0, false},
+		{"exact_file_limit", map[string]string{"a.ts": strings.Repeat("x", wholeContextMaxFileBytes)}, 0, true},
+		{"file_over_limit", map[string]string{"a.ts": strings.Repeat("x", wholeContextMaxFileBytes+1)}, 0, false},
+		{"exact_framed_limit", map[string]string{"a.ts": strings.Repeat("x", 30000), "b.ts": strings.Repeat("y", wholeContextMaxBytes-30000-28)}, 0, true},
+		{"framed_over_limit", map[string]string{"a.ts": strings.Repeat("x", 30000), "b.ts": strings.Repeat("y", wholeContextMaxBytes-30000-27)}, 0, false},
 		{"invalid_utf8", map[string]string{"a.ts": "valid", "z.txt": "\xff"}, 0, false},
 		{"nul", map[string]string{"a.ts": "valid", "z.txt": "a\x00b"}, 0, false},
 		{"one_quota_left", map[string]string{"a.ts": "valid"}, 7, true},
@@ -223,7 +223,7 @@ func TestWholeContextBoundsCommitAllOrNothing(t *testing.T) {
 			}
 		})
 	}
-	for _, tc := range []struct{ count, used int }{{25, 0}, {13, 7}} {
+	for _, tc := range []struct{ count, used int }{{wholeContextMaxFiles + 1, 0}, {13, 7}} {
 		files := map[string]string{}
 		var paths []string
 		for i := range tc.count {
@@ -273,7 +273,7 @@ func TestWholeContextPreservesSmallUIAndRankedFallback(t *testing.T) {
 		t.Run(route, func(t *testing.T) {
 			files := map[string]string{"view.tsx": "export const title = 'Hello';", "package.json": "{}", "README.md": "useful project note"}
 			if route == "normal" {
-				files["README.md"] = strings.Repeat("x", 16001) // Whole context must fail closed.
+				files["README.md"] = strings.Repeat("x", wholeContextMaxFileBytes+1) // Whole context must fail closed.
 			}
 			repository := folder(t, files)
 			var mapped []string
@@ -300,5 +300,55 @@ func TestWholeContextPreservesSmallUIAndRankedFallback(t *testing.T) {
 				t.Fatal("small-UI/fallback read state or tools differ from existing prefetch")
 			}
 		})
+	}
+}
+
+// A small project is sent whole before the first round, so that round can
+// edit instead of asking to read; nothing is spent choosing files either.
+func TestASmallProjectIsSentWholeBeforeTheFirstRound(t *testing.T) {
+	repository := folder(t, map[string]string{
+		"a.ts":              "const x = 1;\n",
+		"b.ts":              "const y = 2;\n",
+		"package-lock.json": `{"lockfileVersion": 3}`,
+	})
+	model, seen := scripted(t, editsAndFinishes("c1", "@a.ts\n-const x = 1;\n+const x = 9;\n", "Bumped x."))
+	defer model.Close()
+	decided := false
+	decider := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { decided = true }))
+	defer decider.Close()
+
+	runner := NewRunner(&Client{endpoint: model.URL, baseURL: decider.URL, apiKey: "k", model: "m", http: model.Client()}, repository)
+	runner.UsePreselect(true)
+	progress := &recordingProgress{}
+	if _, err := runner.Run(context.Background(), "bump x", nil, nil, progress); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal((*seen)[0]["input"])
+	if len(*seen) != 1 || !strings.Contains(string(encoded), "const x = 1;") || !strings.Contains(string(encoded), "const y = 2;") {
+		t.Fatalf("the first request should already hold every file:\n%s", encoded)
+	}
+	if strings.Contains(string(encoded), "lockfileVersion") {
+		t.Fatal("a lockfile was sent with the project")
+	}
+	if decided {
+		t.Fatal("files were chosen for a project that was sent whole")
+	}
+	if trail := strings.Join(progress.logs, "\n"); !strings.Contains(trail, "read the whole project up front: 2 files") {
+		t.Fatalf("the trail should say the project was read up front:\n%s", trail)
+	}
+}
+
+func TestAProjectPastTheLimitIsLeftToTheModel(t *testing.T) {
+	repository := folder(t, map[string]string{
+		"a.ts": "const x = 1;\n",
+		"b.ts": strings.Repeat("// padding\n", wholeContextMaxBytes/11+1),
+	})
+	model, seen := scripted(t, finishes("Nothing to do."))
+	defer model.Close()
+	if _, _, err := run(t, repository, model, "look"); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ := json.Marshal((*seen)[0]["input"]); strings.Contains(string(encoded), "const x = 1;") {
+		t.Fatal("a project past the limit was sent whole")
 	}
 }

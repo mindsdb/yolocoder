@@ -23,7 +23,7 @@ func TestNeededWholeContextCompletionRequiresSuccessfulRepair(t *testing.T) {
 				"package.json":      `{"scripts":{"test":"node -e \"const fs=require('fs');const value=fs.readFileSync('value.ts','utf8');fs.appendFileSync('checked',value);if(!value.includes('new')){console.error('needs required value');process.exitCode=1}\""}}`,
 			}
 			if fallback {
-				files["oversized.md"] = strings.Repeat("x", prefetchMaxFileBytes+1)
+				files["oversized.md"] = strings.Repeat("x", wholeContextMaxFileBytes+1)
 			}
 			repository := folder(t, files)
 			responses := []string{

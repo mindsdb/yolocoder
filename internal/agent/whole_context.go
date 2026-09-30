@@ -14,15 +14,24 @@ import (
 )
 
 const (
-	wholeContextMaxFiles = 24
+	wholeContextMaxFiles = 40
 	// Each completed read respects the ordinary read_files path limit and
 	// consumes one of its existing calls; this does not enlarge any quota.
 	wholeContextReadFiles = 12
+	// The whole project is sent up front when it costs less than the round
+	// trip it saves. That trip is the model asking for files it could have
+	// had: measured at 6.7s on a 21-file project, for reads of files that
+	// all fit in a fraction of this. About 12k tokens; a fresh scaffold is
+	// under 20 KB, so early turns always qualify, and a project that has
+	// outgrown it goes back to the model choosing what to read.
+	wholeContextMaxBytes     = 48 << 10
+	wholeContextMaxFileBytes = 32 << 10
 )
 
 // completeWholeContext supplies all mapped, supported project text only when
-// the entire eligible set fits. It is called only for confident normal routes;
-// failure leaves read state untouched for the existing ranked prefetch.
+// the entire eligible set fits. Every turn tries it first; the edit router
+// tries it for confident normal routes. Failure leaves read state untouched
+// for whatever chooses files next, or for the model to ask.
 func (runner *Runner) completeWholeContext(ctx context.Context, session *changeSession, mapped []string) bool {
 	var paths []string
 	for _, path := range mapped {
@@ -63,7 +72,7 @@ func (runner *Runner) completeWholeContext(ctx context.Context, session *changeS
 		}
 		framed := fmt.Sprintf("--- %s ---\n%s\n", path, content)
 		total += len(framed)
-		if total > prefetchMaxBytes {
+		if total > wholeContextMaxBytes {
 			return false
 		}
 		outputs[i/wholeContextReadFiles].WriteString(framed)
@@ -139,8 +148,8 @@ func readWholeContextFile(root *os.Root, path string) (string, bool) {
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return "", false
 	}
-	content, err := io.ReadAll(io.LimitReader(file, prefetchMaxFileBytes+1))
-	if err != nil || len(content) > prefetchMaxFileBytes || !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+	content, err := io.ReadAll(io.LimitReader(file, wholeContextMaxFileBytes+1))
+	if err != nil || len(content) > wholeContextMaxFileBytes || !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
 		return "", false
 	}
 	after, ok := wholeContextFileInfo(root, path)
@@ -160,5 +169,5 @@ func wholeContextFileInfo(root *os.Root, path string) (os.FileInfo, bool) {
 			return nil, false
 		}
 	}
-	return info, info.Mode().IsRegular() && info.Size() <= prefetchMaxFileBytes
+	return info, info.Mode().IsRegular() && info.Size() <= wholeContextMaxFileBytes
 }

@@ -249,7 +249,10 @@ func TestRunnerOverChatCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	progress := &recordingProgress{}
-	outcome, err := NewRunner(client, repository).Run(context.Background(), "retitle it", nil, nil, progress)
+	// The read round is what this exercises, so the file is not preloaded.
+	runner := NewRunner(client, repository)
+	runner.preloadWhole = false
+	outcome, err := runner.Run(context.Background(), "retitle it", nil, nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}

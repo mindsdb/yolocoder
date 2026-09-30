@@ -190,7 +190,12 @@ func TestARejectedEditComesBackAsAToolResult(t *testing.T) {
 	)
 	defer server.Close()
 
-	outcome, progress, err := run(t, repository, server, "use fresh()")
+	// The file is not preloaded: what this checks is that the failure hands
+	// back a file the model has not been shown.
+	runner := NewRunner(&Client{endpoint: server.URL, apiKey: "k", model: "m", http: server.Client()}, repository)
+	runner.preloadWhole = false
+	progress := &recordingProgress{}
+	outcome, err := runner.Run(context.Background(), "use fresh()", nil, nil, progress)
 	if err != nil {
 		t.Fatal(err)
 	}

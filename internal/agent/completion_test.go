@@ -293,3 +293,17 @@ func TestNormalCompletionCancellationCannotReportSuccess(t *testing.T) {
 		})
 	}
 }
+
+// Strict tool schemas are rejected by some providers when they carry length
+// or count limits ("For 'array' type, property 'maxItems' is not
+// supported"), so every tool sent keeps its limits in descriptions and the
+// handlers instead.
+func TestStrictToolSchemasAvoidLengthLimits(t *testing.T) {
+	session := &changeSession{runner: &Runner{}, prefetched: true}
+	data, _ := json.Marshal(append(repositoryTools(true), session.tools()...))
+	for _, keyword := range []string{"maxItems", "minItems", "maxLength", "minLength", "minimum", "maximum"} {
+		if strings.Contains(string(data), `"`+keyword+`"`) {
+			t.Errorf("tool schemas use %s: %s", keyword, data)
+		}
+	}
+}

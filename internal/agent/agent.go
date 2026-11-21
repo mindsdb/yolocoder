@@ -1701,7 +1701,7 @@ func repositoryTools(recall bool) []functionTool {
 	tools := []functionTool{
 		{Type: "function", Name: "read_files", Description: "Read repository files. Give the paths you know from the map, and optionally a regular expression in matching to also read every file whose contents match it — so you do not have to search first and then read what the search found.", Strict: true, Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"paths":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 12},
+				"paths":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "At most 12 paths."},
 				"matching": map[string]any{"type": "string"},
 			}, "required": []string{"paths", "matching"}, "additionalProperties": false,
 		}},

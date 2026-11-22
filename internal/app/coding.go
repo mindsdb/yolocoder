@@ -93,8 +93,9 @@ func RunTask(ctx context.Context, task string, images []string, provider config.
 // remember saves what a run learned about the endpoint, so the next run
 // does not have to learn it again: which API it speaks (a provider saved
 // before that was recorded costs one 404 to discover, rather than one on
-// every run), and the model's reasoning levels (one listing, rather than
-// one per turn). An environment provider isn't ours to write.
+// every run), whether it needs requests streamed (learning that costs one
+// request running out its time limit), and the model's reasoning levels
+// (one listing, rather than one per turn). An environment provider isn't ours to write.
 func remember(provider config.LLM, client *agent.Client) {
 	if provider.Provider == "environment" {
 		return
@@ -102,6 +103,10 @@ func remember(provider config.LLM, client *agent.Client) {
 	changed := false
 	if provider.API != client.Dialect() {
 		provider.API = client.Dialect()
+		changed = true
+	}
+	if client.Streams() && !provider.Stream {
+		provider.Stream = true
 		changed = true
 	}
 	if efforts, defaultEffort, known := client.Efforts(); known && provider.EffortsModel != provider.Model {

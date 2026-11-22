@@ -21,6 +21,10 @@ type LLM struct {
 	// so an empty value is resolved by asking the endpoint rather than
 	// assumed.
 	API string
+	// Stream means the endpoint refused a request for not streaming
+	// (some cap how long one may run otherwise), so every request is
+	// streamed. Learned on the first refusal and kept.
+	Stream bool
 	// Recall offers the agent a tool for reading further back than the
 	// few turns it is given inline. Off by default: it is an extra tool
 	// definition on every request and an extra round trip when used, and
@@ -61,6 +65,7 @@ type settings struct {
 	BaseURL   string `json:"base_url"`
 	Model     string `json:"model,omitempty"`
 	API       string `json:"api,omitempty"`
+	Stream    bool   `json:"stream,omitempty"`
 	Recall    bool   `json:"recall,omitempty"`
 	Preselect bool   `json:"preselect,omitempty"`
 	Reasoning string `json:"reasoning,omitempty"`
@@ -114,7 +119,7 @@ func Load() (LLM, bool, error) {
 	if err := json.Unmarshal(credentialData, &secret); err != nil {
 		return LLM{}, false, fmt.Errorf("parse credentials: %w", err)
 	}
-	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Recall: saved.Recall, Preselect: saved.Preselect,
+	return LLM{Provider: saved.Provider, BaseURL: saved.BaseURL, APIKey: secret.APIKey, Model: saved.Model, API: saved.API, Stream: saved.Stream, Recall: saved.Recall, Preselect: saved.Preselect,
 		Reasoning: saved.Reasoning, Efforts: saved.Efforts, DefaultEffort: saved.DefaultEffort, EffortsModel: saved.EffortsModel}, true, nil
 }
 
@@ -130,7 +135,7 @@ func Save(provider LLM) error {
 	if err != nil {
 		return err
 	}
-	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Recall: provider.Recall, Preselect: provider.Preselect,
+	public := settings{Version: CurrentVersion, Provider: provider.Provider, BaseURL: baseURL, Model: provider.Model, API: provider.API, Stream: provider.Stream, Recall: provider.Recall, Preselect: provider.Preselect,
 		Reasoning: provider.Reasoning, Efforts: provider.Efforts, DefaultEffort: provider.DefaultEffort, EffortsModel: provider.EffortsModel}
 	if err := writeJSON(filepath.Join(dir, "config.json"), public, 0o644); err != nil {
 		return fmt.Errorf("save configuration: %w", err)

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -19,7 +20,6 @@ func (session *changeSession) timedInput(ctx context.Context, started, now time.
 		note += fmt.Sprintf(" Parent context deadline remaining: %.1f seconds.", max(0, deadline.Sub(now).Seconds()))
 	}
 	note += " Complete the requested work and signal completion when ready so the existing project check can run. Timing is not evidence that the task is complete."
-	input := make([]any, len(session.transcript), len(session.transcript)+1)
-	copy(input, session.transcript)
-	return append(input, inputMessage{Role: "user", Content: note})
+	// Clip makes append copy rather than write into the transcript's spare room.
+	return append(slices.Clip(session.transcript), inputMessage{Role: "user", Content: note})
 }

@@ -27,7 +27,15 @@ type chatRequest struct {
 	ToolChoice     string        `json:"tool_choice,omitempty"`
 	ResponseFormat *chatFormat   `json:"response_format,omitempty"`
 	// ReasoningEffort is chat completions' spelling of Responses' reasoning.effort.
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	Stream          bool               `json:"stream,omitempty"`
+	StreamOptions   *chatStreamOptions `json:"stream_options,omitempty"`
+}
+
+// chatStreamOptions asks a streamed chat completion to end with the
+// usage it would otherwise leave out.
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // Content is `any` rather than `string`: plain text marshals as a bare
@@ -108,7 +116,10 @@ type chatUsage struct {
 // tools, describing the shape in the instructions instead so the reply is
 // still JSON we can read.
 func toChat(request responseRequest, dropSchema bool) (chatRequest, error) {
-	converted := chatRequest{Model: request.Model, ToolChoice: request.ToolChoice}
+	converted := chatRequest{Model: request.Model, ToolChoice: request.ToolChoice, Stream: request.Stream}
+	if request.Stream {
+		converted.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+	}
 	if request.Reasoning != nil {
 		converted.ReasoningEffort = request.Reasoning.Effort
 	}

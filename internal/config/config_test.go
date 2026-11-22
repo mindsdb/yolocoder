@@ -15,7 +15,7 @@ func TestSaveAndLoad(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	want := LLM{Provider: "openai-compatible", BaseURL: "https://llm.example/v1/", APIKey: "secret", Model: "test-model",
+	want := LLM{Provider: "openai-compatible", BaseURL: "https://llm.example/v1/", APIKey: "secret", Model: "test-model", Stream: true,
 		Reasoning: "low", Efforts: []string{"none", "low", "high"}, DefaultEffort: "high", EffortsModel: "test-model"}
 	if err := Save(want); err != nil {
 		t.Fatal(err)

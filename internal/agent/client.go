@@ -27,6 +27,9 @@ type Client struct {
 	// dropSchema means this provider rejected response_format alongside
 	// tools, so the shape is asked for in the instructions instead.
 	dropSchema bool
+	// stream means this provider refused a request for not streaming,
+	// so every request streams from then on: see stream.go.
+	stream bool
 	// autoDialect means the saved provider didn't record which API the
 	// endpoint speaks, so a 404 on the Responses route is taken as the
 	// answer rather than an error. Configs saved before the dialect was
@@ -50,6 +53,7 @@ type responseRequest struct {
 	// Reasoning is left out, so the model's own default applies, until a
 	// turn has a reason to ask for less: see changeSession.effort.
 	Reasoning *reasoningConfig `json:"reasoning,omitempty"`
+	Stream    bool             `json:"stream,omitempty"`
 }
 
 type reasoningConfig struct {
@@ -154,6 +158,7 @@ func NewClient(provider config.LLM) (*Client, error) {
 		apiKey:      provider.APIKey,
 		model:       provider.Model,
 		autoDialect: strings.TrimSpace(provider.API) == "",
+		stream:      provider.Stream,
 		http:        http.DefaultClient,
 	}
 	if provider.API == config.APIChat {
@@ -172,6 +177,12 @@ func (client *Client) Dialect() string {
 	return config.APIResponses
 }
 
+// Streams reports whether this client has learned to stream every
+// request, which callers persist alongside the dialect.
+func (client *Client) Streams() bool {
+	return client.stream
+}
+
 func (client *Client) create(ctx context.Context, request responseRequest) (responseEnvelope, error) {
 	return client.createWithRetry(ctx, request, nil)
 }
@@ -180,6 +191,7 @@ func (client *Client) create(ctx context.Context, request responseRequest) (resp
 // Coding sessions supply it; routing and other callers stay unchanged.
 func (client *Client) createWithRetry(ctx context.Context, request responseRequest, retry func(int) bool) (responseEnvelope, error) {
 	request.Model = client.model
+	request.Stream = client.stream
 	body := any(request)
 	if client.chat {
 		converted, err := toChat(request, client.dropSchema)
@@ -235,6 +247,14 @@ func (client *Client) createWithRetry(ctx context.Context, request responseReque
 		return client.createWithRetry(ctx, request, retry)
 	}
 
+	// A provider that only lets a request run so long unless it streams
+	// says so in the error. Ask again streaming, and keep doing that.
+	if !client.stream && (response.StatusCode < 200 || response.StatusCode >= 300) && asksForStreaming(replyBody) {
+		debug.Log("STREAM", "the provider asked for streaming; streaming requests from now on")
+		client.stream = true
+		return client.createWithRetry(ctx, request, retry)
+	}
+
 	envelope, parseErr := client.decode(replyBody)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return responseEnvelope{}, client.statusError(response.StatusCode, response.Status, replyBody, envelope)
@@ -249,7 +269,12 @@ func (client *Client) createWithRetry(ctx context.Context, request responseReque
 // Transport/read errors and successful responses never grant a replay: delivery
 // is ambiguous there, or the response may already contain usable tool output.
 func (client *Client) post(ctx context.Context, payload []byte, label string, retry func(int) bool) (*http.Response, []byte, error) {
-	const responseLimit = 8 << 20
+	// A streamed reply repeats its framing around every delta, so it is
+	// given more room than the same reply sent whole.
+	responseLimit := 8 << 20
+	if client.stream {
+		responseLimit = 32 << 20
+	}
 	endpoint := client.endpoint
 	for {
 		httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -259,15 +284,29 @@ func (client *Client) post(ctx context.Context, payload []byte, label string, re
 		httpRequest.Header.Set("User-Agent", version.UserAgent())
 		httpRequest.Header.Set("Authorization", "Bearer "+client.apiKey)
 		httpRequest.Header.Set("Content-Type", "application/json")
-		httpRequest.Header.Set("Accept", "application/json")
+		if client.stream {
+			httpRequest.Header.Set("Accept", "text/event-stream, application/json")
+		} else {
+			httpRequest.Header.Set("Accept", "application/json")
+		}
 		response, err := client.http.Do(httpRequest)
 		if err != nil {
 			return nil, nil, fmt.Errorf("call LLM: %w", err)
 		}
-		replyBody, err := io.ReadAll(io.LimitReader(response.Body, responseLimit))
+		replyBody, err := io.ReadAll(io.LimitReader(response.Body, int64(responseLimit)))
 		response.Body.Close()
 		if err != nil {
 			return nil, nil, err
+		}
+		if isEventStream(response.Header.Get("Content-Type"), replyBody) {
+			if len(replyBody) >= responseLimit {
+				return nil, nil, fmt.Errorf("call LLM: the streamed reply exceeded %d bytes", responseLimit)
+			}
+			gathered, err := client.gatherStream(replyBody)
+			if err != nil {
+				return nil, nil, fmt.Errorf("call LLM: %w", err)
+			}
+			replyBody = gathered
 		}
 		debug.Log(fmt.Sprintf("RESPONSE %s (%s)", label, response.Status), string(replyBody))
 		// Reaching the read cap may hide an incomplete body, so do not replay it.

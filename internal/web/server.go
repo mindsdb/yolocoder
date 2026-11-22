@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -257,15 +258,29 @@ func Serve(ctx context.Context, provider config.LLM, port int, initialTask strin
 // terminal --web was launched from to stop it, the same words the
 // interactive terminal session already accepts, rather than needing to
 // remember Ctrl+C works here too. On a non-interactive stdin (piped,
-// redirected, /dev/null) Scan simply hits EOF right away and this
-// goroutine ends without ever calling stop.
+// redirected, /dev/null) the read hits EOF right away and this goroutine
+// ends without ever calling stop.
+//
+// Reading the terminal must never stop the server. A process that reads
+// its terminal while another process group holds it is suspended by
+// default ("zsh: suspended (tty input)"), and that took the whole web
+// server down with it. With those signals ignored the read fails instead,
+// and is tried again until this process has the terminal back.
 func watchForExit(stop context.CancelFunc) {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+	ignoreTerminalStops()
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		line, err := reader.ReadString('\n')
+		switch strings.ToLower(strings.TrimSpace(line)) {
 		case "exit", "quit", "/exit", "/quit":
 			stop()
 			return
+		}
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			time.Sleep(time.Second)
 		}
 	}
 }

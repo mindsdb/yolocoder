@@ -193,6 +193,11 @@ func (proc *process) runScript(ctx context.Context, script string) error {
 	}
 	command := exec.CommandContext(ctx, "sh", relative)
 	command.Dir = proc.root
+	// The dev server outlives this script, so it is started in its own
+	// session, away from the terminal --web runs in: nothing it or its
+	// children do can take that terminal from yolocoder or the shell.
+	// stop.sh, run on the way out, is what stops it.
+	detachFromTerminal(command)
 	// The dev server inherits our environment, plus the connected
 	// provider. Appended rather than prepended: a later entry wins, so
 	// these override an OPENAI_* already in the environment, which is

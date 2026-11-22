@@ -23,6 +23,13 @@ import (
 // The console.error wrapper forwards only what looks like a real error —
 // an Error object, or a string shaped like one — so ordinary logging,
 // HMR chatter and deprecation warnings never become chat cards.
+//
+// fetch is watched too, because an app that handles its own errors never
+// throws them anywhere: a game that caught every failed API call and showed
+// "Move could not be sent." on screen gave yolocoder nothing to offer a fix
+// for. A response of 500 or more is a server bug whatever the page does
+// with it, so it is reported with what the server said. A 4xx is left
+// alone, since "not your turn" or "room not found" is often the app working.
 const errorShim = `<script>(function(){
 function isDiagnostic(text){
   return /(?:\[violation\]|canvas2d:|willreadfrequently|requestanimationframe(?: handler)? took|forced reflow|long task)/i.test(String(text||""));
@@ -53,6 +60,23 @@ console.error=function(){
   }catch(e){}
   return origError.apply(null,arguments);
 };
+var origFetch=window.fetch;
+if(typeof origFetch==="function"){
+  window.fetch=function(input,init){
+    var url=typeof input==="string"?input:(input&&input.url)||String(input);
+    var method=((init&&init.method)||(input&&input.method)||"GET").toUpperCase();
+    return origFetch.apply(this,arguments).then(function(response){
+      if(response&&response.status>=500){
+        var failed=method+" "+url+" returned "+response.status+" "+(response.statusText||"");
+        response.clone().text().then(function(body){
+          var said=String(body||"").replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,2000);
+          report("APP_FETCH_ERROR",{message:failed.trim(),stack:said});
+        },function(){report("APP_FETCH_ERROR",{message:failed.trim(),stack:""});});
+      }
+      return response;
+    });
+  };
+}
 })();</script>`
 
 // selfHealingPage is served in place of the app whenever the dev server

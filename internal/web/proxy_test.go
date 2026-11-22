@@ -2,8 +2,10 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -79,5 +81,51 @@ func TestErrorShimFiltersBrowserDiagnostics(t *testing.T) {
 		if !strings.Contains(errorShim, marker) {
 			t.Fatalf("error shim does not filter %q diagnostics", marker)
 		}
+	}
+}
+
+// The shim runs in node against a stand-in window: a handled 500 from an
+// API call is reported with what the server said, and a 404 or a success
+// is not.
+func TestErrorShimReportsServerErrorsEvenWhenTheAppCatchesThem(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	script := strings.TrimSuffix(strings.TrimPrefix(errorShim, "<script>"), "</script>")
+	harness := `
+var posted=[];
+var window={parent:{postMessage:function(m){posted.push(m);}},addEventListener:function(){}};
+function reply(status,text,body){return {status:status,statusText:text,clone:function(){return {text:function(){return Promise.resolve(body);}};}};}
+window.fetch=function(url){
+  if(url==="/api/move") return Promise.resolve(reply(500,"Internal Server Error","<pre>TypeError: board[y] is undefined<br> at move (index.ts:12)</pre>"));
+  if(url==="/api/room") return Promise.resolve(reply(404,"Not Found","{\"error\":\"Room not found\"}"));
+  return Promise.resolve(reply(200,"OK","{}"));
+};
+` + script + `
+Promise.all([
+  window.fetch("/api/move",{method:"post"}).then(function(r){ if(r.status!==500) throw new Error("response changed"); }),
+  window.fetch("/api/room"),
+  window.fetch("/api/state"),
+]).then(function(){ setTimeout(function(){ console.log(JSON.stringify(posted)); }, 10); });
+`
+	output, err := exec.Command(node, "-e", harness).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, output)
+	}
+	var posted []struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+			Stack   string `json:"stack"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(output, &posted); err != nil {
+		t.Fatalf("decode %q: %v", output, err)
+	}
+	if len(posted) != 1 || posted[0].Type != "APP_FETCH_ERROR" ||
+		posted[0].Error.Message != "POST /api/move returned 500 Internal Server Error" ||
+		!strings.Contains(posted[0].Error.Stack, "TypeError: board[y] is undefined") || strings.Contains(posted[0].Error.Stack, "<pre>") {
+		t.Fatalf("posted = %+v, want only the 500, with the server's text and no markup", posted)
 	}
 }

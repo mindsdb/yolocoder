@@ -789,7 +789,8 @@ window.addEventListener("message", (event) => {
     !data ||
     (data.type !== "APP_RUNTIME_ERROR" &&
       data.type !== "APP_UNHANDLED_REJECTION" &&
-      data.type !== "APP_CONSOLE_ERROR")
+      data.type !== "APP_CONSOLE_ERROR" &&
+      data.type !== "APP_FETCH_ERROR")
   )
     return;
   fetch("/client-error", {

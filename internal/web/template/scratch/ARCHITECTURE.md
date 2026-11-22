@@ -42,6 +42,24 @@ real test runner once there's something worth testing that a type check
 alone won't catch; just keep `npm test` meaning something, since every
 change is checked against it.
 
+## Errors
+
+yolocoder watches this app for errors and offers to fix them: uncaught
+exceptions, unhandled rejections, `console.error(error)`, API responses of
+500 or more, and error output from the backend. An error the app catches
+and only shows on screen is invisible to it. So wherever code catches an
+error to show a message, also log it:
+
+```ts
+catch (error) {
+  console.error(error);
+  setError("Could not join the room.");
+}
+```
+
+On the backend, let unexpected errors reach Express (or log them with
+`console.error`) rather than answering 400 for a bug.
+
 ## Inference
 
 `backend/llm.ts` — text, through the ordinary OpenAI chat-completions

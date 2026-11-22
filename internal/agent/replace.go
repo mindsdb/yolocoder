@@ -76,12 +76,12 @@ func (session *changeSession) tools() []functionTool {
 		tools = append(tools, functionTool{Type: "function", Name: "replace_text", Strict: true,
 			Description: "Change short literal values in files already read. The exact combination prefix + old_text + suffix must be unique. Only old_text is replaced; anchors are preserved automatically. Use empty anchors when unnecessary. All substitutions are checked before writes. Include a closing note on the final edit; project checks still run.",
 			Parameters: objectSchema(map[string]any{
-				"edits": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "items": objectSchema(map[string]any{
+				"edits": map[string]any{"type": "array", "description": "One to eight substitutions.", "items": objectSchema(map[string]any{
 					"path":     map[string]any{"type": "string"},
-					"old_text": map[string]any{"type": "string", "minLength": 1, "maxLength": 256, "description": "Only the literal value being changed; put unchanged context in prefix/suffix."},
-					"new_text": map[string]any{"type": "string", "maxLength": 256, "description": "Only the new literal value, without the prefix/suffix anchors."},
-					"prefix":   map[string]any{"type": "string", "maxLength": 128, "description": "Exact text immediately before old_text, preserved automatically. Empty if unnecessary."},
-					"suffix":   map[string]any{"type": "string", "maxLength": 128, "description": "Exact text immediately after old_text, preserved automatically. Empty if unnecessary."},
+					"old_text": map[string]any{"type": "string", "description": "Nonempty, at most 256 characters. Only the literal value being changed; put unchanged context in prefix/suffix."},
+					"new_text": map[string]any{"type": "string", "description": "At most 256 characters. Only the new literal value, without the prefix/suffix anchors."},
+					"prefix":   map[string]any{"type": "string", "description": "At most 128 characters. Exact text immediately before old_text, preserved automatically. Empty if unnecessary."},
+					"suffix":   map[string]any{"type": "string", "description": "At most 128 characters. Exact text immediately after old_text, preserved automatically. Empty if unnecessary."},
 				}, []string{"path", "old_text", "new_text", "prefix", "suffix"})},
 				"response_comment_for_user": map[string]any{"type": "string"},
 			}, []string{"edits", "response_comment_for_user"})})
@@ -93,6 +93,9 @@ func (session *changeSession) replaceText(call responseItem) (string, []string) 
 	var args replacementArguments
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return "ERROR: invalid replacement arguments: " + err.Error(), nil
+	}
+	if len(args.Edits) == 0 || len(args.Edits) > 8 {
+		return "ERROR: give one to eight edits per call. Nothing was changed.", nil
 	}
 	edits := make([]repo.Replacement, 0, len(args.Edits))
 	for _, edit := range args.Edits {
